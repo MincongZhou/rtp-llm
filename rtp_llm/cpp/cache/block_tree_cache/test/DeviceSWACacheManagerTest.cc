@@ -255,6 +255,43 @@ TEST_F(DeviceSWACacheManagerTest, Malloc_DSV4PromptTailKeepsPenultimateBlock) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
 }
 
+TEST_F(DeviceSWACacheManagerTest, Malloc_ChunkTailBackfillsExistingSparseSlots) {
+    for (bool reusable : {false, true}) {
+        for (bool reuse_cache : {false, true}) {
+            for (int reserve_step : {0, 3}) {
+                SCOPED_TRACE(reserve_step);
+                DeviceSWACacheManager group({}, makeDsv4StateSpec(256), block_pool_, 0, 3, makePolicy(reusable));
+                BlockIds block_ids;
+                ASSERT_TRUE(group.malloc(block_ids, 1041, reuse_cache, reserve_step));
+                ASSERT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
+                for (int chunk_end : {256, 512, 1024, 1041}) {
+                    SCOPED_TRACE(chunk_end);
+                    const auto before = block_ids.blocks();
+                    std::vector<size_t> backfilled;
+                    ASSERT_TRUE(group.malloc(block_ids, chunk_end, reuse_cache, reserve_step, &backfilled));
+                    const auto& blocks = block_ids.blocks();
+                    ASSERT_EQ(blocks.size(), 5u);
+                    EXPECT_FALSE(isNullBlockIdx(blocks[static_cast<size_t>((chunk_end - 1) / 256)]));
+                    for (size_t pos = 0; pos < before.size(); ++pos) {
+                        if (!isNullBlockIdx(before[pos])) {
+                            EXPECT_EQ(blocks[pos], before[pos]);
+                        }
+                    }
+                    if (chunk_end == 256) {
+                        EXPECT_EQ(backfilled,
+                                  reserve_step == 0 ? std::vector<size_t>({0}) : std::vector<size_t>({0, 1}));
+                        if (reserve_step == 0) {
+                            EXPECT_TRUE(isNullBlockIdx(blocks[1]));
+                        }
+                    }
+                }
+                group.unreference(block_ids.blocks());
+                EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+            }
+        }
+    }
+}
+
 TEST_F(DeviceSWACacheManagerTest, Malloc_NoOpWhenEnoughBlocks) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);

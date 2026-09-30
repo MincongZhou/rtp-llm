@@ -158,9 +158,11 @@ bool SWACacheManager::malloc(BlockIds&                block_ids,
     const int  active_tail_blocks      = activeTailBlockCount();
     const int  current_blocks_len      = static_cast<int>(block_ids.blocksNum());
     const int  seq_slots               = needBlocksNum(seq_len, 0, 0);
+    const int  total_slots             = needBlocksNum(seq_len, 0, reserve_step);
     const int  new_blocks_len          = needBlocksNum(seq_len, current_blocks_len, reserve_step);
+    const bool backfill_tail           = seq_slots < current_blocks_len;
 
-    if (required_positions.empty() && new_blocks_len == 0) {
+    if (required_positions.empty() && new_blocks_len == 0 && !backfill_tail) {
         checkSWATailBlockIds(block_ids, "SWACacheManager::malloc");
         return true;
     }
@@ -174,10 +176,12 @@ bool SWACacheManager::malloc(BlockIds&                block_ids,
     };
 
     std::vector<size_t> positions_to_backfill;
-    if (!required_positions.empty()) {
+    if (!required_positions.empty() || backfill_tail) {
+        // A chunk ends before the reserved prompt tail; materialize its own active tail/checkpoints.
         const auto& existing_blocks = block_ids.blocks();
         for (int i = 0; i < current_blocks_len; ++i) {
-            if (is_required(i) && isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
+            if ((is_required(i) || (backfill_tail && i < total_slots && should_allocate(i)))
+                && isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
                 positions_to_backfill.push_back(static_cast<size_t>(i));
             }
         }

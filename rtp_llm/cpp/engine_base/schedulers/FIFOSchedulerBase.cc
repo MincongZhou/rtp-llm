@@ -38,10 +38,12 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
     max_inited_kv_cache_streams_(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
     prefill_chunk_size_(runtime_config.fifo_scheduler_config.prefill_chunk_size),
-    has_linear_attention_(std::find(model_config.hybrid_attention_config.hybrid_attention_types.begin(),
-                                    model_config.hybrid_attention_config.hybrid_attention_types.end(),
-                                    HybridAttentionType::LINEAR)
-                          != model_config.hybrid_attention_config.hybrid_attention_types.end()),
+    has_sparse_cache_groups_(std::any_of(cache_manager->cacheConfig().groups().begin(),
+                                         cache_manager->cacheConfig().groups().end(),
+                                         [](const auto& group) {
+                                             return group.policy.group_type == CacheGroupType::LINEAR
+                                                    || group.policy.group_type == CacheGroupType::SWA;
+                                         })),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {}
 
@@ -245,9 +247,9 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         }
 
         stream->setChunkSize(static_cast<int>(grant));
-        // Admission reserves the prompt, but sparse linear groups only materialize
-        // its tail. The actual grant (including a short last chunk) owns another tail.
-        if (has_linear_attention_) {
+        // Admission reserves the prompt, but sparse groups only materialize its tail.
+        // Allocate the current chunk's tail and keep earlier chunks' state intact.
+        if (has_sparse_cache_groups_) {
             const auto status = stream->incrKVBlock();
             if (!status.ok()) {
                 it = finish_invalid_stream(it,

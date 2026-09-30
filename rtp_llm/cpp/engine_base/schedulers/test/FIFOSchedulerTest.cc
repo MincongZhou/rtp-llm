@@ -4404,6 +4404,43 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
 }
 
+TEST_F(FIFOSchedulerTest, testOpaqueSwaChunksMaterializeStateWithoutLinearAttentionMetadata) {
+    ChunkSchedulerTestConfig config;
+    config.prefill_chunk_size = 4;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    auto cache_config = env.cache_manager->cacheConfig();
+    auto groups = cache_config.groups();
+    groups[0].spec = rtp_llm::test::makeResolvedOpaqueSpec(true, groups[0].tag, DataType::TYPE_FP32, 1024, 4);
+    groups[0].policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    cache_config.setTopology(std::move(groups), cache_config.topology().layers());
+    env.cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    env.resource_context.cache_manager = env.cache_manager;
+    env.resource_context.reuse_cache = false;
+    env.model_config.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    std::vector<int> prompt(18);
+    std::iota(prompt.begin(), prompt.end(), 0);
+    auto stream = env.makeStream(prompt, 4);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    const auto& tag = cache_config.groupTags()[0];
+    BlockIndicesType previous;
+    for (int offset = 0; offset < 18; offset += 4) {
+        ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {stream}, {std::min(4, 18 - offset)}));
+        const auto& blocks = stream->kvCache().blocks(0, tag);
+        ASSERT_FALSE(isNullBlockIdx(blocks[static_cast<size_t>(offset / 4)]));
+        for (size_t pos = 0; pos < previous.size(); ++pos) {
+            if (!isNullBlockIdx(previous[pos])) {
+                EXPECT_EQ(blocks[pos], previous[pos]);
+            }
+        }
+        previous = blocks;
+        stream->update(makeSingleTokenUpdate(101));
+    }
+    stream->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler.schedule().ok());
+}
+
 TEST_F(FIFOSchedulerTest, testHybridChunkGrantsMaterializeAndPreserveStateBoundaries) {
     ChunkSchedulerTestConfig config;
     config.hybrid             = true;
