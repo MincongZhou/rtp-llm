@@ -579,6 +579,7 @@ class MMProcessEngine:
         self.server_id = server_id
         self.vit_config = vit_config
         self.is_proxy_mode = is_proxy_mode
+        self._hang_debug = os.environ.get("VIT_HANG_DEBUG") == "1"
         self.contains_pos: bool = (
             model_config.mm_model_config.mm_position_ids_style != 0
         )
@@ -1484,6 +1485,19 @@ class MMProcessEngine:
                     )
                 self._raise_if_async_request_cancelled(request_id, cancellation_event)
                 feature_hashes = self._hash_key_cache.get(cache_key, entry.generation)
+                if (
+                    feature_hashes is None
+                    and self._hang_debug
+                    and self._hash_key_cache.enabled
+                ):
+                    logging.warning(
+                        "ViT hash sidecar miss: generation=%s tier=%s "
+                        "embedding_resident=%s hashes_only=%s",
+                        entry.generation,
+                        entry.tier,
+                        self._embedding_cache.peek(cache_key) is entry,
+                        hashes_only,
+                    )
                 raw_result = None
                 if not hashes_only or feature_hashes is None:
                     raw_result = entry.wait(
