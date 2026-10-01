@@ -1841,6 +1841,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("prefill_retry_times", &PDSepConfig::prefill_retry_times)
         .def_readwrite("prefill_retry_timeout_ms", &PDSepConfig::prefill_retry_timeout_ms)
         .def_readwrite("prefill_max_wait_timeout_ms", &PDSepConfig::prefill_max_wait_timeout_ms)
+        .def_readwrite("prefill_stop_stream_wait_timeout_ms", &PDSepConfig::prefill_stop_stream_wait_timeout_ms)
         .def_readwrite("decode_retry_times", &PDSepConfig::decode_retry_times)
         .def_readwrite("decode_retry_timeout_ms", &PDSepConfig::decode_retry_timeout_ms)
         .def_readwrite("decode_retry_interval_ms", &PDSepConfig::decode_retry_interval_ms)
@@ -1873,10 +1874,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.load_cache_timeout_ms,
                                       self.max_rpc_timeout_ms,
                                       self.worker_port_offset,
-                                      self.decode_entrance);
+                                      self.decode_entrance,
+                                      self.prefill_stop_stream_wait_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 20)
+                if (t.size() != 20 && t.size() != 21)
                     throw std::runtime_error("Invalid state!");
                 PDSepConfig c;
                 try {
@@ -1900,6 +1902,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.max_rpc_timeout_ms              = t[17].cast<int64_t>();
                     c.worker_port_offset              = t[18].cast<int64_t>();
                     c.decode_entrance                 = t[19].cast<bool>();
+                    if (t.size() == 21) {
+                        c.prefill_stop_stream_wait_timeout_ms = t[20].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }
