@@ -75,7 +75,7 @@ public class PlanningBench {
             for (int i = 0; i < 5; i++) {
                 endpoints.add(new RouteProjection.Inputs(new QueueSnapshot(1000, true, org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW, ORDER,
                         constraints(64), items(depth, i), null),
-                        new WorkSnapshot(1000, List.of(), List.of(), 0)));
+                        new WorkSnapshot(1000, List.of(), List.of(), 0), 0L));
             }
             var probes = new ArrayList<RouteProjection.Probe>();
             for (int i = 0; i < 64; i++) probes.add(new RouteProjection.Probe(99999, 0, 1000, 61_000,

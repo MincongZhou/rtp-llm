@@ -126,10 +126,10 @@ class OrderedRequestQueueTest {
     void readyRetryBypassesTheBlockedBacklogWithinOneScanBudget() {
         for (boolean priority : new boolean[]{false, true}) {
             var queue = new OrderedRequestQueue(priority);
-            var first = new GlobalQueueEntry(null, 50);
+            var first = new GlobalQueueEntry(null, 50, null);
             queue.add(first);
             for (int i = 1; i < 250_000; i++) {
-                queue.add(new GlobalQueueEntry(null, 50));
+                queue.add(new GlobalQueueEntry(null, 50, null));
             }
             queue.scanForPlanningCandidates(15, 30, candidate -> false);
             queue.markRequestReadyForRetry(first);
@@ -359,6 +359,6 @@ class OrderedRequestQueueTest {
     private static GlobalQueueEntry entry(int priority) {
         return new GlobalQueueEntry(
                 mock(BalanceContext.class),
-                priority);
+                priority, null);
     }
 }

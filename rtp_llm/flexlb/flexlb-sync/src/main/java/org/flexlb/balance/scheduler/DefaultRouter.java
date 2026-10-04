@@ -63,7 +63,7 @@ public class DefaultRouter {
                     Logger.debug("Failed to select {} worker for request {}", role.getCode(), context.getRequestId());
                     return switch (result.status()) {
                         case REJECTED -> PlacementResult.rejected(result.failure(), result.diagnostics());
-                        case BLOCKED -> PlacementResult.blocked(new PlacementKey(result.blocker(), group),
+                        case BLOCKED -> PlacementResult.blocked(new PlacementKey(result.blocker(), group, null),
                                 result.failure(), result.diagnostics());
                         default -> throw new IllegalStateException("unexpected selector result: " + result.status());
                     };

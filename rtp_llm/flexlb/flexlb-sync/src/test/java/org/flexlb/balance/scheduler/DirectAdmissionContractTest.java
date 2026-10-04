@@ -129,7 +129,7 @@ class DirectAdmissionContractTest {
             DecodeEndpoint.ReservationHandle occupant;
             try (var pin = fixture.decode.tryPinGeneration()) {
                 assertNotNull(pin);
-                occupant = fixture.decode.reserve(pin, 999L, 32L, 48L, 50);
+                occupant = fixture.decode.reserve(pin, 999L, 32L, 48L, 50, null);
             }
             assertNotNull(occupant);
             var acquired = fixture.decode.acquireDispatchPermit(occupant, new DecodeEndpoint.AdmissionCapacity(1L, 90L));

@@ -28,7 +28,7 @@ class PlacementAvailabilityTest {
         assertTrue(availability.lastChangedSequence(exact) > 0L);
         assertEquals(availability.lastChangedSequence(exact),
                 availability.lastChangedSequence(
-                        new PlacementKey(RoleType.PREFILL, "g1")));
+                        new PlacementKey(RoleType.PREFILL, "g1", null)));
         assertEquals(availability.lastChangedSequence(exact),
                 availability.lastChangedSequence(
                         PlacementKey.anyGroup(RoleType.PREFILL)));
@@ -71,8 +71,8 @@ class PlacementAvailabilityTest {
 
         assertEquals(2L, availability.lastChangedSequence(oldGroup));
         assertEquals(2L, availability.lastChangedSequence(newGroup));
-        assertEquals(1L, availability.lastChangedSequence(new PlacementKey(RoleType.PREFILL, "old")));
-        assertEquals(2L, availability.lastChangedSequence(new PlacementKey(RoleType.PREFILL, "new")));
+        assertEquals(1L, availability.lastChangedSequence(new PlacementKey(RoleType.PREFILL, "old", null)));
+        assertEquals(2L, availability.lastChangedSequence(new PlacementKey(RoleType.PREFILL, "new", null)));
         assertEquals(2L, availability.lastChangedSequence(PlacementKey.anyGroup(RoleType.PREFILL)));
         assertEquals(0L, availability.lastChangedSequence(
                 PlacementKey.exact(RoleType.PREFILL, "new", "127.0.0.2:8000")));
@@ -81,7 +81,7 @@ class PlacementAvailabilityTest {
     @Test
     void delayedPublisherCannotRegressGroupOrRoleVersion() {
         PlacementAvailability availability = new PlacementAvailability();
-        PlacementKey group = new PlacementKey(RoleType.PREFILL, "g1");
+        PlacementKey group = new PlacementKey(RoleType.PREFILL, "g1", null);
         PlacementKey role = PlacementKey.anyGroup(RoleType.PREFILL);
         PlacementKey olderExact = mock(PlacementKey.class);
         PlacementKey newerExact = PlacementKey.exact(RoleType.PREFILL, "g1", "127.0.0.2:8000");

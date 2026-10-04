@@ -66,14 +66,14 @@ class RouteDeliveryStrategyTest {
         try {
             DecodeEndpoint.ReservationHandle occupying;
             try (var pin = endpoint.tryPinGeneration()) {
-                occupying = endpoint.reserve(pin, 1L, 0L, 0L, 50);
+                occupying = endpoint.reserve(pin, 1L, 0L, 0L, 50, null);
             }
             var permit = endpoint.acquireDispatchPermit(occupying, capacity).permit();
             for (int i = 0; i < 2; i++) {
                 long requestId = i + 2L;
                 var item = mock(RequestRoute.class);
                 try (var pin = endpoint.tryPinGeneration()) {
-                    when(item.decodeReservation()).thenReturn(endpoint.reserve(pin, requestId, 0L, 0L, 50));
+                    when(item.decodeReservation()).thenReturn(endpoint.reserve(pin, requestId, 0L, 0L, 50, null));
                 }
                 when(item.requestId()).thenReturn(requestId);
                 when(item.decodeEp()).thenReturn(endpoint);
@@ -233,7 +233,7 @@ class RouteDeliveryStrategyTest {
         try {
             DecodeEndpoint.ReservationHandle reservation;
             try (var pin = endpoint.tryPinGeneration()) {
-                reservation = endpoint.reserve(pin, 1L, 100L, 200L, 50);
+                reservation = endpoint.reserve(pin, 1L, 100L, 200L, 50, null);
             }
             var acquired = endpoint.acquireDispatchPermit(reservation, capacity);
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
@@ -263,7 +263,7 @@ class RouteDeliveryStrategyTest {
                 } else {
                     assertTrue(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK).released());
                     try (var pin = endpoint.tryPinGeneration()) {
-                        reservation = endpoint.reserve(pin, 1L, 100L, 200L, 50);
+                        reservation = endpoint.reserve(pin, 1L, 100L, 200L, 50, null);
                     }
                 }
                 replacement = endpoint.acquireDispatchPermit(reservation, capacity).permit();

@@ -265,7 +265,7 @@ class DecodeStateTest {
         try {
             DecodeEndpoint.ReservationHandle reservation;
             try (var pin = owner.tryPinGeneration()) {
-                reservation = owner.reserve(pin, 3, 100, 200, 50);
+                reservation = owner.reserve(pin, 3, 100, 200, 50, null);
             }
             var permit = owner.acquireDispatchPermit(reservation, CAPACITY).permit();
             assertThrows(IllegalArgumentException.class, () -> other.dispatch(permit, DispatchOutcome.ENGINE_OWNED));

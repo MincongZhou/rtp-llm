@@ -576,10 +576,6 @@ public class BalanceContext {
         return reason == CancelReason.DEADLINE_EXCEEDED ? StrategyErrorType.BATCH_SLO_EXPIRED : StrategyErrorType.REQUEST_CANCELLED;
     }
 
-    boolean canClaimLocalTerminalLocked() {
-        return this.canClaimLocalTerminalLocked(false);
-    }
-
     boolean canClaimLocalTerminalLocked(boolean queuedExternalCancel) {
         this.requireSlotLock("local terminal eligibility");
         return this.ownsActiveGenerationLocked() && (!this.future().isDone() || queuedExternalCancel && this.future().isCancelled()) && admission == null && preemption == null && !this.decodeAccepted && !this.deliveryAcknowledged && !this.deliveryClaimKind().isClaimed();

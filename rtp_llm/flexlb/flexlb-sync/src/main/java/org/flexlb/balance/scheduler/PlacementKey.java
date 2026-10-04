@@ -10,10 +10,6 @@ import java.util.Objects;
  */
 public record PlacementKey(RoleType role, String group, String endpoint) {
 
-    public PlacementKey(RoleType role, String group) {
-        this(role, group, null);
-    }
-
     public PlacementKey {
         Objects.requireNonNull(role, "role");
         if (group != null && group.isBlank()) {
@@ -30,7 +26,7 @@ public record PlacementKey(RoleType role, String group, String endpoint) {
     }
 
     public static PlacementKey anyGroup(RoleType role) {
-        return new PlacementKey(role, null);
+        return new PlacementKey(role, null, null);
     }
 
     public static PlacementKey exact(

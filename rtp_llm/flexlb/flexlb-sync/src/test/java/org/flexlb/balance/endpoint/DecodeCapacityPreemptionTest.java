@@ -1,5 +1,7 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
+
 import org.flexlb.config.FlexlbConfig;
 import static org.flexlb.balance.scheduler.SchedulingTestConfig.decodeRequirements;
 import org.flexlb.balance.eviction.DecodeEvictionProposal;
@@ -36,7 +38,7 @@ class DecodeCapacityPreemptionTest {
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
             victim = endpoint.reserveUnqueued(pin, 1L, 100L, 200L, 30);
-            var reservation = endpoint.reserve(pin, 9L, hardKvTokens, expectedKvTokens, 70);
+            var reservation = endpoint.reserve(pin, 9L, hardKvTokens, expectedKvTokens, 70, null);
             assertNotNull(reservation);
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
                     endpoint.acquireDispatchPermit(reservation, policy).status());
@@ -44,7 +46,7 @@ class DecodeCapacityPreemptionTest {
         }
         var view = endpoint.routingView();
         assertTrue(view.realKvAvailable() >= hardKvTokens);
-        assertFalse(policy.evaluate(view.dispatchUsage(), hardKvTokens, expectedKvTokens).fits());
+        assertFalse(policy.evaluate(view.dispatchUsage(), hardKvTokens, expectedKvTokens, CapacityRelease.NONE).fits());
         DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_ENGINE_OWNED);
         assertEquals(DecodeEvictionProposal.CASE_KV, proposal.evictionCase());
         assertEquals(List.of(1L), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
@@ -64,11 +66,11 @@ class DecodeCapacityPreemptionTest {
         long expectedKvTokens = 100L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserve(pin, 1L, 100L, 200L, 30);
+            victim = endpoint.reserve(pin, 1L, 100L, 200L, 30, null);
             assertNull(endpoint.reserve(pin, 9L, hardKvTokens, expectedKvTokens, 70, policy));
         }
         // The same queued reservation remains soft for ordinary Engine dispatch.
-        assertTrue(policy.evaluate(endpoint.routingView().dispatchUsage(), hardKvTokens, expectedKvTokens).fits());
+        assertTrue(policy.evaluate(endpoint.routingView().dispatchUsage(), hardKvTokens, expectedKvTokens, CapacityRelease.NONE).fits());
         DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
         assertNotNull(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
@@ -84,7 +86,7 @@ class DecodeCapacityPreemptionTest {
         long expectedKvTokens = 200L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserve(pin, 1L, 0L, 900L, 30);
+            victim = endpoint.reserve(pin, 1L, 0L, 900L, 30, null);
         }
         DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(List.of(1L), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());

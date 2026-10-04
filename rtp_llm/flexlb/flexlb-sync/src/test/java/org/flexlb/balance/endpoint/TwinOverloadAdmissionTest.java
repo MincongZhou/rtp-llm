@@ -152,7 +152,7 @@ class TwinOverloadAdmissionTest {
         for (long id = 1; id <= 9; id++) {
             try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
                 assertNotNull(pin);
-                assertNotNull(endpoint.reserve(pin, id, 128L, 256L, 50));
+                assertNotNull(endpoint.reserve(pin, id, 128L, 256L, 50, null));
             }
         }
         for (long id = 1; id <= 8; id++) {

@@ -1172,7 +1172,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 return null;
             }
             boolean admissionPending = ctx.admission() != null && ctx.ownsActiveGenerationLocked() && !ctx.future().isDone() && ctx.preemption() == null && !ctx.decodeAccepted() && !ctx.deliveryClaimKind().isClaimed();
-            if (!(ctx.canClaimLocalTerminalLocked() || admissionPending) || ctx.selectedResponse() != null || ctx.cancellationReason() == CancelReason.DEADLINE_EXCEEDED) {
+            if (!(ctx.canClaimLocalTerminalLocked(false) || admissionPending) || ctx.selectedResponse() != null || ctx.cancellationReason() == CancelReason.DEADLINE_EXCEEDED) {
                 return false;
             }
             permit = requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL);
@@ -1211,7 +1211,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     private PublicationPermit terminateLocallyAndAcquirePublication(BalanceContext ctx, TerminalOutcome transition) {
         TerminalAction action;
         synchronized (ctx) {
-            if (ctx.selectedResponse() != null || ctx.cancellationReason() != null || !ctx.canClaimLocalTerminalLocked() || transition.phase() == RequestState.Phase.COMPLETED && ctx.deliveryClaimKind() == DeliveryClaimKind.NONE) {
+            if (ctx.selectedResponse() != null || ctx.cancellationReason() != null || !ctx.canClaimLocalTerminalLocked(false) || transition.phase() == RequestState.Phase.COMPLETED && ctx.deliveryClaimKind() == DeliveryClaimKind.NONE) {
                 return null;
             }
             action = ctx.claimFinalizationLocked(null, transition, null, true, () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));

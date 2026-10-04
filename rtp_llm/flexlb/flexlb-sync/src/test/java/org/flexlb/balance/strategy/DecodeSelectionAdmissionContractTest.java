@@ -1,5 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -153,8 +155,8 @@ class DecodeSelectionAdmissionContractTest {
             long expectedKv = dimension == CapacityDimension.EXPECTED_KV ? 400L : 0L;
             try (WorkerEndpoint.GenerationPin pin = queued.tryPinGeneration()) {
                 assertNotNull(pin);
-                assertNotNull(queued.reserve(pin, 1L, 0L, expectedKv, 50));
-                assertNotNull(queued.reserve(pin, 2L, 0L, expectedKv, 50));
+                assertNotNull(queued.reserve(pin, 1L, 0L, expectedKv, 50, null));
+                assertNotNull(queued.reserve(pin, 2L, 0L, expectedKv, 50, null));
             }
         }
 
@@ -176,10 +178,10 @@ class DecodeSelectionAdmissionContractTest {
         }
 
         private void assertPlacementAndDispatchDisagree() {
-            assertTrue(limits.evaluate(queued.routingView().dispatchUsage(), PROMPT_TOKENS, EXPECTED_TOKENS).fits());
-            assertFalse(limits.evaluate(queued.routingView().placementUsage(), PROMPT_TOKENS, EXPECTED_TOKENS).fits());
-            assertTrue(limits.evaluate(free.routingView().dispatchUsage(), PROMPT_TOKENS, EXPECTED_TOKENS).fits());
-            assertTrue(limits.evaluate(free.routingView().placementUsage(), PROMPT_TOKENS, EXPECTED_TOKENS).fits());
+            assertTrue(limits.evaluate(queued.routingView().dispatchUsage(), PROMPT_TOKENS, EXPECTED_TOKENS, CapacityRelease.NONE).fits());
+            assertFalse(limits.evaluate(queued.routingView().placementUsage(), PROMPT_TOKENS, EXPECTED_TOKENS, CapacityRelease.NONE).fits());
+            assertTrue(limits.evaluate(free.routingView().dispatchUsage(), PROMPT_TOKENS, EXPECTED_TOKENS, CapacityRelease.NONE).fits());
+            assertTrue(limits.evaluate(free.routingView().placementUsage(), PROMPT_TOKENS, EXPECTED_TOKENS, CapacityRelease.NONE).fits());
         }
 
         private void assertSelectionHasNoReservation(long requestId,

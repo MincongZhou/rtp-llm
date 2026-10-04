@@ -148,7 +148,7 @@ class TransientCapacityQueueContractTest {
             DecodeEndpoint.ReservationHandle settled;
             try (WorkerEndpoint.GenerationPin pin =
                          fixture.decodeEndpoint.tryPinGeneration()) {
-                settled = fixture.decodeEndpoint.reserve(pin, requestId, 128L, 136L, 50);
+                settled = fixture.decodeEndpoint.reserve(pin, requestId, 128L, 136L, 50, null);
             }
             assertTrue(fixture.decodeEndpoint.release(settled, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
             assertEquals(0, fixture.totalDecodeReservations());

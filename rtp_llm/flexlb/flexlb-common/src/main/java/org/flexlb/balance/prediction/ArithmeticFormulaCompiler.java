@@ -26,10 +26,6 @@ final class ArithmeticFormulaCompiler {
     private final boolean objectBindings;
     private int nextLocal = 3; // this, scalar variables, batch items
 
-    private ArithmeticFormulaCompiler(MethodVisitor method) {
-        this(method, false);
-    }
-
     private ArithmeticFormulaCompiler(MethodVisitor method, boolean objectBindings) {
         this.method = method;
         this.objectBindings = objectBindings;
@@ -94,8 +90,8 @@ final class ArithmeticFormulaCompiler {
 
             MethodVisitor append = writer.visitMethod(ACC_PUBLIC, "append", "([D[D)V", null, null);
             append.visitCode();
-            var compiler = new ArithmeticFormulaCompiler(append);
-            Scope item = new Scope(1, -1);
+            var compiler = new ArithmeticFormulaCompiler(append, false);
+            Scope item = new Scope(1, -1, false);
             for (var entry : aggregates.entrySet()) {
                 append.visitVarInsn(ALOAD, 2);
                 append.visitLdcInsn(entry.getValue());
@@ -109,8 +105,8 @@ final class ArithmeticFormulaCompiler {
 
             MethodVisitor evaluate = writer.visitMethod(ACC_PUBLIC, "evaluate", "([D[D)D", null, null);
             evaluate.visitCode();
-            compiler = new ArithmeticFormulaCompiler(evaluate);
-            Scope batch = new Scope(1, -1);
+            compiler = new ArithmeticFormulaCompiler(evaluate, false);
+            Scope batch = new Scope(1, -1, false);
             for (var entry : aggregates.entrySet()) {
                 evaluate.visitVarInsn(ALOAD, 2);
                 evaluate.visitLdcInsn(entry.getValue());
@@ -141,7 +137,7 @@ final class ArithmeticFormulaCompiler {
     }
 
     private void expression(Node root) {
-        Scope outer = new Scope(1, 2);
+        Scope outer = new Scope(1, 2, false);
         Map<AggregateFuncNode, Integer> aggregates = new LinkedHashMap<>();
         collectAggregates(root, aggregates, new HashSet<>());
         if (aggregates.size() > 1) {
@@ -211,7 +207,7 @@ final class ArithmeticFormulaCompiler {
         method.visitLabel(done);
         method.visitJumpInsn(GOTO, end);
         method.visitLabel(scalar);
-        Scope scalarScope = new Scope(outer.vars, -1);
+        Scope scalarScope = new Scope(outer.vars, -1, false);
         for (var entry : aggregates.entrySet()) {
             emit(entry.getKey().arg(), scalarScope);
             method.visitVarInsn(DSTORE, entry.getValue());
@@ -293,10 +289,6 @@ final class ArithmeticFormulaCompiler {
         private final int items;
         private final boolean objectBindings;
         private final Map<Node, Integer> locals = new HashMap<>();
-
-        private Scope(int vars, int items) {
-            this(vars, items, false);
-        }
 
         private Scope(int vars, int items, boolean objectBindings) {
             this.vars = vars;

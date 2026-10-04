@@ -101,7 +101,7 @@ class IncrementalPredictionTest {
             items.sort(order);
             var queue = new QueueSnapshot(1000, true, org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW, order,
                     new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700), items, null);
-            var inputs = new RouteProjection.Inputs(queue, new WorkSnapshot(1000, List.of(), List.of(), 0));
+            var inputs = new RouteProjection.Inputs(queue, new WorkSnapshot(1000, List.of(), List.of(), 0), 0L);
             var probe = new RouteProjection.Probe(999, trial % 5, 1000, 100_000,
                     1 + random.nextInt(32768), 0, 0);
             assertEquals(RouteProjection.project(inputs, probe, full, policy),

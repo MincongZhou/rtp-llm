@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -130,7 +132,7 @@ class PrefillCompletionProjectionTest {
             }
             assertEquals(decodeAlreadyAccepted ? 0L : 32L, decode.routingView().inflightExpectedKv(),
                     "missing Decode acceptance must retain this request's reservation");
-            assertTrue(capacity.evaluate(decode.routingView().dispatchUsage(), 16L, 32L).fits(),
+            assertTrue(capacity.evaluate(decode.routingView().dispatchUsage(), 16L, 32L, CapacityRelease.NONE).fits(),
                     "a suspected lost request must not isolate a worker with available capacity");
             try (var pin = decode.tryPinGeneration()) {
                 var waiting = decode.reserve(pin, 102L, 16L, 32L, 50, capacity);

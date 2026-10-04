@@ -64,7 +64,7 @@ public class FlexlbGrpcForwarder {
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request) {
         ForwardGuard guard = applyForwardGuard(
                 request.getRequestId(), request.getForwardHop(),
-                ForwardOperation.SCHEDULE);
+                ForwardOperation.SCHEDULE, lbStatusConsistencyService.getMasterHostIpPort());
         if (guard.blocked()) {
             return CompletableFuture.completedFuture(MasterForwardResult.blocked(
                     guard.blockReason().failureCode(),
@@ -154,14 +154,9 @@ public class FlexlbGrpcForwarder {
     public CompletionStage<CancelForwardResult> forwardCancelToMaster(
             FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
         ForwardGuard guard = applyForwardGuard(
-                request.getRequestId(), request.getForwardHop(), ForwardOperation.CANCEL);
+                request.getRequestId(), request.getForwardHop(),
+                ForwardOperation.CANCEL, lbStatusConsistencyService.getMasterHostIpPort());
         return forwardCancel(request, guard, null, entryTraceContext());
-    }
-
-    public CompletionStage<CancelForwardResult> forwardCompensatingCancelToMaster(
-            FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
-            String originalMasterHostIpPort) {
-        return forwardCompensatingCancelToMaster(request, originalMasterHostIpPort, entryTraceContext());
     }
 
     public CompletionStage<CancelForwardResult> forwardCompensatingCancelToMaster(
@@ -175,13 +170,6 @@ public class FlexlbGrpcForwarder {
     }
 
     CompletionStage<CancelForwardResult> forwardCompensatingCancelToMaster(
-            FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
-            String originalMasterHostIpPort,
-            long timeoutMs) {
-        return forwardCompensatingCancelToMaster(request, originalMasterHostIpPort, timeoutMs, entryTraceContext());
-    }
-
-    private CompletionStage<CancelForwardResult> forwardCompensatingCancelToMaster(
             FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
             String originalMasterHostIpPort,
             long timeoutMs,
@@ -388,7 +376,7 @@ public class FlexlbGrpcForwarder {
             FlexlbScheduleProtocol.GetRequestStateRequestPB request) {
         ForwardGuard guard = applyForwardGuard(
                 request.getRequestId(), request.getForwardHop(),
-                ForwardOperation.STATE_QUERY);
+                ForwardOperation.STATE_QUERY, lbStatusConsistencyService.getMasterHostIpPort());
         if (guard.blocked()) {
             return null;
         }
@@ -503,14 +491,6 @@ public class FlexlbGrpcForwarder {
                     .asRuntimeException();
         }
         return channel;
-    }
-
-    private ForwardGuard applyForwardGuard(
-            long requestId,
-            int encodedHop,
-            ForwardOperation operation) {
-        return applyForwardGuard(requestId, encodedHop, operation,
-                lbStatusConsistencyService.getMasterHostIpPort());
     }
 
     private ForwardGuard applyForwardGuard(

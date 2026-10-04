@@ -12,12 +12,6 @@ final class GlobalQueueEntry {
     GlobalQueueEntry previous;
     GlobalQueueEntry next;
 
-    GlobalQueueEntry(
-            BalanceContext context,
-            int priority) {
-        this(context, priority, null);
-    }
-
     GlobalQueueEntry(BalanceContext context,
             int priority, String routingGroup) {
         this.context = context;

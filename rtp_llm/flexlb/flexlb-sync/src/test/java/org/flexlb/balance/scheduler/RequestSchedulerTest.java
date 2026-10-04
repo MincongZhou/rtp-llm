@@ -447,7 +447,7 @@ class RequestSchedulerTest {
         when(lifecycle.claimAdmissionHandle(910002L, second)).thenReturn(mock(AdmissionHandle.class));
         when(router.resolvePolicyGroup(unavailable)).thenReturn("unavailable-group");
         when(router.resolvePolicyGroup(healthy)).thenReturn(healthyGroup);
-        when(router.select(unavailable, "unavailable-group")).thenReturn(PlacementResult.blocked(new PlacementKey(RoleType.DECODE, "unavailable-group")));
+        when(router.select(unavailable, "unavailable-group")).thenReturn(PlacementResult.blocked(new PlacementKey(RoleType.DECODE, "unavailable-group", null)));
         ProvisionalRoute healthyRoute = mock(ProvisionalRoute.class);
         when(router.select(healthy, healthyGroup)).thenReturn(PlacementResult.success(healthyRoute));
         org.mockito.Mockito.doReturn(PlacementResult.success(mock(RequestRoute.class))).when(RequestProtocolTestSupport.publication(lifecycle)).enqueueRoute(healthy, healthyRoute);
@@ -789,7 +789,7 @@ class RequestSchedulerTest {
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000).times(1)).enqueueRoute(blocked, blockedRoute);
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000)).enqueueRoute(independent, independentRoute);
             assertFalse(blockedFuture.isDone());
-            availability.changed(new PlacementKey(RoleType.PREFILL, "g1"));
+            availability.changed(new PlacementKey(RoleType.PREFILL, "g1", null));
             assertFalse(blockedRouteAttempts.await(100, TimeUnit.MILLISECONDS), "a group-wide edge must not release an exact endpoint blocker");
             availability.changed(exactBlocker);
             assertTrue(blockedRouteAttempts.await(1, TimeUnit.SECONDS));

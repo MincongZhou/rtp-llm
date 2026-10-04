@@ -12439,3 +12439,13 @@ FlexlbServiceImpl 的 completeOnce 从四个实现/转发入口收成一个：�
 - Three reviewers passed. All source hashes matched before applying the changes. Initial isolated builds lacked external proto files; copying the complete proto directory resolved this and clean test succeeded.
 - No new remote performance run this round. The 750P/750D evidence in evidence/fleet-750-comparison-2026-10-04.json still describes Round 257.
 - Snapshot, patch, hashes and actual XML summaries: /tmp/flexlb-converge270. Commit scope: FlexLB and the required model_rpc_service.proto definitions; other C++ implementation changes are preserved.
+
+
+## Round 271 - Remove redundant overloads (2026-10-04)
+
+- AST scan of production Java found 100 overload groups and 69 same-name delegating wrappers. Removed 19 wrappers and migrated 110 call sites to the original defaults; no methods were added. Kept constructors used for Spring injection or clock control, distinct protocol entry points and allocation-saving prediction variants.
+- Removed Forwarder default-context/guard wrappers, compiler default-binding constructors, Context terminal-eligibility wrapper, Prefill default membership/exclusion wrappers, Decode default reservation/release wrappers, queue/key/projection default constructors and an unused blocked-result factory. LoadClient now has one Config constructor and one TraceRecord constructor; historical constructor chains and their sole-use comments are gone.
+- Production net deletion: 170 lines (API 20, common 8, sync 41, mock-engine 101). Sync production Java now totals 25,552 physical lines; 552 remain to the original 25,000 target.
+- Full common/cache/grpc/sync: 1,888 tests passed. Eight API classes: 116 passed. Seven LoadClient classes: 46 passed. All have zero failures/errors/skips. Changed benchmark callers plus SnapshotBench compiled; no performance benchmark was run locally.
+- All three reviews passed. Exact state identities, locks, argument-evaluation order, default values, cleanup and real request/transport interfaces are preserved. Removed public Java helpers have no remaining callers in the repository. Other C++ working changes were hash-checked and preserved.
+- Evidence: /tmp/flexlb-overloads271/{methods.jsonl,methods-after.jsonl,removed-methods.json,updated-calls.json,candidate.patch,full-test-summary.json,api-mock-test-summary.json,tool-compile.log}.

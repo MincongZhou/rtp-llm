@@ -54,7 +54,7 @@ public final class EvictionPlanner {
     /** The same capacity decision labels both ordinary admission and eviction planning. */
     public static String decodeEvictionCase(RequestRequirements request, ResourceSnapshot ep) {
         CapacityDeficit deficit = request.capacity().evaluate(
-                ep.routing().placementUsage(), request.hardKvTokens(), request.expectedKvTokens());
+                ep.routing().placementUsage(), request.hardKvTokens(), request.expectedKvTokens(), CapacityRelease.NONE);
         if (deficit.requests() > 0L && deficit.needsKv()) {
             return DecodeEvictionProposal.CASE_SLOT_AND_KV;
         }
@@ -86,7 +86,7 @@ public final class EvictionPlanner {
             RequestRequirements request, ResourceSnapshot ep, PreemptionConfig preemption,
             boolean engineCancelSupported, Map<String, String> failures) {
         CapacityDeficit deficit = request.capacity().evaluate(
-                ep.routing().placementUsage(), request.hardKvTokens(), request.expectedKvTokens());
+                ep.routing().placementUsage(), request.hardKvTokens(), request.expectedKvTokens(), CapacityRelease.NONE);
         if (deficit.fits()) {
             failures.put(ep.routing().address(), "decode_capacity_sufficient");
             return null;

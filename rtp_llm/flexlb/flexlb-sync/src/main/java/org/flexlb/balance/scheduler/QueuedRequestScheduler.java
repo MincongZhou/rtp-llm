@@ -210,7 +210,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     }
 
     void signalControl(BalanceContext context) {
-        postEvent(new QueueEvent(EventKind.CONTROL, new GlobalQueueEntry(context, 0), null), false);
+        postEvent(new QueueEvent(EventKind.CONTROL, new GlobalQueueEntry(context, 0, null), null), false);
     }
 
     private void consumeEventsUnderLock() {

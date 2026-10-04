@@ -404,7 +404,7 @@ class DefaultRouterTest {
             verify(decode).shouldRetryDispatch(701L, frozen.capacity());
             verify(decode).acquireDispatchPermit(reservation, frozen.capacity());
             verify(decode).reserve(any(), eq(701L), eq(hardKv), eq(expectedKv), eq(73), eq(frozen.capacity()));
-            verify(decode, never()).reserve(any(), anyLong(), anyLong(), anyLong(), anyInt());
+            verify(decode, never()).reserve(any(), anyLong(), anyLong(), anyLong(), anyInt(), isNull());
         }
         verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
     }
@@ -509,7 +509,7 @@ class DefaultRouterTest {
         PlacementResult<ProvisionalRoute, PlacementKey> blocked = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
 
-        assertEquals(new PlacementKey(role, null), blocked.blocker());
+        assertEquals(new PlacementKey(role, null, null), blocked.blocker());
     }
 
     @Test
@@ -524,7 +524,7 @@ class DefaultRouterTest {
         PlacementResult<ProvisionalRoute, PlacementKey> blocked = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
 
-        assertEquals(new PlacementKey(RoleType.DECODE, null),
+        assertEquals(new PlacementKey(RoleType.DECODE, null, null),
                 blocked.blocker());
     }
 
@@ -679,7 +679,7 @@ class DefaultRouterTest {
         PlacementResult<ProvisionalRoute, PlacementKey> blocked = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
 
-        assertEquals(new PlacementKey(RoleType.VIT, "g1"),
+        assertEquals(new PlacementKey(RoleType.VIT, "g1", null),
                 blocked.blocker());
         verify(prefill.selection).close();
     }
@@ -702,7 +702,7 @@ class DefaultRouterTest {
         PlacementResult<ProvisionalRoute, PlacementKey> blocked = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
 
-        assertEquals(new PlacementKey(RoleType.DECODE, "g1"),
+        assertEquals(new PlacementKey(RoleType.DECODE, "g1", null),
                 blocked.blocker());
         verify(prefill.selection).close();
         verify(prefill.selection, never()).transferToRoute();

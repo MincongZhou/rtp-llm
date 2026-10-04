@@ -53,10 +53,6 @@ public record PlacementResult<V, B>(
     }
 
     /** A retryable block retains the failure observed by the same decision. */
-    public static <V, B> PlacementResult<V, B> blocked(B blocker, Response failure) {
-        return blocked(blocker, failure, null);
-    }
-
     public static <V, B> PlacementResult<V, B> blocked(
             B blocker, Response failure, Map<String, Object> diagnostics) {
         return new PlacementResult<>(Status.BLOCKED, null, failure,

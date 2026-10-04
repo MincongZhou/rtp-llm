@@ -323,10 +323,6 @@ public final class PrefillState {
         private long phaseBaseMs;
         private BatchWork batchWork;
         private Reservation reservation;
-        private RequestEntry(RequestRoute item) {
-            this(item, QueueMembership.WAITING);
-        }
-
         private RequestEntry(RequestRoute item, QueueMembership queueMembership) {
             this.requestId = item.requestId();
             this.queueMembership = queueMembership;
@@ -631,7 +627,7 @@ public final class PrefillState {
                 || (maxOutstandingRequests > 0L && !canAcceptRequestUnderLock(maxOutstandingRequests))) {
             return false;
         }
-        RequestEntry entry = new RequestEntry(item);
+        RequestEntry entry = new RequestEntry(item, QueueMembership.WAITING);
         requests.put(item.requestId(), entry);
         try {
             activeIndex.add(item);
@@ -1643,7 +1639,7 @@ public final class PrefillState {
         WorkCapture capture;
         lock.lock();
         try {
-            capture = captureCurrentWorkUnderLock(clock.getAsLong());
+            capture = captureCurrentWorkUnderLock(clock.getAsLong(), Set.of());
         } finally {
             lock.unlock();
         }
@@ -1653,7 +1649,7 @@ public final class PrefillState {
     private WorkCapture captureWorkUnderLock(long nowMs) {
         requireLock();
         if (committedWorkCapture == null || committedWorkCapture.capturedAtMs > nowMs) {
-            committedWorkCapture = captureCurrentWorkUnderLock(nowMs);
+            committedWorkCapture = captureCurrentWorkUnderLock(nowMs, Set.of());
         }
         return committedWorkCapture;
     }
@@ -1665,10 +1661,6 @@ public final class PrefillState {
             excluded.add(requests.get(member.requestId()));
         }
         return captureCurrentWorkUnderLock(nowMs, excluded);
-    }
-
-    private WorkCapture captureCurrentWorkUnderLock(long nowMs) {
-        return captureCurrentWorkUnderLock(nowMs, Set.of());
     }
 
     private WorkCapture captureCurrentWorkUnderLock(long nowMs, Set<RequestEntry> excluded) {

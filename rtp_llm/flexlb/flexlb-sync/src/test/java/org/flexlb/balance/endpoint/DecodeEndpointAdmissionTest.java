@@ -1,5 +1,7 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
+
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.dao.master.TaskInfo;
@@ -105,7 +107,7 @@ class DecodeEndpointAdmissionTest {
         try (WorkerEndpoint.GenerationPin pin =
                      exactEndpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            speculative = exactEndpoint.reserve(pin, 11L, 100L, 110L, 10);
+            speculative = exactEndpoint.reserve(pin, 11L, 100L, 110L, 10, null);
         }
         exactEndpoint.release(speculative, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         verify(availability).changed(
@@ -115,7 +117,7 @@ class DecodeEndpointAdmissionTest {
         try (WorkerEndpoint.GenerationPin pin =
                      exactEndpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            published = exactEndpoint.reserve(pin, 12L, 100L, 110L, 10);
+            published = exactEndpoint.reserve(pin, 12L, 100L, 110L, 10, null);
         }
         exactEndpoint.release(published, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         verify(availability, times(2)).changed(
@@ -863,7 +865,7 @@ class DecodeEndpointAdmissionTest {
                     start.await();
                     DecodeEndpoint.ReservationHandle reservation;
                     try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-                        reservation = endpoint.reserve(pin, requestId, 100L, 3000L, 50);
+                        reservation = endpoint.reserve(pin, requestId, 100L, 3000L, 50, null);
                     }
                     assertNotNull(reservation);
                     var acquired = endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.AdmissionCapacity(8L, 90L));
@@ -1048,7 +1050,7 @@ class DecodeEndpointAdmissionTest {
                         "Decode endpoint generation is retired");
             }
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserve(pin, requestId, hardKv, expectedKv, priority);
+                    endpoint.reserve(pin, requestId, hardKv, expectedKv, priority, null);
             reservations.put(requestId, reservation);
             return reservation;
         }
@@ -1146,7 +1148,7 @@ class DecodeEndpointAdmissionTest {
         var capacity = new DecodeEndpoint.AdmissionCapacity(0L, 90L);
         var usage = new DecodeEndpoint.CapacityUsage(2L, 1000L, 150L, 200L, 850L);
         assertEquals(new DecodeEndpoint.CapacityDeficit(0L, 150L, 150L),
-                capacity.evaluate(usage, 100L, 200L));
+                capacity.evaluate(usage, 100L, 200L, CapacityRelease.NONE));
         assertEquals(new DecodeEndpoint.CapacityDeficit(0L, 100L, 0L),
                 capacity.evaluate(usage, 100L, 200L, new DecodeEndpoint.CapacityRelease(1L, 50L, 200L)));
         assertTrue(capacity.evaluate(usage, 100L, 200L,
@@ -1166,7 +1168,7 @@ class DecodeEndpointAdmissionTest {
         var capacity = new DecodeEndpoint.AdmissionCapacity(Long.MAX_VALUE, 100L);
         var usage = new DecodeEndpoint.CapacityUsage(Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE,
                 0L, Long.MAX_VALUE);
-        assertEquals(new DecodeEndpoint.CapacityDeficit(1L, 0L, 1L), capacity.evaluate(usage, 0L, 1L));
+        assertEquals(new DecodeEndpoint.CapacityDeficit(1L, 0L, 1L), capacity.evaluate(usage, 0L, 1L, CapacityRelease.NONE));
         assertEquals(Long.MAX_VALUE / 100L * 90L + Long.MAX_VALUE % 100L * 90L / 100L,
                 new DecodeEndpoint.AdmissionCapacity(0L, 90L).kvBudget(Long.MAX_VALUE));
     }
@@ -1176,7 +1178,7 @@ class DecodeEndpointAdmissionTest {
         var usage = new DecodeEndpoint.CapacityUsage(0L, 0L, 0L, 0L, 0L);
         for (long percent : new long[]{1L, 90L, 100L}) {
             var capacity = new DecodeEndpoint.AdmissionCapacity(0L, percent);
-            assertTrue(capacity.evaluate(usage, 100L, 200L).fits());
+            assertTrue(capacity.evaluate(usage, 100L, 200L, CapacityRelease.NONE).fits());
             assertEquals(percent, capacity.kvBudget(100L));
         }
     }

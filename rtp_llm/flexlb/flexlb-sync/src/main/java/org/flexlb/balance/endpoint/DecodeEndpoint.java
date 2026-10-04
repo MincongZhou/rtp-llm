@@ -55,11 +55,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
     // Reservation and release. Lifecycle pins remain valid for the entire handoff.
 
     public ReservationHandle reserve(GenerationPin pin, long requestId, long hardKv,
-                                     long expectedKv, int priority) {
-        return reserve(pin, requestId, hardKv, expectedKv, priority, null);
-    }
-
-    public ReservationHandle reserve(GenerationPin pin, long requestId, long hardKv,
                                      long expectedKv, int priority, AdmissionCapacity capacity) {
         requirePinnedGeneration(pin);
         return state.reserve(requestId, hardKv, expectedKv, priority, true, capacity);
@@ -556,10 +551,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 throw new IllegalArgumentException(
                         "Decode admission limits are outside their domain");
             }
-        }
-
-        public CapacityDeficit evaluate(CapacityUsage usage, long hardKvTokens, long expectedKvTokens) {
-            return evaluate(usage, hardKvTokens, expectedKvTokens, CapacityRelease.NONE);
         }
 
         /** Use the same occupancy scope for the observation and every exact victim release. */

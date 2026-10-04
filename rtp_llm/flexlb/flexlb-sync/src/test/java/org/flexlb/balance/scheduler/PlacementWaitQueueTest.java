@@ -120,7 +120,7 @@ class PlacementWaitQueueTest {
         var decode = entry(50);
         queue.park(exact, A, 0);
         queue.park(other, B, 0);
-        queue.park(group, new PlacementKey(RoleType.PREFILL, "g"), 0);
+        queue.park(group, new PlacementKey(RoleType.PREFILL, "g", null), 0);
         queue.park(wildcard, PlacementKey.anyGroup(RoleType.PREFILL), 0);
         queue.park(decode, PlacementKey.exact(RoleType.DECODE, "g", "a:8000"), 0);
         queue.capacityChanged(A);
@@ -133,7 +133,7 @@ class PlacementWaitQueueTest {
     void groupEventDoesNotWakeExactEndpointWaiters() {
         var exact = entry(50);
         queue.park(exact, A, 0);
-        queue.capacityChanged(new PlacementKey(RoleType.PREFILL, "g"));
+        queue.capacityChanged(new PlacementKey(RoleType.PREFILL, "g", null));
         assertTrue(drain(10).isEmpty());
     }
 
@@ -170,7 +170,7 @@ class PlacementWaitQueueTest {
         long snapshot = availability.sequence();
         availability.changed(A);
         assertFalse(queue.park(entry(50), A, snapshot));
-        assertFalse(queue.park(entry(50), new PlacementKey(RoleType.PREFILL, "g"), snapshot));
+        assertFalse(queue.park(entry(50), new PlacementKey(RoleType.PREFILL, "g", null), snapshot));
         assertFalse(queue.park(entry(50), PlacementKey.anyGroup(RoleType.PREFILL), snapshot));
         assertTrue(queue.park(entry(50), B, snapshot));
         assertTrue(queue.park(entry(50), A, availability.sequence()));
@@ -217,7 +217,7 @@ class PlacementWaitQueueTest {
     void allCapacityScopesMatchBothBeforeAndAfterParking(String scope, String eventKind, boolean beforePark, boolean matches) {
         PlacementKey blocker = switch (scope) {
             case "EXACT" -> A;
-            case "GROUP" -> new PlacementKey(RoleType.PREFILL, "g");
+            case "GROUP" -> new PlacementKey(RoleType.PREFILL, "g", null);
             case "ROLE" -> PlacementKey.anyGroup(RoleType.PREFILL);
             default -> throw new AssertionError(scope);
         };
@@ -225,7 +225,7 @@ class PlacementWaitQueueTest {
             case "SAME" -> A;
             case "OTHER_ADDRESS" -> B;
             case "MOVED_GROUP" -> PlacementKey.exact(RoleType.PREFILL, "other", A.endpoint());
-            case "GROUP_ONLY" -> new PlacementKey(RoleType.PREFILL, "g");
+            case "GROUP_ONLY" -> new PlacementKey(RoleType.PREFILL, "g", null);
             case "ROLE_ONLY" -> PlacementKey.anyGroup(RoleType.PREFILL);
             case "OTHER_ROLE" -> PlacementKey.exact(RoleType.DECODE, "g", A.endpoint());
             default -> throw new AssertionError(eventKind);
@@ -268,7 +268,7 @@ class PlacementWaitQueueTest {
     private GlobalQueueEntry entry(int priority) {
         var context = new BalanceContext(SchedulingTestConfig.newConfig());
         context.setFuture(new CompletableFuture<>());
-        var entry = new GlobalQueueEntry(context, priority);
+        var entry = new GlobalQueueEntry(context, priority, null);
         entry.sequence = ++sequence;
         return entry;
     }

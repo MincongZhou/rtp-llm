@@ -165,7 +165,7 @@ final class RouteProjectionTestSupport {
             RouteProjection.DeliveryProjection deliveryProjection) {
         return RouteProjection.project(
                 new RouteProjection.Inputs(
-                        queue, work),
+                        queue, work, 0L),
                 probe,
                 evaluator,
                 deliveryProjection);

@@ -180,7 +180,7 @@ public class DecodeSelector {
             case IMMEDIATE -> view.dispatchUsage();
             case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> view.placementUsage();
         };
-        return request.capacity().evaluate(usage, request.hardKvTokens(), request.expectedKvTokens()).fits()
+        return request.capacity().evaluate(usage, request.hardKvTokens(), request.expectedKvTokens(), CapacityRelease.NONE).fits()
                 ? Availability.READY : Availability.BUSY;
     }
 

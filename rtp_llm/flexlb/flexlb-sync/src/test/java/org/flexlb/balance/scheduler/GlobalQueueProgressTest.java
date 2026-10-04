@@ -92,7 +92,7 @@ class GlobalQueueProgressTest {
     void parkedPlanRetainsSelectionDiagnosticsAfterClosing() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             Map<String, Object> diagnostics = Map.of("reason", "no eligible worker");
-            doReturn(PlacementResult.blocked(new PlacementKey(RoleType.PREFILL, "a"), null, diagnostics))
+            doReturn(PlacementResult.blocked(new PlacementKey(RoleType.PREFILL, "a", null), null, diagnostics))
                     .when(f.router).select(any(), nullable(String.class));
             f.submit(994L, "a");
             QueuedRequestScheduler queue = (QueuedRequestScheduler) f.scheduler;
@@ -769,10 +769,10 @@ class GlobalQueueProgressTest {
                 selected.add(id);
                 onSelection.accept(id);
                 if ("a".equals(groups.get(id)) && aSlots.get() == 0 && !preempt) {
-                    return PlacementResult.blocked(new PlacementKey(role, "a"));
+                    return PlacementResult.blocked(new PlacementKey(role, "a", null));
                 }
                 if (decodeBlocked.contains(id)) {
-                    return PlacementResult.blocked(new PlacementKey(RoleType.DECODE, groups.get(id)));
+                    return PlacementResult.blocked(new PlacementKey(RoleType.DECODE, groups.get(id), null));
                 }
                 ProvisionalRoute route = mock(ProvisionalRoute.class);
                 routes.put(id, route);

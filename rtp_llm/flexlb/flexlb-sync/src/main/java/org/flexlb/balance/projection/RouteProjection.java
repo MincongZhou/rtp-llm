@@ -215,12 +215,6 @@ public final class RouteProjection {
             WorkSnapshot work,
             long ownershipVersion) {
 
-        public Inputs(
-                QueueSnapshot queue,
-                WorkSnapshot work) {
-            this(queue, work, 0L);
-        }
-
         public Inputs {
             // Committed work may reuse an older clock base while its ownership
             // is unchanged. The projector rebases running duration to queue time.

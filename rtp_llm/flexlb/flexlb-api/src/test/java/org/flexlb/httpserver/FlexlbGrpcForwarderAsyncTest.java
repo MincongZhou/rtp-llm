@@ -414,7 +414,7 @@ class FlexlbGrpcForwarderAsyncTest {
 
             FlexlbGrpcForwarder.CancelForwardResult result = awaitCancel(
                     forwarder.forwardCompensatingCancelToMaster(
-                            cancelRequest(107L), MASTER_HTTP_ADDRESS, 1000L));
+                            cancelRequest(107L), MASTER_HTTP_ADDRESS, 1000L, io.opentelemetry.context.Context.current()));
 
             assertNotNull(result.response());
             assertTrue(result.response().getFound());
@@ -435,7 +435,7 @@ class FlexlbGrpcForwarderAsyncTest {
 
             FlexlbGrpcForwarder.CancelForwardResult result = awaitCancel(
                     forwarder.forwardCompensatingCancelToMaster(
-                            cancelRequest(108L), MASTER_HTTP_ADDRESS, 100L));
+                            cancelRequest(108L), MASTER_HTTP_ADDRESS, 100L, io.opentelemetry.context.Context.current()));
 
             assertTrue(masterReceivedRequest.await(2, TimeUnit.SECONDS));
             assertEquals("DEADLINE_EXCEEDED", result.failure());

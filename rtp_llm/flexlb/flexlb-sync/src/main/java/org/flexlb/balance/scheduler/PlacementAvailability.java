@@ -50,7 +50,7 @@ public final class PlacementAvailability {
         // the newest version even when an older publication finishes later.
         lastChanged.merge(key.capacityDomain(), next, Math::max);
         if (key.endpoint() != null) {
-            lastChanged.merge(new PlacementKey(key.role(), key.group()), next, Math::max);
+            lastChanged.merge(new PlacementKey(key.role(), key.group(), null), next, Math::max);
         }
         if (key.group() != null) {
             lastChanged.merge(PlacementKey.anyGroup(key.role()), next, Math::max);

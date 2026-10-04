@@ -61,7 +61,7 @@ final class PlacementWaitQueue {
             release(key.capacityDomain());
         }
         if (key.group() != null) {
-            release(new PlacementKey(key.role(), key.group()));
+            release(new PlacementKey(key.role(), key.group(), null));
         }
         release(PlacementKey.anyGroup(key.role()));
     }

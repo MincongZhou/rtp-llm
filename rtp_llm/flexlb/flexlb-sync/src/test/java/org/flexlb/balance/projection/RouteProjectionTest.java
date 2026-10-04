@@ -34,7 +34,7 @@ class RouteProjectionTest {
         var queue = new QueueSnapshot(13L, true, org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW, order,
                 new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 0L), items, null);
         var incoming = new RouteProjection.Probe(9999L, 1, 0L, Long.MAX_VALUE, 20L, 0L, 0L);
-        var result = RouteProjection.project(new RouteProjection.Inputs(queue, emptyWork(13L)),
+        var result = RouteProjection.project(new RouteProjection.Inputs(queue, emptyWork(13L), 0L),
                 incoming, new CountingEvaluator(), routeProjection());
         assertTrue(result.selectable());
         // 256 live items of priority 0 or 1 must complete before this probe.
@@ -52,7 +52,7 @@ class RouteProjectionTest {
                     org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
                     Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                     new GroupPlanner.Constraints(1, 1_000L, 1_000L, 0L, 0L), items, null);
-            var known = RouteProjection.project(new RouteProjection.Inputs(queue, emptyWork(13L)),
+            var known = RouteProjection.project(new RouteProjection.Inputs(queue, emptyWork(13L), 0L),
                     probe(), new CountingEvaluator(), policy);
             if (expiry > 13L) {
                 assertEquals("INCOMING_ALREADY_ACTIVE", known.detail());
@@ -61,7 +61,7 @@ class RouteProjectionTest {
                 assertEquals(20L, known.projectedTtftMsValue());
             }
             var unknown = RouteProjection.project(new RouteProjection.Inputs(queue,
-                            new WorkSnapshot(13L, List.of(), List.of(), 1L)),
+                            new WorkSnapshot(13L, List.of(), List.of(), 1L), 0L),
                     probe(), new CountingEvaluator(), policy);
             assertEquals("INCOMING_ALREADY_ACTIVE", unknown.detail());
         }
@@ -76,7 +76,7 @@ class RouteProjectionTest {
                 Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                 new GroupPlanner.Constraints(1, 1_000L, 1_000L, 0L, 0L), items, null);
         items.clear();
-        var inputs = new RouteProjection.Inputs(queue, emptyWork(13L));
+        var inputs = new RouteProjection.Inputs(queue, emptyWork(13L), 0L);
         var policy = routeProjection();
         assertEquals("INCOMING_ALREADY_ACTIVE",
                 RouteProjection.project(inputs, probe(), new CountingEvaluator(), policy, 13L).detail());
@@ -94,9 +94,9 @@ class RouteProjectionTest {
         WorkSnapshot current = new WorkSnapshot(20L, List.of(new WorkSnapshot.RequestWork(
                 1L, WorkSnapshot.Phase.ENGINE_RUNNING, 993L)), List.of(), 0L);
         assertEquals(
-                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), current),
+                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), current, 0L),
                         probe(), new CountingEvaluator(), routeProjection()),
-                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), cached),
+                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), cached, 0L),
                         probe(), new CountingEvaluator(), routeProjection()));
     }
 
@@ -117,7 +117,7 @@ class RouteProjectionTest {
 
         assertThrows(IllegalArgumentException.class,
                 () -> new RouteProjection.Inputs(
-                        emptyQueue(13L), emptyWork(14L)));
+                        emptyQueue(13L), emptyWork(14L), 0L));
     }
 
     @Test
@@ -176,7 +176,7 @@ class RouteProjectionTest {
 
     private static RouteProjection.Inputs inputs(long capturedAtMs) {
         return new RouteProjection.Inputs(
-                emptyQueue(capturedAtMs), emptyWork(capturedAtMs));
+                emptyQueue(capturedAtMs), emptyWork(capturedAtMs), 0L);
     }
 
     private static QueueSnapshot emptyQueue(long capturedAtMs) {

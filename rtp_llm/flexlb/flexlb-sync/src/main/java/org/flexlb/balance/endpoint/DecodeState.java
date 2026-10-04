@@ -165,7 +165,7 @@ final class DecodeState {
 
     private boolean queuedPlacementIsFullLocked(
             long hardKvTokens, long expectedKvTokens, AdmissionCapacity capacity) {
-        return !capacity.evaluate(routingViewLocked().placementUsage(), hardKvTokens, expectedKvTokens).fits();
+        return !capacity.evaluate(routingViewLocked().placementUsage(), hardKvTokens, expectedKvTokens, CapacityRelease.NONE).fits();
     }
 
     boolean isAcceptedByEngine(ReservationHandle handle) {
@@ -517,7 +517,7 @@ final class DecodeState {
             DecodeRequestState candidate,
             AdmissionCapacity capacity,
             WorkerStatus.EngineObservation fields) {
-        return !capacity.evaluate(dispatchCapacityUsage(fields), candidate.kvTokens, candidate.expectedKvTokens).fits();
+        return !capacity.evaluate(dispatchCapacityUsage(fields), candidate.kvTokens, candidate.expectedKvTokens, CapacityRelease.NONE).fits();
     }
 
     private int engineDispatchHardGateUsageLocked() {
@@ -613,7 +613,7 @@ final class DecodeState {
                 released = released.plus(held.capacityRelease());
             }
             CapacityUsage usage = routingViewLocked().placementUsage();
-            if (capacity.evaluate(usage, kvTokens, expectedKvTokens).fits()
+            if (capacity.evaluate(usage, kvTokens, expectedKvTokens, CapacityRelease.NONE).fits()
                     || !capacity.evaluate(usage, kvTokens, expectedKvTokens, released).fits()) {
                 return null;
             }
@@ -681,7 +681,7 @@ final class DecodeState {
                 released = released.plus(request.capacityRelease());
             }
             CapacityUsage usage = routingViewLocked().placementUsage();
-            if (capacity.evaluate(usage, incomingKvTokens, incomingExpectedKvTokens).fits()
+            if (capacity.evaluate(usage, incomingKvTokens, incomingExpectedKvTokens, CapacityRelease.NONE).fits()
                     || !capacity.evaluate(usage, incomingKvTokens, incomingExpectedKvTokens, released).fits()) {
                 return PreemptionBeginResult.INFEASIBLE;
             }

@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
+
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -278,7 +280,7 @@ class RequestResourceAccountingTest {
                 if (replacementRef.get() != null) { return true; }
                 f.decode.evictExpiredRequests(0, ignored -> false);
                 try (var pin = f.decode.tryPinGeneration()) {
-                    replacementRef.set(f.decode.reserve(pin, ID, HARD_KV * 2, EXPECTED_KV * 2, 50));
+                    replacementRef.set(f.decode.reserve(pin, ID, HARD_KV * 2, EXPECTED_KV * 2, 50, null));
                 }
                 return replacementRef.get() != null;
             });
@@ -340,7 +342,7 @@ class RequestResourceAccountingTest {
             decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(projector));
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.reserve(pin, ID, HARD_KV, EXPECTED_KV, 50);
+                reservation = decode.reserve(pin, ID, HARD_KV, EXPECTED_KV, 50, null);
             }
             assertNotNull(reservation);
             var context = RequestProtocolTestSupport.context(config, ID);
@@ -392,7 +394,7 @@ class RequestResourceAccountingTest {
             assertReserved();
             assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
             assertEquals(1, decode.routingView().engineCapacityUsed());
-            assertFalse(capacity.evaluate(decode.routingView().dispatchUsage(), HARD_KV, EXPECTED_KV).fits());
+            assertFalse(capacity.evaluate(decode.routingView().dispatchUsage(), HARD_KV, EXPECTED_KV, CapacityRelease.NONE).fits());
         }
 
         void assertEmpty() {
@@ -416,7 +418,7 @@ class RequestResourceAccountingTest {
 
         void assertCapacityReusable() {
             try (var pin = decode.tryPinGeneration()) {
-                var next = decode.reserve(pin, 999L, HARD_KV, EXPECTED_KV, 50);
+                var next = decode.reserve(pin, 999L, HARD_KV, EXPECTED_KV, 50, null);
                 assertNotNull(next);
                 var permit = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit.status());

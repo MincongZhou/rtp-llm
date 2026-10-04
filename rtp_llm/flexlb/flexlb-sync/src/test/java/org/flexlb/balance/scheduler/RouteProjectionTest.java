@@ -207,7 +207,7 @@ class RouteProjectionTest {
                 NOW_MS + 1L, List.of(), List.of(), 0L);
 
         assertThrows(IllegalArgumentException.class,
-                () -> new RouteProjection.Inputs(queue, later));
+                () -> new RouteProjection.Inputs(queue, later, 0L));
     }
 
     @Test
