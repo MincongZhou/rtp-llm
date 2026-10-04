@@ -259,6 +259,70 @@ TEST_F(PerRankBlockTransferEngineCrcTest, MultiBackingMemberLayerScaleRoundTripM
     }
 }
 
+TEST_F(PerRankBlockTransferEngineCrcTest, Dsv4Cp16ShardedSwaRoundtripPreservesOpaqueBytes) {
+    constexpr size_t cp_size = 16;
+    constexpr size_t entries = 144;  // SWA window 128, gen_num_per_cycle 5, aligned to CP16.
+    payload_                 = 5256;
+    encoded_                 = 5264;
+    layers_                  = 1;
+    ASSERT_EQ(payload_ * cp_size, entries * 584);
+
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.sliding_window_size = 128;
+    devices_                   = {makeTestDevicePool({{payload_, 0}}, 2, "cp16_swa")};
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    host_  = makeHostPool(payload_, 1, true);
+    group_ = makeTestGroupSet(0,
+                              makeTestTopology({makeTestGroupBase(policy, {0}, payload_, 0)}),
+                              {"group0"},
+                              devices_,
+                              host_,
+                              nullptr,
+                              /*enable_crc=*/true,
+                              /*physical_payload_bytes=*/payload_);
+    ASSERT_TRUE(group_->crcEnabled());
+    ASSERT_TRUE(group_->usesPhysicalPayloadGeometry());
+    ASSERT_EQ(group_->storageBytes(), encoded_);
+    engine_  = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_});
+    sources_ = {{allocate(devices_[0])}};
+    targets_ = {{allocate(devices_[0])}};
+    hosts_   = {allocate(host_)};
+    disks_   = {NULL_BLOCK_IDX};
+
+    // A rank owns a contiguous slice of the global data-then-scales layout,
+    // not an independently quantized block. Rank 15 contains the scale tail.
+    std::vector<uint8_t> expected(entries * 584);
+    for (size_t byte = 0; byte < expected.size(); ++byte) {
+        expected[byte] =
+            byte < entries * 576 ? static_cast<uint8_t>(byte % 127) : static_cast<uint8_t>(128 + byte % 64);
+    }
+    const auto source = devices_[0]->convertIndexToBuffer(0, sources_[0][0]);
+    ASSERT_EQ(source.size(), 1u);
+    ASSERT_EQ(source[0].size_bytes, payload_);
+    std::vector<uint8_t> reconstructed;
+    for (size_t rank = 0; rank < cp_size; ++rank) {
+        SCOPED_TRACE(::testing::Message() << "cp_rank=" << rank);
+        const auto* slice = expected.data() + rank * payload_;
+        ASSERT_EQ(cudaMemcpy(source[0].addr, slice, payload_, cudaMemcpyHostToDevice), cudaSuccess);
+        ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
+        ASSERT_EQ(std::vector<uint8_t>(hostData(0), hostData(0) + payload_),
+                  std::vector<uint8_t>(slice, slice + payload_));
+        uint32_t footer = 0;
+        std::memcpy(&footer, hostData(0) + encoded_ - sizeof(footer), sizeof(footer));
+        EXPECT_EQ(footer, softwareCrc32c(slice, payload_));
+
+        // Restore from host into a different block after invalidating both
+        // device copies, so stale source data cannot conceal a truncated copy.
+        ASSERT_EQ(cudaMemset(source[0].addr, 0xff, payload_), cudaSuccess);
+        ASSERT_NO_FATAL_FAILURE(fillTargets(0xff));
+        ASSERT_TRUE(execute(Tier::HOST, Tier::DEVICE)->success());
+        const auto restored = readTarget(0);
+        ASSERT_EQ(restored, std::vector<uint8_t>(slice, slice + payload_));
+        reconstructed.insert(reconstructed.end(), restored.begin(), restored.end());
+    }
+    EXPECT_EQ(reconstructed, expected);
+}
+
 TEST_F(PerRankBlockTransferEngineCrcTest, PhysicalLayersWithReorderedTagsAndScalePresenceMatchIndependentCrc) {
     ASSERT_NO_FATAL_FAILURE(initialize(false, false, 3, 1, true));
     ASSERT_TRUE(group_->usesPhysicalPayloadGeometry());
