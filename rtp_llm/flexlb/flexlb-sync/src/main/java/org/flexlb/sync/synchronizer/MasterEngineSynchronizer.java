@@ -11,7 +11,7 @@ import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.runner.EngineSyncRunner;
-import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -37,7 +37,7 @@ public final class MasterEngineSynchronizer {
     private final String modelName;
     private final List<RoleType> requiredRoles;
     private final WorkerAddressService workerAddressService;
-    private final WorkerDirectory workerDirectory;
+    private final EndpointRegistry endpointRegistry;
     private final EngineHealthReporter engineHealthReporter;
     private final FlexlbConfig flexlbConfig;
     private final EngineGrpcService engineGrpcService;
@@ -53,7 +53,7 @@ public final class MasterEngineSynchronizer {
 
     public MasterEngineSynchronizer(WorkerAddressService workerAddressService,
                                     EngineHealthReporter engineHealthReporter,
-                                    WorkerDirectory workerDirectory,
+                                    EndpointRegistry endpointRegistry,
                                     EngineGrpcService engineGrpcService,
                                     ModelMetaConfig modelMetaConfig,
                                     CacheAwareService cacheAwareService,
@@ -62,7 +62,7 @@ public final class MasterEngineSynchronizer {
 
         this.workerAddressService = workerAddressService;
         this.engineHealthReporter = engineHealthReporter;
-        this.workerDirectory = workerDirectory;
+        this.endpointRegistry = endpointRegistry;
         this.flexlbConfig = configService.loadBalanceConfig();
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
@@ -121,7 +121,7 @@ public final class MasterEngineSynchronizer {
         try {
             for (RoleType roleType : requiredRoles) {
                 engineSyncExecutor.submit(new EngineSyncRunner(
-                        modelName, workerDirectory,
+                        modelName, endpointRegistry,
                         workerAddressService, statusCheckExecutor, engineHealthReporter,
                         engineGrpcService, roleType, cacheAwareService,
                         cacheIntervalService,
@@ -138,7 +138,7 @@ public final class MasterEngineSynchronizer {
 
     public boolean isReady() {
         return requiredRoles.stream()
-                .allMatch(role -> workerDirectory.routingCapacity(role) > 0);
+                .allMatch(role -> endpointRegistry.getEndpointCount(role) > 0);
     }
 
     @PreDestroy

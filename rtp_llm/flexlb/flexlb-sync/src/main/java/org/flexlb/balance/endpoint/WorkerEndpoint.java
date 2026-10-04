@@ -1,12 +1,12 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.util.Failures;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Primary abstraction for a remote inference worker.
@@ -20,17 +20,9 @@ public class WorkerEndpoint {
 
     private static final Runnable NO_STATUS_PROJECTION = () -> { };
 
-    private static final AtomicLong RETIREMENT_THREAD_SEQUENCE =
-            new AtomicLong();
     private static final ExecutorService RETIREMENT_EXECUTOR =
-            Executors.newFixedThreadPool(4, task -> {
-                Thread thread = new Thread(
-                        task,
-                        "flexlb-endpoint-retirement-"
-                                + RETIREMENT_THREAD_SEQUENCE.incrementAndGet());
-                thread.setDaemon(true);
-                return thread;
-            });
+            Executors.newFixedThreadPool(4,
+                    Thread.ofPlatform().daemon().name("flexlb-endpoint-retirement-", 1).factory());
 
     private final WorkerStatus status;
     private final EndpointGenerationLifecycle generationLifecycle;
@@ -131,18 +123,12 @@ public class WorkerEndpoint {
     public final GenerationPin tryPinGeneration() {
         EndpointGenerationLifecycle.HandoffPermit permit =
                 generationLifecycle.tryAcquireHandoff();
-        return permit == null
-                ? null
-                : new GenerationPin(
-                        this,
-                        status.getGenerationId(),
-                        permit);
+        return permit == null ? null : new GenerationPin(this, permit);
     }
 
     /** Validate an exact, still-open pin before consuming its admission right. */
     public final void requirePinnedGeneration(GenerationPin pin) {
         if (pin == null || pin.endpoint != this
-                || pin.generationId != status.getGenerationId()
                 || !pin.permit.isOpen()) {
             throw new IllegalArgumentException(
                     "Generation pin does not own this endpoint generation");
@@ -193,16 +179,9 @@ public class WorkerEndpoint {
     private void retireInternal(boolean forceAsynchronous) {
         beginRetirement();
 
-        if (!generationLifecycle.tryClaimCleanup()) {
-            // Another exact caller already owns cleanup. Initiation is
-            // idempotent and deliberately separate from the wait barrier.
-            return;
-        }
-
-        // An accepted handoff may finish on a worker callback thread. The last
-        // release schedules cleanup on the shared retirement executor so that
-        // cleanup never waits on, or joins, its own callback thread.
-        if (generationLifecycle.armDrainContinuation()) {
+        // Pending handoffs schedule cleanup on the retirement executor when the
+        // last permit closes, keeping cleanup off the worker callback thread.
+        if (!generationLifecycle.tryStartCleanup()) {
             return;
         }
         if (forceAsynchronous) {
@@ -231,7 +210,7 @@ public class WorkerEndpoint {
         } finally {
             generationLifecycle.completeRetirement(retirementFailure);
         }
-        rethrowRetirementFailure(retirementFailure);
+        Failures.rethrow(retirementFailure, "Endpoint generation retirement failed");
     }
 
     private void continueRetirementAfterHandoff() {
@@ -257,19 +236,6 @@ public class WorkerEndpoint {
         // Stateless roles own no endpoint-local resources.
     }
 
-    private static void rethrowRetirementFailure(Throwable failure) {
-        if (failure instanceof RuntimeException runtimeFailure) {
-            throw runtimeFailure;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        if (failure != null) {
-            throw new IllegalStateException(
-                    "Endpoint generation retirement failed", failure);
-        }
-    }
-
     /**
      * Exact, single-owner admission capability for one endpoint generation.
      * The permit is transferable: asynchronous ownership may close it from a
@@ -278,15 +244,12 @@ public class WorkerEndpoint {
     public static final class GenerationPin implements AutoCloseable {
 
         private final WorkerEndpoint endpoint;
-        private final long generationId;
         private final EndpointGenerationLifecycle.HandoffPermit permit;
 
         private GenerationPin(
                 WorkerEndpoint endpoint,
-                long generationId,
                 EndpointGenerationLifecycle.HandoffPermit permit) {
             this.endpoint = endpoint;
-            this.generationId = generationId;
             this.permit = permit;
         }
 
@@ -295,7 +258,7 @@ public class WorkerEndpoint {
         }
 
         public long generationId() {
-            return generationId;
+            return endpoint.status.getGenerationId();
         }
 
         @Override

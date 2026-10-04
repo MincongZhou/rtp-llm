@@ -9,9 +9,12 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.enums.DecodeTaskPhase;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Map;
 
@@ -22,6 +25,32 @@ import static org.junit.jupiter.api.Assertions.*;
 /** The resource ledger can run without an Endpoint, scheduler, RPC client or callback. */
 class DecodeStateTest {
     private static final AdmissionCapacity CAPACITY = new AdmissionCapacity(2, 100);
+
+    @Test
+    void failedRetirementSnapshotDoesNotInvalidateTheLiveDispatchPermit() {
+        WorkerStatus status = org.mockito.Mockito.spy(status());
+        long generation = status.getGenerationId();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve(1L, 100L, 200L, 50, true, CAPACITY);
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
+        long version = state.placementVersion();
+        IllegalStateException failure = new IllegalStateException("snapshot unavailable");
+        org.mockito.Mockito.doThrow(failure).when(status).getGenerationId();
+        assertSame(failure, assertThrows(IllegalStateException.class, state::retire));
+        org.mockito.Mockito.doReturn(generation).when(status).getGenerationId();
+        assertEquals(version, state.placementVersion());
+        assertEquals(1, state.resourceSnapshot().activeDispatchPermits());
+        assertTrue(state.dispatch(permit, DispatchOutcome.ABANDONED).capacityReleased(),
+                "failed retirement must not make the live permit look already retired");
+        assertEquals(0, state.resourceSnapshot().activeDispatchPermits());
+
+        var replacement = state.acquireDispatchPermit(reservation, CAPACITY).permit();
+        assertEquals(java.util.List.of(reservation), state.retire());
+        assertFalse(state.hasOwnedResources(reservation));
+        assertEquals(0, state.resourceSnapshot().activeDispatchPermits());
+        assertEquals(TRANSFERRED, state.dispatch(replacement, DispatchOutcome.ABANDONED).status());
+        assertTrue(state.retire().isEmpty());
+    }
 
     @Test
     void returnedPermitCannotDispatchOrReleaseItsReplacement() {
@@ -46,6 +75,69 @@ class DecodeStateTest {
         assertEquals(0, state.routingView().engineLoad());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "MASTER_QUEUED_NOT_DISPATCHED, LOCAL_ROLLBACK",
+            "MASTER_QUEUED_NOT_DISPATCHED, COUNTERPART_FINISHED",
+            "MASTER_QUEUED_NOT_DISPATCHED, NOT_SENT",
+            "ENGINE_MAY_HAVE_SEEN, LOCAL_ROLLBACK",
+            "ENGINE_MAY_HAVE_SEEN, COUNTERPART_FINISHED",
+            "ENGINE_MAY_HAVE_SEEN, NOT_SENT",
+            "ACCEPTED_NOT_RUNNING, LOCAL_ROLLBACK",
+            "ACCEPTED_NOT_RUNNING, COUNTERPART_FINISHED",
+            "ACCEPTED_NOT_RUNNING, NOT_SENT",
+            "RUNNING, LOCAL_ROLLBACK",
+            "RUNNING, COUNTERPART_FINISHED",
+            "RUNNING, NOT_SENT"
+    })
+    void releaseReasonPreservesEngineOwnershipAndSettlesOnlyItsExactReservation(
+            DecodeTaskPhase phase, ReleaseReason reason) {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve(1, 100, 200, 50, true, CAPACITY);
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
+        if (phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN) {
+            state.dispatch(permit, DispatchOutcome.ENGINE_OWNED);
+        } else if (phase.isEngineConfirmed()) {
+            calibrate(state, status, Map.of("1", task(1,
+                    phase == DecodeTaskPhase.RUNNING ? TaskPhase.RUNNING : TaskPhase.KV_ALLOCATED)), Map.of());
+        }
+        var sibling = state.reserve(2, 70, 90, 30, true, CAPACITY);
+        long version = state.placementVersion();
+        var stale = new DecodeEndpoint.ReservationHandle(
+                reservation.endpointGenerationId(), 1, reservation.reservationToken() + 100);
+        var foreign = new DecodeEndpoint.ReservationHandle(
+                reservation.endpointGenerationId() + 1, 1, reservation.reservationToken());
+        assertEquals(STALE, state.release(stale, reason));
+        assertEquals(STALE, state.release(foreign, reason));
+        assertEquals(version, state.placementVersion());
+
+        boolean released = phase == DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED
+                || phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN && reason == ReleaseReason.NOT_SENT;
+        if (released) {
+            assertEquals(RELEASED, state.release(reservation, reason));
+            assertEquals(STALE, state.release(reservation, reason));
+            assertFalse(state.hasOwnedResources(reservation));
+            assertEquals(70L, state.routingView().inflightHardKv());
+            assertEquals(90L, state.routingView().inflightExpectedKv());
+            assertEquals(0, state.resourceSnapshot().activeDispatchPermits());
+            assertEquals(1, state.routingView().totalLoad());
+            assertEquals(OWNERSHIP_LOST, state.dispatch(permit, DispatchOutcome.ABANDONED).status());
+        } else {
+            if (reason == ReleaseReason.LOCAL_ROLLBACK) {
+                assertThrows(IllegalStateException.class, () -> state.release(reservation, reason));
+            } else {
+                assertEquals(reason == ReleaseReason.NOT_SENT ? ENGINE_ACCEPTED : STILL_OWNED,
+                        state.release(reservation, reason));
+            }
+            assertTrue(state.hasOwnedResources(reservation));
+            assertEquals(version, state.placementVersion());
+            assertEquals(2, state.routingView().totalLoad());
+        }
+        assertTrue(state.hasOwnedResources(sibling));
+        assertEquals(1, state.resourceSnapshot().queuedCount());
+    }
+
     @Test
     void calibrationConvertsTheSameReservationWithoutDoubleChargingAndSettlesTerminal() {
         WorkerStatus status = status();
@@ -60,7 +152,7 @@ class DecodeStateTest {
         assertTrue(state.isAcceptedByEngine(reservation));
         assertEquals(1, state.routingView().engineCapacityUsed());
         assertEquals(0, state.resourceSnapshot().activeDispatchPermits());
-        assertTrue(state.resourceSnapshot().reserved().isEmpty());
+        assertTrue(state.resourceSnapshot().reservedCount() == 0);
         assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
 
         var finished = calibrate(state, status, Map.of(), Map.of("2", task));
@@ -71,10 +163,105 @@ class DecodeStateTest {
         assertEquals(OWNERSHIP_LOST, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "MASTER_QUEUED_NOT_DISPATCHED, false", "MASTER_QUEUED_NOT_DISPATCHED, true",
+            "ENGINE_MAY_HAVE_SEEN, false", "ENGINE_MAY_HAVE_SEEN, true",
+            "ACCEPTED_NOT_RUNNING, false", "ACCEPTED_NOT_RUNNING, true",
+            "RUNNING, false", "RUNNING, true"
+    })
+    void terminalAndExpirationReleaseOnlyTheirOwnerAcrossResourcePhases(
+            DecodeTaskPhase phase, boolean expired) {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve(1, 100, 200, 50, true, CAPACITY);
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
+        if (phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN) {
+            state.dispatch(permit, DispatchOutcome.ENGINE_OWNED);
+        } else if (phase.isEngineConfirmed()) {
+            calibrate(state, status, Map.of("1", task(1,
+                    phase == DecodeTaskPhase.RUNNING ? TaskPhase.RUNNING : TaskPhase.KV_ALLOCATED)), Map.of());
+        }
+        var sibling = state.reserve(2, 70, 90, 30, true, CAPACITY);
+        assertNotNull(sibling);
+        var stale = new DecodeEndpoint.ReservationHandle(
+                reservation.endpointGenerationId(), 1, reservation.reservationToken() + 100);
+        assertEquals(STALE, state.release(stale, ReleaseReason.EXPIRED));
+        assertTrue(state.hasOwnedResources(reservation));
+
+        for (int i = 0; i < 2; i++) {
+            if (expired) {
+                assertEquals(i == 0 ? RELEASED : STALE, state.release(reservation, ReleaseReason.EXPIRED));
+            } else {
+                calibrate(state, status, Map.of(), Map.of("1", task(1, TaskPhase.RUNNING)));
+            }
+            assertFalse(state.hasOwnedResources(reservation));
+            assertTrue(state.hasOwnedResources(sibling));
+            assertEquals(0, state.resourceSnapshot().activeDispatchPermits());
+            assertEquals(1, state.resourceSnapshot().queuedCount());
+            assertEquals(70L, state.routingView().inflightHardKv());
+            assertEquals(90L, state.routingView().inflightExpectedKv());
+            assertEquals(1, state.routingView().totalLoad());
+            assertEquals(OWNERSHIP_LOST, state.dispatch(permit, DispatchOutcome.ABANDONED).status());
+        }
+        assertEquals(RELEASED, state.release(sibling, ReleaseReason.LOCAL_ROLLBACK));
+        assertEquals(0, state.routingView().totalLoad());
+        assertEquals(0, state.routingView().inflightHardKv());
+        assertEquals(0, state.routingView().inflightExpectedKv());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"EXPIRED", "COUNTERPART_FINISHED", "NOT_SENT", "FULL_ABSENCE"})
+    void terminalHistoryFencesLateReportsUntilRetentionExpires(String settlement) {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve(1, 100, 200, 50, true, CAPACITY);
+        if (settlement.equals("FULL_ABSENCE")) {
+            calibrate(state, status, Map.of("1", task(1, TaskPhase.RUNNING)), Map.of());
+            calibrate(state, status, Map.of(), Map.of());
+        } else {
+            assertEquals(RELEASED, state.release(reservation, ReleaseReason.valueOf(settlement)));
+        }
+        assertFalse(state.hasOwnedResources(reservation));
+        assertEquals(STALE, state.release(reservation, ReleaseReason.EXPIRED));
+        assertFalse(state.evictExpiredRequests(Long.MAX_VALUE, ignored -> false).capacityReleased());
+        calibrate(state, status, Map.of(), Map.of("1", task(1, TaskPhase.RUNNING)));
+        var late = calibrate(state, status, Map.of("1", task(1, TaskPhase.RUNNING)), Map.of());
+        assertTrue(late.facts().isEmpty());
+        assertEquals(0, state.routingView().totalLoad());
+
+        assertTrue(state.evictExpiredRequests(-1L, ignored -> false).capacityReleased());
+        calibrate(state, status, Map.of("1", task(1, TaskPhase.RUNNING)), Map.of());
+        assertEquals(1, state.routingView().totalLoad());
+        assertFalse(state.hasOwnedResources(reservation), "expired history must not restore the old token");
+    }
+
+    @Test
+    void shadowSweepRechecksPhaseAfterRetentionCallbackConfirmsTheRequest() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve(1, 100, 200, 50, true, CAPACITY);
+        state.acquireDispatchPermit(reservation, CAPACITY);
+
+        var cleanup = state.evictExpiredRequests(-1L, requestId -> {
+            calibrate(state, status, Map.of("1", task(1, TaskPhase.RUNNING)), Map.of());
+            return false;
+        });
+
+        assertEquals(0, cleanup.expiredReservations());
+        assertFalse(cleanup.capacityReleased());
+        assertTrue(state.isAcceptedByEngine(reservation));
+        assertTrue(state.hasOwnedResources(reservation));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        assertEquals(0, state.resourceSnapshot().activeDispatchPermits());
+        assertEquals(0, state.resourceSnapshot().queuedCount());
+        assertEquals(0, state.routingView().inflightHardKv());
+    }
+
     @Test
     void endpointRejectsAnotherEndpointsPermitWithoutConsumingIt() {
-        DecodeEndpoint owner = new DecodeEndpoint(status(), EndpointTestSupport.noopEventSink());
-        DecodeEndpoint other = new DecodeEndpoint(status(), EndpointTestSupport.noopEventSink());
+        DecodeEndpoint owner = new DecodeEndpoint(status(), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
+        DecodeEndpoint other = new DecodeEndpoint(status(), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
         try {
             DecodeEndpoint.ReservationHandle reservation;
             try (var pin = owner.tryPinGeneration()) {
@@ -153,7 +340,7 @@ class DecodeStateTest {
         assertEquals(DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL, terminal.facts().getFirst().kind());
         assertEquals(victim, terminal.facts().getFirst().reservation());
         assertFalse(state.hasOwnedResources(victim));
-        assertTrue(state.finishPreemption(1, DecodeEndpoint.PreemptionDecision.COMMIT));
+        assertNotNull(state.finishPreemption(1, true));
         assertEquals(1, state.routingView().engineCapacityUsed());
         assertEquals(9_900L, state.routingView().realKvAvailable());
         assertEquals(RELEASED, state.release(state.reservationHandle(11), ReleaseReason.LOCAL_ROLLBACK));

@@ -1,10 +1,9 @@
 package org.flexlb.httpserver;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.TreeMap;
@@ -125,7 +124,7 @@ public class ServerScheduleLatencyRecorder {
      * neither source is present.
      */
     private static int resolvePriority(BalanceContext context) {
-        if (context.schedulingMetadata() == null && context.getRequest() == null) {
+        if (context.getSchedulingMetadata() == null && context.getRequest() == null) {
             return 0;
         }
         return context.getPriority();

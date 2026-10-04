@@ -3,7 +3,7 @@ package org.flexlb.httpserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
@@ -19,7 +19,6 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
@@ -54,17 +53,15 @@ public class HttpLoadBalanceServer {
 
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final ConfigService configService;
-    private final RequestScheduler requestScheduler;
+    private final RequestRepository requestScheduler;
     private final EndpointRegistry endpointRegistry;
-    private final WorkerDirectory workerDirectory;
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
                                  ConfigService configService,
-                                 RequestScheduler requestScheduler,
+                                 RequestRepository requestScheduler,
                                  EndpointRegistry endpointRegistry,
-                                 WorkerDirectory workerDirectory,
                                  @org.springframework.beans.factory.annotation.Autowired(required = false)
                                  MasterEngineSynchronizer masterEngineSynchronizer,
                                  ServerScheduleLatencyRecorder serverLatencyRecorder) {
@@ -72,7 +69,6 @@ public class HttpLoadBalanceServer {
         this.configService = configService;
         this.requestScheduler = requestScheduler;
         this.endpointRegistry = endpointRegistry;
-        this.workerDirectory = workerDirectory;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
     }
@@ -132,7 +128,7 @@ public class HttpLoadBalanceServer {
     private Map<String, Response.WorkerRoleSummary> buildWorkerSummary() {
         Map<String, Response.WorkerRoleSummary> summary = new LinkedHashMap<>();
         for (RoleType role : RoleType.values()) {
-            Map<String, WorkerStatus> statusMap = workerDirectory.statusSnapshot(role);
+            Map<String, WorkerStatus> statusMap = endpointRegistry.statusSnapshot(role);
             if (statusMap.isEmpty()) {
                 continue;
             }
@@ -249,7 +245,7 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("scheduler_inflight", requestScheduler.getInflightSize());
+            result.put("scheduler_inflight", requestScheduler.liveRequestCount());
             result.put("decode_max_engine_requests",
                     configService.loadBalanceConfig().getRouter().getRoles()
                             .getDecode().getAvailability().getMaxEngineRequests());
@@ -263,10 +259,11 @@ public class HttpLoadBalanceServer {
                 CacheStatus cacheStatus = cacheIndex.cacheStatus();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                ep.put("inflight_batches", endpoint.getInflightBatchCount());
-                ep.put("inflight_requests", endpoint.getLocallyOwnedRequestCount());
+                var ownership = endpoint.ownershipStats();
+                ep.put("inflight_batches", ownership.batchCount());
+                ep.put("inflight_requests", ownership.locallyOwnedRequests());
                 ep.put("inflight_route_requests",
-                        endpoint.getIndividuallyTrackedRequestCount());
+                        ownership.individuallyOwnedRequests());
                 ep.put("cache_version",
                         cacheStatus == null ? -1L : cacheStatus.getVersion());
                 ep.put("cache_indexed", cacheIndex.indexInitialized());
@@ -280,14 +277,15 @@ public class HttpLoadBalanceServer {
             List<Map<String, Object>> decodeList = new ArrayList<>();
             for (Map.Entry<String, DecodeEndpoint> entry
                     : endpointRegistry.snapshotDecodeEndpoints().entrySet()) {
-                DecodeEndpoint.LayeredAdmissionView view =
+                DecodeEndpoint.ResourceSnapshot view =
                         entry.getValue().resourceSnapshot();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                ep.put("reserved_total", view.reserved().size());
+                int reservedCount = view.reservedCount();
+                ep.put("reserved_total", reservedCount);
                 ep.put("master_queued", view.queuedCount());
                 ep.put("engine_may_have_seen",
-                        Math.max(0, view.reserved().size() - view.queuedCount()));
+                        Math.max(0, reservedCount - view.queuedCount()));
                 ep.put("confirmed_accepted", view.acceptedCount());
                 ep.put("confirmed_running", view.runningCount());
                 ep.put("total_load", view.routing().totalLoad());

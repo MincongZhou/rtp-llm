@@ -24,6 +24,11 @@ public record PlacementKey(RoleType role, String group, String endpoint) {
         }
     }
 
+    /** Exact waiters follow role/address across changes to the endpoint's group. */
+    PlacementKey capacityDomain() {
+        return endpoint() == null || group() == null ? this : exact(role(), null, endpoint());
+    }
+
     public static PlacementKey anyGroup(RoleType role) {
         return new PlacementKey(role, null);
     }

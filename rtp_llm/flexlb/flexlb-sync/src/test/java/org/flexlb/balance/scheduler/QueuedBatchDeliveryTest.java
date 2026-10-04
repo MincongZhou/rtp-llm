@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -14,6 +13,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -31,7 +31,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.await;
+import static org.flexlb.balance.scheduler.RequestProtocolTestSupport.await;
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.freezeInputs;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -57,7 +58,7 @@ class QueuedBatchDeliveryTest {
     private final CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> reply = new CompletableFuture<>();
     private final DeliverySettlementTestSupport ledger = new DeliverySettlementTestSupport();
     private FlexlbConfig config;
-    private RequestRegistry registry;
+    private AbstractRequestScheduler registry;
     private DefaultBatchDispatcher dispatcher;
     private EngineGrpcClient grpc;
     private PrefillEndpoint prefill;
@@ -73,31 +74,29 @@ class QueuedBatchDeliveryTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
-        registry = new RequestRegistry(service, reporter, mock(RequestSchedulerReporter.class));
+        registry = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, reporter, mock(RequestSchedulerReporter.class),
+                mock(RecentCacheKeyTraceReporter.class));
         grpc = mock(EngineGrpcClient.class);
         when(grpc.batchEnqueueAsync(anyString(), anyInt(), any())).thenAnswer(call -> {
             sent.add(call.getArgument(2));
             return reply;
         });
         dispatcher = new DefaultBatchDispatcher(grpc, service, null, 1, 1);
-        strategy = new BatchDeliveryStrategy(dispatcher::tryPrepareSubmission, () -> 201L,
-                registry, new DeliveryMetrics(reporter));
+        strategy = new BatchDeliveryStrategy(dispatcher::tryPrepareSubmission, () -> 201L, reporter);
         prefill = mock(PrefillEndpoint.class);
         when(prefill.getIp()).thenReturn("127.0.0.1");
         when(prefill.getGrpcPort()).thenReturn(8090);
         when(prefill.reserveBatch(any(), anyLong(), anyInt())).thenAnswer(call ->
                 ledger.reserveBatch(call.getArgument(0), call.getArgument(1), call.getArgument(2)));
         when(prefill.releaseCommittedItem(any())).thenAnswer(call -> {
-            ScheduledRequest item = call.getArgument(0);
+            RequestRoute item = call.getArgument(0);
             assertFalse(Thread.holdsLock(registry.requestSlot(item.requestId())));
             return ledger.prefill.terminalizeCommittedItem(item);
         });
-        when(prefill.expireCommittedItem(any())).thenAnswer(call ->
-                ledger.prefill.terminalizeCommittedItem(call.getArgument(0)));
         doAnswer(call -> { prefill.releaseCommittedItem(call.getArgument(0)); return null; })
                 .when(prefill).settleFailedRequest(any());
         decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null,
-                "127.0.0.1", 8080, 8081, null), new EndpointEventProjector(registry));
+                "127.0.0.1", 8080, 8081, null), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry));
         CountDownLatch entered = new CountDownLatch(1);
         dispatcher.tryPrepareSubmission().value().submit(sender -> {
             entered.countDown();
@@ -112,10 +111,10 @@ class QueuedBatchDeliveryTest {
         awaitDispatchTasks();
         reply.complete(EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(201L).build());
         dispatcher.shutdown();
-        if (registry.closeAdmissionAndAwaitMutations()) {
+        if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
             registry.closeOutstandingAndTerminalize();
-            registry.closeExpiration();
-            registry.closePublisher();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).timer().close();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).closeRequestExecutors();
         }
     }
 
@@ -124,18 +123,19 @@ class QueuedBatchDeliveryTest {
             "LATE_DEADLINE, false", "LATE_DEADLINE, true", "LATE_INACTIVITY, false", "LATE_INACTIVITY, true"})
     void invalidQueuedMembersNeverCrossHandoffAndReleaseExactResources(String expiry, boolean all)
             throws Exception {
-        ScheduledRequest first = item(1L);
-        ScheduledRequest second = item(2L);
+        RequestRoute first = item(1L);
+        RequestRoute second = item(2L);
         submit(List.of(first, second));
-        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState(1L, 0L).deliveryClaimKind());
-        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState(2L, 0L).deliveryClaimKind());
+        assertEquals(DeliveryClaimKind.NONE, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(1L, 0L).deliveryClaimKind());
+        assertEquals(DeliveryClaimKind.NONE, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(2L, 0L).deliveryClaimKind());
         assertOccupancy(1, 2);
-        for (ScheduledRequest item : all ? List.of(first, second) : List.of(first)) {
-            RequestSlot slot = registry.requestSlot(item.requestId());
+        for (RequestRoute item : all ? List.of(first, second) : List.of(first)) {
+            BalanceContext slot = registry.requestSlot(item.requestId());
             switch (expiry) {
                 case "CANCEL" -> registry.cancelRequest(item.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
-                case "TIMER" -> registry.expireInactiveRequest(slot, slot.createdAtMs() + TIMEOUT_MS);
-                case "LATE_DEADLINE" -> ReflectionTestUtils.setField(item, "expiresAtMs", System.currentTimeMillis() - 1L);
+                case "TIMER" -> RequestProtocolTestSupport.expireInactiveRequest(registry, slot, slot.createdAtMs() + TIMEOUT_MS);
+                case "LATE_DEADLINE" -> ReflectionTestUtils.setField(slot, "schedulingMetadata",
+                        org.flexlb.dao.SchedulingMetadata.explicit(slot.getPriority(), System.currentTimeMillis() - 1L));
                 case "LATE_INACTIVITY" -> ReflectionTestUtils.setField(slot, "lastWorkerStatusAtMs",
                         System.currentTimeMillis() - TIMEOUT_MS - 1L);
                 default -> throw new AssertionError(expiry);
@@ -144,23 +144,23 @@ class QueuedBatchDeliveryTest {
         releaseExecutor.countDown();
         awaitDispatchTasks();
         assertFalse(first.future().get(5, TimeUnit.SECONDS).isSuccess());
-        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState(1L, 0L).deliveryClaimKind());
+        assertEquals(DeliveryClaimKind.NONE, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(1L, 0L).deliveryClaimKind());
         int survivors = all ? 0 : 1;
+        if (all) { assertFalse(second.future().get(5, TimeUnit.SECONDS).isSuccess()); }
         assertOccupancy(survivors, survivors);
         assertEquals(survivors, decode.routingView().engineCapacityUsed());
         assertEquals(survivors, decode.routingView().inflightHardKv());
         assertEquals(2L * survivors, decode.routingView().inflightExpectedKv());
         assertEquals(survivors, sent.size());
         if (all) {
-            assertFalse(second.future().get(5, TimeUnit.SECONDS).isSuccess());
             verifyNoInteractions(grpc);
         } else {
             assertEquals(List.of(2L), sent.getFirst().getDpSlotsList().stream()
                     .flatMap(dp -> dp.getRequestsList().stream()).map(input -> input.getInput().getRequestId()).toList());
-            assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, registry.getRequestState(2L, 0L).deliveryClaimKind());
+            assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(2L, 0L).deliveryClaimKind());
             reply.complete(ack(2L));
             assertTrue(second.future().get(5, TimeUnit.SECONDS).isSuccess());
-            ledger.finish(201L, second).forEach(fact -> registry.processPrefillStatus(prefill, RoleType.PREFILL, fact));
+            ledger.finish(201L, second).forEach(fact -> RequestProtocolTestSupport.observePrefill(registry, prefill, RoleType.PREFILL, fact));
             DeliverySettlementTestSupport.decodeStatus(decode, 2L, true);
         }
         // Repeated terminal events cannot subtract the other member or leak a batch permit.
@@ -176,8 +176,8 @@ class QueuedBatchDeliveryTest {
     @ValueSource(booleans = {false, true})
     void lateHandoffStartsOneBoundedObservationWindowWithoutFabricatingWorkerActivity(boolean ack)
             throws Exception {
-        ScheduledRequest item = item(1L);
-        RequestSlot slot = registry.requestSlot(1L);
+        RequestRoute item = item(1L);
+        BalanceContext slot = registry.requestSlot(1L);
         long lastStatus = System.currentTimeMillis() - TIMEOUT_MS + 10_000L;
         ReflectionTestUtils.setField(slot, "lastWorkerStatusAtMs", lastStatus);
         submit(List.of(item));
@@ -191,12 +191,21 @@ class QueuedBatchDeliveryTest {
             assertTrue(item.future().get(5, TimeUnit.SECONDS).isSuccess());
         }
         InactivityDeadline originalTimer = (InactivityDeadline) ReflectionTestUtils.getField(slot, "inactivityDeadline");
-        slot.onInactivityDeadline(originalTimer, lastStatus + TIMEOUT_MS);
+        assertNotNull(originalTimer);
+        RequestProtocolTestSupport.expireInactivity(registry, slot, originalTimer, lastStatus + TIMEOUT_MS);
         assertEquals(handoff + TIMEOUT_MS, slot.inactivityDeadlineAtMs().orElseThrow());
         assertOccupancy(1, 1);
-        registry.expireInactiveRequest(slot, handoff + TIMEOUT_MS - 1);
+        RequestProtocolTestSupport.expireInactiveRequest(registry, slot, handoff + TIMEOUT_MS - 1);
         assertOccupancy(1, 1);
-        registry.expireInactiveRequest(slot, handoff + TIMEOUT_MS);
+        var cleanupProof = new java.util.concurrent.CompletableFuture<org.flexlb.balance.eviction.EngineCancelChannel.CancelAck>();
+        org.mockito.Mockito.when(registry.runtime.cancelChannel().cancel(any(), org.mockito.ArgumentMatchers.anyLong(), any(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(cleanupProof);
+        RequestProtocolTestSupport.expireInactiveRequest(registry, slot, handoff + TIMEOUT_MS);
+        assertOccupancy(1, 1);
+        cleanupProof.complete(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+        if (!ack) { reply.complete(ack(1L)); }
+        slot.delivery().settlement().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        RequestProtocolTestSupport.awaitCondition(() ->
+                SchedulerTestSupport.repository(registry).findTerminal(item.requestId()) != null);
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(ack, item.future().get(5, TimeUnit.SECONDS).isSuccess());
@@ -204,8 +213,8 @@ class QueuedBatchDeliveryTest {
 
     @Test
     void blockedRpcDoesNotHoldSlotOrTransactionMonitor() throws Exception {
-        ScheduledRequest item = item(1L);
-        RequestSlot slot = registry.requestSlot(1L);
+        RequestRoute item = item(1L);
+        BalanceContext slot = registry.requestSlot(1L);
         CountDownLatch rpcEntered = new CountDownLatch(1);
         CountDownLatch releaseRpc = new CountDownLatch(1);
         when(grpc.batchEnqueueAsync(anyString(), anyInt(), any())).thenAnswer(call -> {
@@ -216,7 +225,7 @@ class QueuedBatchDeliveryTest {
         });
         try (var transaction = strategy.prepare(List.of(item), new FormulaPredictor("100"), OptionalLong.empty());
              var contender = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-            var preceding = transaction.commitUnderLock();
+            var preceding = transaction.commitUnderLock().materialize();
             transaction.handoff("blocked-rpc", 0, preceding);
             releaseExecutor.countDown();
             try {
@@ -236,16 +245,31 @@ class QueuedBatchDeliveryTest {
     }
 
     @Test
+    void unresolvedCommittedDeliveryIsAbortedWithoutAnOriginalFailure() throws Exception {
+        RequestRoute item = item(1L);
+        try (var transaction = strategy.prepare(List.of(item), new FormulaPredictor("100"), OptionalLong.empty())) {
+            transaction.commitUnderLock();
+            transaction.abort(null);
+            transaction.abort(null);
+        }
+        var response = item.future().get(5, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess());
+        assertTrue(response.getErrorMessage().contains("delivery returned without resolving owner"));
+        assertOccupancy(0, 0);
+        assertEquals(0, decode.routingView().engineCapacityUsed());
+        assertEquals(0, decode.routingView().inflightHardKv());
+        verifyNoInteractions(grpc);
+    }
+
+    @Test
     void rejectedExecutorSubmissionClosesCommittedAdmissionExactlyOnce() throws Exception {
-        ScheduledRequest item = item(1L);
+        RequestRoute item = item(1L);
         var rejection = new java.util.concurrent.RejectedExecutionException("executor rejected");
         BatchDeliveryStrategy.PreparedSubmission submission = mock(BatchDeliveryStrategy.PreparedSubmission.class);
         doThrow(rejection).when(submission).submit(any());
-        var rejectingStrategy = new BatchDeliveryStrategy(
-                () -> org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted(submission),
-                () -> 201L, registry, new DeliveryMetrics(mock(BatchSchedulerReporter.class)));
+        var rejectingStrategy = new BatchDeliveryStrategy(() -> org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted(submission), () -> 201L, mock(BatchSchedulerReporter.class));
         try (var transaction = rejectingStrategy.prepare(List.of(item), new FormulaPredictor("100"), OptionalLong.empty())) {
-            var preceding = transaction.commitUnderLock();
+            var preceding = transaction.commitUnderLock().materialize();
             assertSame(rejection, assertThrows(java.util.concurrent.RejectedExecutionException.class,
                     () -> transaction.handoff("rejected", 0, preceding)));
             transaction.abort(rejection);
@@ -261,12 +285,13 @@ class QueuedBatchDeliveryTest {
 
     @Test
     void payloadFailureAfterClaimUsesExistingNotSentSettlement() throws Exception {
-        ScheduledRequest item = item(1L);
+        RequestRoute item = item(1L);
         item.ctx().setGenerateInputPb(com.google.protobuf.ByteString.EMPTY);
         submit(List.of(item));
         releaseExecutor.countDown();
         awaitDispatchTasks();
         assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
+        registry.runtime.continuations().awaitIdle();
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
@@ -274,11 +299,75 @@ class QueuedBatchDeliveryTest {
         verifyNoInteractions(grpc);
     }
 
-    private ScheduledRequest item(long id) {
-        var context = RequestLifecycleTestSupport.context(config, id);
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.MethodSource("invalidMemberSubsets")
+    void everyInvalidMemberSubsetPreservesPayloadAndRealResourceLedgers(String cause, int invalidMask) throws Exception {
+        var items = List.of(item(11L), item(12L), item(13L));
+        submit(items);
+        assertOccupancy(1, 3);
+        var survivors = new java.util.ArrayList<RequestRoute>();
+        for (int index = 0; index < items.size(); index++) {
+            var item = items.get(index);
+            if ((invalidMask & (1 << index)) == 0) { survivors.add(item); continue; }
+            BalanceContext context = item.ctx();
+            switch (cause) {
+                case "CLIENT_CANCELLED" -> registry.cancel(item.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
+                case "SHUTDOWN" -> registry.cancel(item.requestId(), 0L, CancelReason.SHUTDOWN);
+                case "DEADLINE" -> ReflectionTestUtils.setField(context, "schedulingMetadata",
+                        org.flexlb.dao.SchedulingMetadata.explicit(context.getPriority(), System.currentTimeMillis() - 1L));
+                case "INACTIVITY" -> ReflectionTestUtils.setField(context, "lastWorkerStatusAtMs",
+                        System.currentTimeMillis() - TIMEOUT_MS - 1L);
+                default -> throw new AssertionError(cause);
+            }
+        }
+        releaseExecutor.countDown();
+        awaitDispatchTasks();
+        registry.runtime.continuations().awaitIdle();
+        for (int index = 0; index < items.size(); index++) {
+            if ((invalidMask & (1 << index)) != 0) {
+                assertFalse(items.get(index).future().get(5, TimeUnit.SECONDS).isSuccess());
+            }
+        }
+        assertOccupancy(survivors.isEmpty() ? 0 : 1, survivors.size());
+        assertEquals(survivors.size(), decode.routingView().engineCapacityUsed());
+        assertEquals(survivors.size(), decode.routingView().inflightHardKv());
+        assertEquals(2L * survivors.size(), decode.routingView().inflightExpectedKv());
+        if (survivors.isEmpty()) {
+            verifyNoInteractions(grpc);
+        } else {
+            assertEquals(1, sent.size());
+            assertEquals(survivors.stream().map(RequestRoute::requestId).toList(), sent.getFirst().getDpSlotsList().stream()
+                    .flatMap(slot -> slot.getRequestsList().stream()).map(request -> request.getInput().getRequestId()).toList());
+            var ack = EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(201L);
+            survivors.forEach(item -> ack.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(item.requestId())));
+            reply.complete(ack.build());
+            for (RequestRoute item : survivors) {
+                assertTrue(item.future().get(5, TimeUnit.SECONDS).isSuccess());
+                ledger.finish(201L, item).forEach(fact -> RequestProtocolTestSupport.observePrefill(registry, prefill, RoleType.PREFILL, fact));
+                DeliverySettlementTestSupport.decodeStatus(decode, item.requestId(), true);
+            }
+        }
+        registry.runtime.continuations().awaitIdle();
+        for (int index = 0; index < items.size(); index++) {
+            if ((invalidMask & (1 << index)) != 0) { registry.cancel(items.get(index).requestId(), 0L, CancelReason.CLIENT_CANCELLED); }
+        }
+        assertOccupancy(0, 0);
+        assertEquals(0, decode.routingView().engineCapacityUsed());
+        assertEquals(0, decode.routingView().inflightHardKv());
+        assertEquals(0, decode.routingView().inflightExpectedKv());
+        dispatcher.tryPrepareSubmission().value().close();
+    }
+
+    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> invalidMemberSubsets() {
+        return java.util.stream.Stream.of("CLIENT_CANCELLED", "SHUTDOWN", "DEADLINE", "INACTIVITY").flatMap(cause ->
+                java.util.stream.IntStream.range(0, 8).mapToObj(mask -> org.junit.jupiter.params.provider.Arguments.of(cause, mask)));
+    }
+
+    private RequestRoute item(long id) {
+        var context = RequestProtocolTestSupport.context(config, id);
         context.setGenerateInputPb(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(id)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()).build().toByteString());
-        var future = registry.register(context);
+        var future = RequestProtocolTestSupport.register(registry, context);
         DecodeEndpoint.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
             reservation = decode.reserveUnqueued(pin, id, 1L, 2L, 50);
@@ -290,17 +379,18 @@ class QueuedBatchDeliveryTest {
         status.setServerIp("127.0.0.1");
         status.setHttpPort(8080);
         status.setGrpcPort(8090);
-        var item = new ScheduledRequest(context, future, new Response(), status, null,
+        context.setFuture(future);
+        var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), status, null,
                 prefill, decode, reservation, System.currentTimeMillis());
-        RequestLifecycleTestSupport.bind(registry, new RequestLifecycleTestSupport.Registered(item, future));
+        RequestProtocolTestSupport.bind(registry, new RequestProtocolTestSupport.Registered(item, future));
         ledger.enqueue(item);
         return item;
     }
 
-    private void submit(List<ScheduledRequest> items) {
+    private void submit(List<RequestRoute> items) {
         try (var transaction = strategy.prepare(items, new FormulaPredictor("100 * batchSize"), OptionalLong.empty())) {
             assertEquals(items, transaction.items());
-            var preceding = transaction.commitUnderLock();
+            var preceding = transaction.commitUnderLock().materialize();
             transaction.handoff("queued-race", 0, preceding);
         }
     }

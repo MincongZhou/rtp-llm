@@ -54,25 +54,6 @@ public final class PriorityCostFunction {
         return cost;
     }
 
-    /** Add non-negative diagnostic costs, saturating instead of wrapping. */
-    public static long saturatedAdd(long left, long right) {
-        if (left < 0 || right < 0) {
-            throw new IllegalArgumentException("cost operands must be non-negative");
-        }
-        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
-    }
-
-    /** Multiply non-negative diagnostic costs, saturating instead of wrapping. */
-    public static long saturatedMultiply(long left, long right) {
-        if (left < 0 || right < 0) {
-            throw new IllegalArgumentException("cost operands must be non-negative");
-        }
-        if (left == 0 || right == 0) {
-            return 0;
-        }
-        return left > Long.MAX_VALUE / right ? Long.MAX_VALUE : left * right;
-    }
-
     /**
      * Stage multiplier g(stage) (design doc 11.4/12.5): deeper stages are
      * exponentially more expensive to evict.

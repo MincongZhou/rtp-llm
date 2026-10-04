@@ -37,20 +37,18 @@ class LeakCanaryLongRunE2ETest {
 
     @Test
     @Timeout(15)
-    void prefillRejectionRetainsDecodeUntilInactivityExpiry() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "5", 1.0, true)) {
+    void prefillRejectionSettlesDecodeThroughOrdinaryCleanup() throws Exception {
+        var decision = new org.flexlb.config.DecisionPolicyConfig();
+        decision.setMaxRequests(1);
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "5", 1.0, true, decision)) {
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
-            h.fixedWindowDecision().setMaxRequests(1);
             h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
                     .failOnEnqueue(true).enqueueErrorMessage("reject before admission").build());
             h.startAutoPump(10);
             Response rejected = h.scheduler.submit(h.context(99_999L, 50)).get(5, TimeUnit.SECONDS);
             assertEquals(8510, rejected.getCode());
-            assertEquals(1, h.decodeEndpoint(0).getInflightCount(),
-                    "Prefill rejection alone cannot prove that Decode is safe to release");
-            assertTrue(h.decodeEndpoint(0).routingView().inflightHardKv() > 0);
             AutoTpmE2EHarness.await(() -> h.decodeEndpoint(0).getInflightCount() == 0,
-                    7_000, "an unobserved rejected request must expire without a Decode terminal report");
+                    2_000, "ordinary Cancel cleanup proof must settle the rejected request");
             assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv());
             assertEquals(0, h.prefillEndpoint(0).queuedRequestCount());
             assertEquals(0, h.decodeEngines.get(0).getAcceptedCount(),
@@ -61,13 +59,14 @@ class LeakCanaryLongRunE2ETest {
     @Test
     @Timeout(115)
     void d_long_run_mixed_traffic_with_transient_faults_leaks_nothing() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, true)) {
+        var decision = new org.flexlb.config.DecisionPolicyConfig();
+        decision.setMaxRequests(4);
+        decision.setMaxCollectionWaitMs(5);
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, true, decision)) {
             // Prefill rejection is not Decode terminal evidence. Requests that
             // never reach Decode must settle through bounded inactivity cleanup.
             // Priority ordering and exact terminal cleanup remain active without preemption.
             // 小批次与快速派发维持持续流量。
-            h.fixedWindowDecision().setMaxRequests(4);
-            h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(INACTIVITY_TIMEOUT_MS);
             h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);
             h.startAutoPump(10);

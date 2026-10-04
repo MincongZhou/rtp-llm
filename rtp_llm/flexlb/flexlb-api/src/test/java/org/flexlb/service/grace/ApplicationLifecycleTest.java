@@ -14,9 +14,17 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class ApplicationLifecycleTest {
     @Test
@@ -48,7 +56,7 @@ class ApplicationLifecycleTest {
             closing.get(3, TimeUnit.SECONDS);
         }
         assertTrue(destroyed.get());
-        assertTrue(lifecycle.shutdownCompletedSuccessfully());
+        verify(grpc).drain();
     }
 
     @Test
@@ -98,6 +106,6 @@ class ApplicationLifecycleTest {
         assertFalse(lifecycle.isHealthy());
         verify(consistency).offline();
         verify(grpc).drain();
-        verify(reporter).reportShutdownComplete(anyLong());
+        verify(reporter).reportDuration(org.mockito.ArgumentMatchers.eq(GracefulLifecycleReporter.Event.SHUTDOWN_COMPLETE), anyLong());
     }
 }

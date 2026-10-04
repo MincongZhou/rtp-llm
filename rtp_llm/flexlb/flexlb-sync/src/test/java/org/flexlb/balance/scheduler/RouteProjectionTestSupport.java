@@ -1,12 +1,12 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -14,7 +14,9 @@ import java.util.List;
 
 import static org.mockito.Mockito.mock;
 
-/** Frozen-value builders shared by canonical route-projection tests. */
+/**
+ * Frozen-value builders shared by canonical route-projection tests.
+ */
 final class RouteProjectionTestSupport {
 
     static final long NOW_MS = 10_000L;
@@ -22,36 +24,27 @@ final class RouteProjectionTestSupport {
     static final Comparator<GroupPlanner.Item> FIFO =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparingLong(GroupPlanner.Item::requestId);
+
     static final Comparator<GroupPlanner.Item> PRIORITY =
             Comparator.comparingInt(GroupPlanner.Item::priority)
                     .reversed()
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparingLong(GroupPlanner.Item::requestId);
 
-    static final RouteProjection.DeliveryProjection ROUTE =
-            new RouteDeliveryStrategy(
-                    mock(RequestRegistry.class),
-                    mock(DeliveryMetrics.class))
-                    .projectionPolicy();
-    static final RouteProjection.DeliveryProjection BATCH =
-            new BatchDeliveryStrategy(
-                    () -> CapacityBoundary.Attempt.rejected(
-                            CapacityBoundary.OWNERSHIP_LOST),
-                    () -> 1L,
-                    mock(RequestRegistry.class),
-                    mock(DeliveryMetrics.class))
-                    .projectionPolicy();
+    static final RouteProjection.DeliveryProjection ROUTE = new RouteDeliveryStrategy(mock(BatchSchedulerReporter.class)).projectionPolicy();
 
-    static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR =
-            new PrefillTimePredictor.Evaluator() {
-                @Override
+    static final RouteProjection.DeliveryProjection BATCH = new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST), () -> 1L, mock(BatchSchedulerReporter.class)).projectionPolicy();
+
+    static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR = new PrefillTimePredictor.Evaluator() {
+
+        @Override
                 public long estimateMs(long totalTokens, long hitTokens) {
                     long sequence = Math.max(0L, totalTokens);
                     long hit = Math.max(0L, Math.min(hitTokens, sequence));
                     return (long) (sequence - hit + 0.3 * hit);
                 }
 
-                @Override
+        @Override
                 public double predictBatchMs(
                         org.flexlb.balance.prediction.PrefillBatchFeatures
                                 features) {
@@ -60,7 +53,7 @@ final class RouteProjectionTestSupport {
                                     item.seqLen(), item.hitCache()))
                             .sum();
                 }
-            };
+    };
 
     private RouteProjectionTestSupport() {
     }
@@ -94,7 +87,7 @@ final class RouteProjectionTestSupport {
         ordered.sort(ordering);
         return new QueueSnapshot(
                 NOW_MS,
-                queueScheduling,
+                queueScheduling, org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
                 ordering,
                 constraints,
                 ordered,

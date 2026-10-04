@@ -6,4 +6,9 @@ public interface MasterElectService {
     boolean isNeedConsistency();
 
     boolean isMaster();
+
+    /** Standalone nodes and the elected master schedule locally. */
+    default boolean shouldForwardToMaster() {
+        return isNeedConsistency() && !isMaster();
+    }
 }

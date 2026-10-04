@@ -2,84 +2,93 @@ package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
-import org.flexlb.balance.scheduler.RequestRegistry;
-import org.flexlb.balance.scheduler.RouteAdmission;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestRequirements;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.VictimStage;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.DecodeTaskPhase;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter.CancelEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
-
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.ignoreStubs;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Admission and preemption contracts for {@link EvictionManager#tryAdmit}.
+ * Admission and preemption contracts for {@link EvictionManager#tryReserve}.
  *
- * <p>Requirement: every early decline is side-effect free (returns false
+ * <p>Requirement: every early decline is side-effect free (returns null
  * without reserving a permit, touching any port, or emitting telemetry).
  * Corner cases are derived from the domain requirements, not by echoing
  * if-branches.
  */
-@DisplayName("EvictionManager.tryAdmit contracts")
+@DisplayName("EvictionManager.tryReserve contracts")
 class EvictionManagerTryAdmitTest {
 
     private RequestSchedulerReporter reporter;
-    private BatchSchedulerReporter deliveryReporter;
+
     private EngineCancelChannel cancelChannel;
+
     private DecodePreemptionCoordinator preemptionCoordinator;
-    private RequestRegistry requests;
-    private RouteAdmission admission;
+
+    private AbstractRequestScheduler requests;
+
     private WorkerEndpoint blockedEndpoint;
+
     private EvictionManager manager;
 
     @BeforeEach
     void setUp() {
         reporter = mock(RequestSchedulerReporter.class);
-        deliveryReporter = mock(BatchSchedulerReporter.class);
         cancelChannel = mock(EngineCancelChannel.class);
         preemptionCoordinator = mock(DecodePreemptionCoordinator.class);
-        requests = mock(RequestRegistry.class);
-        admission = mock(RouteAdmission.class);
+        requests = mock(AbstractRequestScheduler.class);
         blockedEndpoint = mock(WorkerEndpoint.class);
-        manager = new EvictionManager(
-                reporter, cancelChannel, preemptionCoordinator, requests,
-                deliveryReporter);
+        manager = new EvictionManager(reporter, cancelChannel, preemptionCoordinator, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests));
     }
 
     @ParameterizedTest
-    @ValueSource(longs = {1_000L, 2_750L})
-    void enginePreemptionUsesFrozenAdmissionAndConfiguredCompletionTimeout(long completionTimeoutMs) {
+    @CsvSource({"1000,false,true,true", "1000,true,true,true", "2750,false,true,true", "2750,true,true,true",
+            "1000,false,false,true", "1000,false,true,false"})
+    void enginePreemptionUsesFrozenBindingAndRequiresOpenAdmission(
+            long completionTimeoutMs, boolean metricsFail, boolean admissionOpen, boolean cancelSupported) {
+        if (metricsFail) {
+            var failure = new IllegalStateException("metrics unavailable");
+            doThrow(failure).when(reporter).reportEviction(
+                    org.mockito.ArgumentMatchers.eq(RequestSchedulerReporter.EvictionEvent.PLAN), anyInt(), any(), any());
+            doThrow(failure).when(reporter).reportEngineCancel(org.mockito.ArgumentMatchers.eq(CancelEvent.REQUEST),
+                    any(), anyInt());
+            doThrow(failure).when(reporter).reportVictim(
+                    anyInt(), anyInt(), any(), any());
+        }
         var config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         PreemptionConfig preemption = new PreemptionConfig();
@@ -92,19 +101,20 @@ class EvictionManagerTryAdmitTest {
 
         var endpoint = mock(DecodeEndpoint.class);
         var routing = mock(DecodeEndpoint.DecodeRoutingView.class);
-        var view = mock(DecodeEndpoint.LayeredAdmissionView.class);
+        var view = mock(DecodeEndpoint.ResourceSnapshot.class);
         var victim = new DecodeEndpoint.DecodeRequestView(901L, 30, 128L, 128L,
-                DecodeTaskPhase.ACCEPTED_NOT_RUNNING, true, 11L, false, false);
+                DecodeTaskPhase.ACCEPTED_NOT_RUNNING, true, 11L, false);
         when(endpoint.ipPort()).thenReturn("127.0.0.1:8080");
         when(endpoint.resourceSnapshot()).thenReturn(view);
         when(view.routing()).thenReturn(routing);
-        when(view.reserved()).thenReturn(Map.of());
-        when(view.confirmed()).thenReturn(List.of(victim));
+        when(routing.address()).thenReturn("127.0.0.1:8080");
+        when(view.requests()).thenReturn(Map.of(victim.requestId(), victim));
         when(routing.placementUsage()).thenReturn(
                 new DecodeEndpoint.CapacityUsage(1L, 20_000L, 10_000L, 0L, 10_000L));
 
-        when(cancelChannel.isSupported(endpoint)).thenReturn(true);
-        when(preemptionCoordinator.preempt(any())).thenReturn(new CompletableFuture<>());
+        when(cancelChannel.isSupported(endpoint)).thenReturn(cancelSupported);
+        var completion = new CompletableFuture<DecodePreemptionCoordinator.PreemptionResult>();
+        when(preemptionCoordinator.preempt(any())).thenReturn(completion);
         var incoming = new Request();
         incoming.setRequestId(902L);
         incoming.setSeqLen(128L);
@@ -113,63 +123,83 @@ class EvictionManagerTryAdmitTest {
         context.setRequest(incoming);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(70, System.currentTimeMillis() + 60_000L));
         var future = new CompletableFuture<Response>();
-        when(requests.claimAdmissionHandle(902L, future)).thenReturn(mock(AdmissionHandle.class));
-        var frozenRequest = DecodeBinding.capture(context);
-        when(admission.decodeBinding()).thenReturn(frozenRequest);
+        context.setFuture(future);
+        org.flexlb.balance.scheduler.SchedulerTestSupport.bindOwner(context, requests);
+        var frozenRequest = RequestRequirements.capture(context);
+        when(requests.isAdmissionOpen(902L, future)).thenReturn(admissionOpen);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(99L);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(1L);
         incoming.setSeqLen(4_096L);
         incoming.setMaxNewTokens(1_024);
 
-        assertTrue(manager.tryAdmit(context, future, admission, endpoint));
+        var outcome = manager.tryReserve(context, frozenRequest, endpoint);
+        verify(cancelChannel).isSupported(endpoint);
+        if (!cancelSupported) {
+            assertNull(outcome);
+            verifyNoInteractions(preemptionCoordinator, requests);
+            return;
+        }
+        verify(requests).isAdmissionOpen(902L, future);
+        verifyNoMoreInteractions(requests);
+        if (!admissionOpen) {
+            assertNull(outcome);
+            assertFalse(future.isDone(), "accepted cancellation or close can precede future completion");
+            verify(preemptionCoordinator, never()).preempt(any());
+            return;
+        }
+        assertNotNull(outcome);
 
         var command = ArgumentCaptor.forClass(DecodePreemptionCoordinator.PreemptionCommand.class);
         verify(preemptionCoordinator).preempt(command.capture());
         assertEquals(completionTimeoutMs, command.getValue().preemptionTimeoutMs());
         assertEquals(50L, command.getValue().cancelAckTimeoutMs());
         assertSame(endpoint, command.getValue().endpoint());
-        assertSame(frozenRequest.capacity(), command.getValue().capacity());
-        assertEquals(frozenRequest.hardKvTokens(), command.getValue().incomingKvTokens());
-        assertEquals(frozenRequest.expectedKvTokens(), command.getValue().incomingExpectedKvTokens());
+        assertSame(frozenRequest, command.getValue().request());
         assertEquals(List.of(victim), command.getValue().victims());
+
+        var exact = new DecodeEndpoint.ReservationHandle(7L, 902L, 31L);
+        completion.complete(new DecodePreemptionCoordinator.PreemptionResult(exact, false, "committed"));
+        assertSame(exact, outcome.join().reservation());
+        assertNull(context.getResponse(), "reservation preparation does not publish a route response");
+        verify(endpoint, org.mockito.Mockito.never()).reservationHandle(anyLong());
+        if (metricsFail) {
+            verify(reporter).reportEviction(org.mockito.ArgumentMatchers.eq(RequestSchedulerReporter.EvictionEvent.PLAN), anyInt(), any(), any());
+            verify(reporter).reportEngineCancel(org.mockito.ArgumentMatchers.eq(CancelEvent.REQUEST), any(), anyInt());
+            verify(reporter).reportVictim(anyInt(), anyInt(), any(), any());
+        }
     }
 
     private void assertZeroSideEffect() {
         verifyNoInteractions(cancelChannel);
         verifyNoInteractions(preemptionCoordinator);
         verifyNoInteractions(requests);
-        verifyNoMoreInteractions(ignoreStubs(admission));
         verifyNoInteractions(blockedEndpoint);
         verifyNoInteractions(reporter);
-        verifyNoInteractions(deliveryReporter);
     }
 
-    private boolean tryAdmit(BalanceContext context,
+    private CompletableFuture<DecodePreemptionCoordinator.PreemptionResult> tryReserve(BalanceContext context,
                              CompletableFuture<Response> future) {
-        DecodeBinding frozenRequest = DecodeBinding.capture(context);
-        when(admission.decodeBinding()).thenReturn(frozenRequest);
-        return manager.tryAdmit(
-                context, future, admission, blockedEndpoint);
+        when(context.getFuture()).thenReturn(future);
+        RequestRequirements frozenRequest = RequestRequirements.capture(context);
+        return manager.tryReserve(context, frozenRequest, blockedEndpoint);
     }
 
     // ─── Shutdown ────────────────────────────────────────────────────────
-
     @Test
     @DisplayName("A shut-down manager declines without side effects")
     void shutdownDeclines() {
         manager.shutdown();
-        assertFalse(tryAdmit(ctx(70), new CompletableFuture<>()));
+        assertNull(tryReserve(ctx(70), new CompletableFuture<>()));
         assertZeroSideEffect();
     }
 
     // ─── Future states ──────────────────────────────────────────────────
-
     @Test
     @DisplayName("An already-completed future declines without side effects")
     void completedFutureDeclines() {
         CompletableFuture<Response> done = new CompletableFuture<>();
         done.complete(null);
-        assertFalse(tryAdmit(ctx(70), done));
+        assertNull(tryReserve(ctx(70), done));
         assertZeroSideEffect();
     }
 
@@ -178,7 +208,7 @@ class EvictionManagerTryAdmitTest {
     void exceptionalFutureDeclines() {
         CompletableFuture<Response> failed = new CompletableFuture<>();
         failed.completeExceptionally(new RuntimeException("test"));
-        assertFalse(tryAdmit(ctx(70), failed));
+        assertNull(tryReserve(ctx(70), failed));
         assertZeroSideEffect();
     }
 
@@ -187,27 +217,25 @@ class EvictionManagerTryAdmitTest {
     void cancelledFutureDeclines() {
         CompletableFuture<Response> cancelled = new CompletableFuture<>();
         cancelled.cancel(false);
-        assertFalse(tryAdmit(ctx(70), cancelled));
+        assertNull(tryReserve(ctx(70), cancelled));
         assertZeroSideEffect();
     }
 
     // ─── Expiration ─────────────────────────────────────────────────────
-
     @Test
     @DisplayName("An expired request declines without side effects")
     void expiredRequestDeclines() {
         BalanceContext expired = ctx(70);
         when(expired.requestExpired(anyLong())).thenReturn(true);
-        assertFalse(tryAdmit(expired, new CompletableFuture<>()));
+        assertNull(tryReserve(expired, new CompletableFuture<>()));
         assertZeroSideEffect();
     }
 
     // ─── Priority boundaries ────────────────────────────────────────────
-
     @Test
     @DisplayName("Priority 0 (NO_PRIORITY sentinel) declines without side effects")
     void noPriorityDeclines() {
-        assertFalse(tryAdmit(ctx(0), new CompletableFuture<>()));
+        assertNull(tryReserve(ctx(0), new CompletableFuture<>()));
         assertZeroSideEffect();
     }
 
@@ -219,19 +247,18 @@ class EvictionManagerTryAdmitTest {
         // proving the priority guard itself passed.
         BalanceContext ctx = ctx(1);
         when(ctx.getConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig()); // FIFO = no preemption
-        assertFalse(tryAdmit(ctx, new CompletableFuture<>()));
+        assertNull(tryReserve(ctx, new CompletableFuture<>()));
         // It passed the priority guard but declined on preemption policy,
         // proving priority=1 is accepted by hasPriority.
     }
 
     // ─── Scheduler mode ─────────────────────────────────────────────────
-
     @Test
     @DisplayName("FIFO ordering (no preemption policy) never evicts")
     void fifoOrderingNeverEvicts() {
         BalanceContext ctx = ctx(50);
         when(ctx.getConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig()); // default=QUEUE+FIFO
-        assertFalse(tryAdmit(ctx, new CompletableFuture<>()));
+        assertNull(tryReserve(ctx, new CompletableFuture<>()));
         assertZeroSideEffect();
     }
 
@@ -242,12 +269,11 @@ class EvictionManagerTryAdmitTest {
         FlexlbConfig directConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         directConfig.setScheduler(SchedulerConfig.direct());
         when(ctx.getConfig()).thenReturn(directConfig);
-        assertFalse(tryAdmit(ctx, new CompletableFuture<>()));
+        assertNull(tryReserve(ctx, new CompletableFuture<>()));
         assertZeroSideEffect();
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────
-
     private static BalanceContext ctx(int priority) {
         BalanceContext ctx = mock(BalanceContext.class);
         when(ctx.getRequest()).thenReturn(new Request());

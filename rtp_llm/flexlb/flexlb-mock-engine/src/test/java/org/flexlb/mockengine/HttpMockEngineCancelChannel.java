@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.balance.scheduler.CancelReason;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -56,7 +57,11 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
     @Override
     public CompletableFuture<CancelAck> cancel(CancelTarget target,
                                                long requestId,
-                                               long timeoutMs) {
+                                               CancelReason reason, long timeoutMs) {
+        if (reason != CancelReason.PRIORITY_PREEMPTED) {
+            return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
+        }
+
         try {
             // TEST-ONLY routing: the mock control plane resolves the target
             // engine by the original Prefill endpoint's gRPC port.

@@ -5,10 +5,9 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
-import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeMode;
+import org.flexlb.balance.scheduler.BalanceContext.AdmissionHandle;
+import org.flexlb.balance.scheduler.BalanceContext.DeliveryClaim;
+import org.flexlb.balance.scheduler.RequestRequirements.DecodeMode;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
@@ -18,13 +17,13 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.config.VictimStage;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -38,6 +37,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.freezeInputs;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
@@ -48,23 +48,33 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** Final selector/pin ownership contracts for {@link DefaultRouter}. */
+/**
+ * Final selector/pin ownership contracts for {@link DefaultRouter}.
+ */
 class DefaultRouterTest {
+
     private DeliveryClaim lastDelivery;
 
     private CostBasedPrefillStrategy prefillSelector;
+
     private DecodeSelector decodeSelector;
+
     private RandomStrategy vitSelector;
+
     private ConfigService configService;
+
     private ModelMetaConfig modelMeta;
-    private RequestRegistry requests;
+
+    private AbstractRequestScheduler requests;
 
     @BeforeEach
     void setUp() {
@@ -73,16 +83,34 @@ class DefaultRouterTest {
         vitSelector = mock(RandomStrategy.class);
         configService = mock(ConfigService.class);
         modelMeta = mock(ModelMetaConfig.class);
-        requests = mock(RequestRegistry.class);
+        var config = SchedulingTestConfig.newConfig();
+        config.setScheduler(org.flexlb.config.SchedulerConfig.direct());
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        var runtime = SchedulerTestSupport.runtime(SchedulerTestSupport.create(configService,
+                mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
+                mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
+                mock(org.flexlb.service.RecentCacheKeyTraceReporter.class)));
+        requests = org.mockito.Mockito.mock(DirectRequestScheduler.class, org.mockito.Mockito.withSettings()
+                .useConstructor(mock(DefaultRouter.class), runtime, config)
+                .defaultAnswer(invocation -> {
+                    if (invocation.getMethod().getDeclaringClass() == DirectRequestScheduler.class) { return invocation.callRealMethod(); }
+                    if (invocation.getMethod().getName().equals("beginSubmission")) { return true; }
+                    if (invocation.getMethod().getName().equals("expirationTimer")) { return mock(ExpirationTimer.class); }
+                    return org.mockito.Answers.RETURNS_DEFAULTS.answer(invocation);
+                }));
         when(requests.claimAdmissionHandle(anyLong(), any())).thenReturn(mock(AdmissionHandle.class));
-        when(requests.register(any())).thenReturn(new CompletableFuture<>());
-        when(requests.commitRoute(any(), any())).thenAnswer(call ->
-                ((java.util.function.BooleanSupplier) call.getArgument(1)).getAsBoolean()
-                        ? PlacementResult.Status.SUCCESS : PlacementResult.Status.BLOCKED);
-        when(requests.claimRouteDelivery(any(), any())).thenAnswer(call -> {
-            call.getArgument(1, PrefillAdmissionResources.CommittedAdmissionOwner.class).transferToEndpoint(call.getArgument(0));
+        when(requests.register(any(), org.mockito.ArgumentMatchers.any())).thenAnswer(call -> {
+            var context = call.getArgument(0, BalanceContext.class);
+            var future = new CompletableFuture<Response>();
+            context.setFuture(future);
+            context.attachScheduler(requests);
+            return future;
+        });
+        when(requests.commitRoute(any(), any())).thenAnswer(call -> RequestProtocolTestSupport.publish(call.getArgument(1)) ? PlacementResult.Status.SUCCESS : PlacementResult.Status.BLOCKED);
+        when(requests.claimDelivery(any(), eq(DeliveryClaimKind.ROUTE_DECISION), eq(0L), any())).thenAnswer(call -> {
+            call.getArgument(3, PrefillAdmissionResources.Member.class).transferToEndpoint(call.getArgument(0));
             DeliveryClaim claim = mock(DeliveryClaim.class);
-            ScheduledRequest item = call.getArgument(0);
+            RequestRoute item = call.getArgument(0);
             lastDelivery = claim;
             doAnswer(inv -> {
                 item.future().complete(item.routeResponse());
@@ -90,16 +118,16 @@ class DefaultRouterTest {
             }).when(requests).publishRoute(eq(claim), any(), anyLong());
             return claim;
         });
-        when(requests.publishDecisionResponseAsync(anyLong(), any(), any())).thenAnswer(call ->
-                call.getArgument(1, CompletableFuture.class).complete(call.getArgument(2)));
+        when(requests.publishDecisionResponseAsync(anyLong(), any(), any())).thenAnswer(call -> call.getArgument(1, CompletableFuture.class).complete(call.getArgument(2)));
     }
 
     @Test
     void invalidRequestFailsBeforePolicyOrEndpointSelection() {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
         DefaultRouter router = router();
+        org.mockito.Mockito.clearInvocations(configService);
 
-        PlacementResult<RouteAdmission, PlacementKey> result = router.select(new BalanceContext(SchedulingTestConfig.newConfig()));
+        PlacementResult<ProvisionalRoute, PlacementKey> result = router.select(new BalanceContext(SchedulingTestConfig.newConfig()), null);
 
         assertEquals(PlacementResult.Status.REJECTED, result.status());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
@@ -108,30 +136,46 @@ class DefaultRouterTest {
         verifyNoInteractions(prefillSelector, decodeSelector, vitSelector);
     }
 
-    @Test
-    void directRouteCommitsRolesAndReleasesGenerationPins() {
+    @ParameterizedTest
+    @CsvSource({"false,false", "true,false", "false,true"})
+    void directRouteCommitsRolesAndReleasesGenerationPins(boolean pinCloseFails, boolean materializationFails) {
         when(modelMeta.requiredRoles()).thenReturn(
                 List.of(RoleType.PREFILL, RoleType.DECODE));
         DefaultRouter router = router();
-        BalanceContext context = context(7L);
-        context.getConfig().setScheduler(org.flexlb.config.SchedulerConfig.direct());
-        SchedulingTestConfig.useNonBatchDispatcher(context.getConfig());
+        BalanceContext context = directContext(7L);
         SelectionFixture prefill = selection(RoleType.PREFILL, 7L, "p", 8001, "g1");
         SelectionFixture decode = selection(RoleType.DECODE, 7L, "d", 8002, "g1");
         PrefillState.RouteReservation registration = mock(PrefillState.RouteReservation.class);
         DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 7L, 2L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(DecodeBinding.capture(context), "g1"))
+        when(decodeSelector.select(RequestRequirements.capture(context), "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
-        stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
-        when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
+        var capture = stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
+        when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(RequestRoute.class), eq(1L)))
                 .thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
-        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(7L), eq(32L), eq(48L), eq(50)))
+        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(7L), eq(32L), eq(48L), eq(50), isNull()))
                 .thenReturn(reservation);
         var permit = stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
+        if (pinCloseFails) {
+            doThrow(new IllegalStateException("pin close failed after direct handoff"))
+                    .when(prefill.pin).close();
+        }
 
+        if (materializationFails) {
+            when(capture.materialize()).thenThrow(new IllegalStateException("snapshot materialization failed"));
+        }
         Response response = scheduler(router, context).submit(context).join();
+        if (materializationFails) {
+            assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
+            verify(permit, never()).dispatch();
+            verify(permit, org.mockito.Mockito.times(2)).release();
+            verify(registration).close();
+            verify(prefill.pin).close();
+            verify(decode.pin).close();
+            verify(requests, never()).publishRoute(any(), any(), anyLong());
+            return;
+        }
 
         assertTrue(response.isSuccess());
         assertEquals(List.of(prefill.status, decode.status),
@@ -142,27 +186,29 @@ class DefaultRouterTest {
                 .release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         verify(prefill.pin).close();
         verify(decode.pin).close();
+        var order = org.mockito.Mockito.inOrder(decode.pin, prefill.pin, requests);
+        order.verify(decode.pin).close();
+        order.verify(prefill.pin).close();
+        order.verify(requests).publishRoute(any(), any(), anyLong());
     }
 
     @Test
     void directRouteRollsBackDecodeWhenPrefillAdmissionIsFull() {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
         DefaultRouter router = router();
-        BalanceContext context = context(8L);
-        context.getConfig().setScheduler(org.flexlb.config.SchedulerConfig.direct());
-        SchedulingTestConfig.useNonBatchDispatcher(context.getConfig());
+        BalanceContext context = directContext(8L);
         SelectionFixture prefill = selection(RoleType.PREFILL, 8L, "p", 8001, "g1");
         SelectionFixture decode = selection(RoleType.DECODE, 8L, "d", 8002, "g1");
         DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 8L, 2L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(DecodeBinding.capture(context), "g1"))
+        when(decodeSelector.select(RequestRequirements.capture(context), "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
-        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(8L), eq(32L), eq(48L), eq(50)))
+        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(8L), eq(32L), eq(48L), eq(50), isNull()))
                 .thenReturn(reservation);
         stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
-        when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
+        when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(RequestRoute.class), eq(1L)))
                 .thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.CAPACITY_FULL, null));
 
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
@@ -177,9 +223,7 @@ class DefaultRouterTest {
     @ValueSource(booleans = {false, true})
     void directAdmissionPassesZeroAndUnknownTimeToLifecycle(boolean unknown) {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
-        BalanceContext context = context(81L);
-        context.getConfig().setScheduler(org.flexlb.config.SchedulerConfig.direct());
-        SchedulingTestConfig.useNonBatchDispatcher(context.getConfig());
+        BalanceContext context = directContext(81L);
         SelectionFixture selected = selection(RoleType.PREFILL, 81L, "p", 8001, "g1");
         when(selected.selection.prefillWorkMs()).thenReturn(0L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
@@ -204,65 +248,52 @@ class DefaultRouterTest {
     @Test
     void directRequestRemainsInCanonicalLifecycleAfterResponseAndReconcilesEarlyDecodeEvidence() throws Exception {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
-        BalanceContext context = context(9L);
-        context.getConfig().setScheduler(org.flexlb.config.SchedulerConfig.direct());
-        SchedulingTestConfig.useNonBatchDispatcher(context.getConfig());
+        BalanceContext context = directContext(9L);
         when(configService.loadBalanceConfig()).thenReturn(context.getConfig());
-        requests = new RequestRegistry(configService,
-                mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
-                mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
+        requests = org.flexlb.balance.scheduler.SchedulerTestSupport.create(configService, mock(org.flexlb.service.monitor.BatchSchedulerReporter.class), mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
+                mock(RecentCacheKeyTraceReporter.class));
         try {
             SelectionFixture prefill = selection(RoleType.PREFILL, 9L, "p", 8001, "g1");
             SelectionFixture decode = selection(RoleType.DECODE, 9L, "d", 8002, "g1");
             var reservation = new DecodeEndpoint.ReservationHandle(1L, 9L, 2L);
-            when(prefillSelector.select(context, RoleType.PREFILL, null))
-                    .thenReturn(PlacementResult.success(prefill.selection));
-            when(decodeSelector.select(DecodeBinding.capture(context), "g1"))
-                    .thenReturn(PlacementResult.success(decode.selection));
+            when(prefillSelector.select(context, RoleType.PREFILL, null)).thenReturn(PlacementResult.success(prefill.selection));
+            when(decodeSelector.select(RequestRequirements.capture(context), "g1")).thenReturn(PlacementResult.success(decode.selection));
             stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
-            when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
-                    .thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED,
-                            mock(PrefillState.RouteReservation.class)));
-            when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(9L), eq(32L), eq(48L), eq(50))).thenReturn(reservation);
+            when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(RequestRoute.class), eq(1L))).thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, mock(PrefillState.RouteReservation.class)));
+            when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(9L), eq(32L), eq(48L), eq(50), isNull())).thenReturn(reservation);
             stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
             when(((DecodeEndpoint) decode.endpoint).isAcceptedByEngine(reservation)).thenReturn(true);
-
             assertTrue(scheduler(router(), context).submit(context).get(2L, TimeUnit.SECONDS).isSuccess());
             assertTrue(context.getFuture().get(2L, TimeUnit.SECONDS).isSuccess());
-            RequestSlot slot = requests.requestSlot(9L);
+            BalanceContext slot = requests.requestSlot(9L);
             synchronized (slot) {
-                assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "decodeOwnsRequestLocked"));
+                assertTrue(slot.decodeAccepted());
                 assertTrue(slot.isLiveGeneration());
                 assertEquals(RequestState.Phase.ACKNOWLEDGED, slot.snapshot().state());
             }
-            requests.expireInactiveRequest(slot, System.currentTimeMillis()
-                    + context.getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
-            assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(9L, 0L).state());
-            assertEquals(0, requests.liveRequestCount());
+            RequestProtocolTestSupport.expireInactiveRequest(requests, slot, System.currentTimeMillis() + context.getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
+            assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).getRequestState(9L, 0L).state());
+            assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).liveRequestCount());
             verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
-            verify((PrefillEndpoint) prefill.endpoint).expireCommittedItem(any(ScheduledRequest.class));
+            verify((PrefillEndpoint) prefill.endpoint).releaseCommittedItem(any(RequestRoute.class));
         } finally {
-            requests.closeAdmissionAndAwaitMutations();
+            RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(requests);
             requests.closeOutstandingAndTerminalize();
-            requests.closeExpiration();
-            requests.closePublisher();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests).timer().close();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests).closeRequestExecutors();
         }
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
+    @ValueSource(booleans = { false, true })
     void directSelectionExceptionPublishesFailureAndClosesLifecycle(boolean fatal) throws Exception {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
-        BalanceContext context = context(10L);
-        context.getConfig().setScheduler(org.flexlb.config.SchedulerConfig.direct());
-        SchedulingTestConfig.useNonBatchDispatcher(context.getConfig());
+        BalanceContext context = directContext(10L);
         when(configService.loadBalanceConfig()).thenReturn(context.getConfig());
-        requests = new RequestRegistry(configService,
-                mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
-                mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
+        requests = org.flexlb.balance.scheduler.SchedulerTestSupport.create(configService, mock(org.flexlb.service.monitor.BatchSchedulerReporter.class), mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
+                mock(RecentCacheKeyTraceReporter.class));
         try {
-            Throwable failure = fatal ? new AssertionError("selection failed")
-                    : new IllegalStateException("selection failed");
+            Throwable failure = fatal ? new AssertionError("selection failed") : new IllegalStateException("selection failed");
             when(prefillSelector.select(context, RoleType.PREFILL, null)).thenThrow(failure);
             if (fatal) {
                 assertEquals(failure, assertThrows(AssertionError.class, () -> scheduler(router(), context).submit(context)));
@@ -273,14 +304,40 @@ class DefaultRouterTest {
             Response response = context.getFuture().get(2L, TimeUnit.SECONDS);
             assertEquals(8510, response.getCode());
             assertEquals("DISPATCH_FAILED", response.getErrorMessage());
-            assertEquals(RequestState.Phase.FAILED, requests.getRequestState(10L, 0L).state());
+            assertEquals(RequestState.Phase.FAILED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).getRequestState(10L, 0L).state());
             verifyNoInteractions(decodeSelector, vitSelector);
         } finally {
-            requests.closeAdmissionAndAwaitMutations();
+            RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(requests);
             requests.closeOutstandingAndTerminalize();
-            requests.closeExpiration();
-            requests.closePublisher();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests).timer().close();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests).closeRequestExecutors();
         }
+    }
+
+    @Test
+    void frozenDemandUsesTheSamePromptLengthForPredictionAndReservation() {
+        var config = SchedulingTestConfig.newConfig();
+        var context = RequestProtocolTestSupport.context(config, 702L);
+        var request = org.mockito.Mockito.spy(context.getRequest());
+        request.setMaxNewTokens(16);
+        when(request.getSeqLen()).thenReturn(32L, 4096L);
+        context.setRequest(request);
+
+        var frozen = RequestRequirements.capture(context);
+        assertEquals(32L, frozen.seqLen());
+        assertEquals(32L, frozen.hardKvTokens());
+        assertEquals(48L, frozen.expectedKvTokens());
+    }
+
+    @Test
+    void capturedRequestCapacityRetainsItsObservedLimit() {
+        var config = SchedulingTestConfig.newConfig();
+        var availability = config.getRouter().getRoles().getDecode().getAvailability();
+        availability.setMaxEngineRequests(7L);
+        var context = RequestProtocolTestSupport.context(config, 703L);
+        var frozen = RequestRequirements.capture(context);
+        availability.setMaxEngineRequests(null);
+        assertEquals(7L, frozen.capacity().maxEngineRequests());
     }
 
     @ParameterizedTest
@@ -290,16 +347,16 @@ class DefaultRouterTest {
     void queuedRouteRetainsSelectedDemandLimitsAndCostFormulaAcrossLaterContextChanges(
             long prompt, int output, long hardKv, long expectedKv) {
         var config = SchedulingTestConfig.newConfig();
-        var context = RequestLifecycleTestSupport.context(config, 701L);
-        context.getRequest().setSeqLen(prompt);
-        context.getRequest().setMaxNewTokens(output);
-        context.setSchedulingMetadata(SchedulingMetadata.explicit(73, Long.MAX_VALUE));
         var limits = config.getRouter().getRoles().getDecode().getAvailability();
         limits.setMaxEngineRequests(1L);
         limits.setMaxKvUsagePercent(90L);
         var estimator = config.getRouter().getRoles().getDecode().getCostEstimator();
         estimator.setExpression("2 * running_size / max_running_size + 3 * kvcache_used_ratio");
-        var frozen = DecodeBinding.capture(context);
+        var context = RequestProtocolTestSupport.context(config, 701L);
+        context.getRequest().setSeqLen(prompt);
+        context.getRequest().setMaxNewTokens(output);
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(73, Long.MAX_VALUE));
+        var frozen = SchedulingTestConfig.freezeInputs(context).getRequirements();
         var prefill = selection(RoleType.PREFILL, 701L, "10.0.0.1", 8080, "g1");
         var selectedDecode = selection(RoleType.DECODE, 701L, "10.0.0.2", 8080, "g1");
         var decode = (DecodeEndpoint) selectedDecode.endpoint();
@@ -322,16 +379,21 @@ class DefaultRouterTest {
         context.getRequest().setMaxNewTokens(1_024);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(4, Long.MAX_VALUE));
 
-        try (var route = RouteAdmission.prepare(context,
-                List.of(prefill.selection(), selectedDecode.selection()), new Response(), frozen)) {
-            assertTrue(route.reserveDecode());
-            var item = route.createScheduledRequest(context, new CompletableFuture<>(), System.currentTimeMillis());
-            assertSame(frozen.capacity(), route.decodeBinding().capacity());
-            assertSame(frozen.capacity(), item.decodeBinding().capacity());
-            assertSame(frozen.costFormula(), route.decodeBinding().costFormula());
-            assertSame(frozen.costFormula(), item.decodeBinding().costFormula());
-            assertSame(reservation, item.decodeBinding().reservation());
-            assertSame(decode, item.decodeBinding().endpoint());
+        try (var route = ProvisionalRoute.prepare(context,
+                List.of(prefill.selection(), selectedDecode.selection()), new Response())) {
+            assertTrue(route.reserveDecode(context.getRequirements()));
+            var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), route.response(),
+                    ServerStatus.copyOf(route.prefillStatus()), ServerStatus.copyOf(route.decodeStatus()),
+                    route.prefillEndpoint(), route.decodeEndpoint(), route.decodeReservation(),
+                    System.currentTimeMillis());
+            assertSame(frozen, context.getRequirements());
+            assertSame(frozen, item.requirements());
+            assertSame(frozen.capacity(), context.getRequirements().capacity());
+            assertSame(frozen.capacity(), item.requirements().capacity());
+            assertSame(frozen.costFormula(), context.getRequirements().costFormula());
+            assertSame(frozen.costFormula(), item.requirements().costFormula());
+            assertSame(reservation, item.decodeReservation());
+            assertSame(decode, item.decodeEp());
             assertEquals(hardKv, item.seqLen());
             assertEquals(DecodeMode.WAIT_AT_PLACEMENT, frozen.mode());
 
@@ -347,17 +409,80 @@ class DefaultRouterTest {
         verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
     }
 
-    private static void stubPrefillCommit(PrefillEndpoint prefill) {
-        stubRouteCommit(prefill, new org.flexlb.balance.projection.WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L));
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedDecodeAdoptionReleasesOnceAndPreservesOriginalFailure(boolean adoptionThrows) {
+        var context = context(702L);
+        var prefill = selection(RoleType.PREFILL, 702L, "p", 8001, "g1");
+        var selectedDecode = selection(RoleType.DECODE, 702L, "d", 8002, "g1");
+        var decode = (DecodeEndpoint) selectedDecode.endpoint();
+        var reservation = new DecodeEndpoint.ReservationHandle(1L, 702L, 1L);
+        var adoptionFailure = new IllegalStateException("adoption failed");
+        var cleanupFailure = new IllegalStateException("cleanup failed");
+        if (adoptionThrows) {
+            when(decode.markQueued(selectedDecode.pin(), reservation)).thenThrow(adoptionFailure);
+        }
+        doThrow(cleanupFailure).when(decode)
+                .release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+
+        try (var route = ProvisionalRoute.prepare(context,
+                List.of(prefill.selection(), selectedDecode.selection()), new Response())) {
+            var actual = assertThrows(IllegalStateException.class,
+                    () -> route.adoptDecodeReservation(decode, reservation));
+            assertSame(adoptionThrows ? adoptionFailure : cleanupFailure, actual);
+            assertEquals(adoptionThrows ? List.of(cleanupFailure) : List.of(),
+                    List.of(actual.getSuppressed()));
+        }
+        verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        verify(prefill.pin()).close();
+        verify(selectedDecode.pin()).close();
     }
 
-    private static void stubRouteCommit(PrefillEndpoint endpoint,
+    @Test
+    void committedQueueOwnsCapacityEvenWhenSelectionPinCleanupFails() {
+        var context = context(703L);
+        var prefill = selection(RoleType.PREFILL, 703L, "p", 8001, "g1");
+        var decode = selection(RoleType.DECODE, 703L, "d", 8002, "g1");
+        var endpoint = (DecodeEndpoint) decode.endpoint();
+        var reservation = new DecodeEndpoint.ReservationHandle(1L, 703L, 1L);
+        var cleanupFailure = new IllegalStateException("pin cleanup failed after publication");
+        var route = ProvisionalRoute.prepare(context,
+                List.of(prefill.selection(), decode.selection()), new Response());
+        when(endpoint.markQueued(decode.pin(), reservation)).thenReturn(true);
+        assertTrue(route.adoptDecodeReservation(endpoint, reservation));
+        var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), route.response(),
+                route.prefillStatus(), route.decodeStatus(), route.prefillEndpoint(), endpoint,
+                reservation, System.currentTimeMillis());
+        when(route.prefillEndpoint().offerPinned(prefill.pin(), item, org.flexlb.balance.scheduler.QueueExecutionSettings.capture(item.ctx().getConfig()))).thenReturn(true);
+        doThrow(cleanupFailure).when(prefill.pin()).close();
+
+        var publication = route.new QueuePublication(item,
+                QueueExecutionSettings.capture(item.ctx().getConfig()));
+        publication.publish();
+        assertTrue(publication.published());
+        verify(prefill.pin(), never()).close();
+        verify(decode.pin(), never()).close();
+        assertSame(cleanupFailure, assertThrows(IllegalStateException.class, route::close));
+        route.close();
+        verify(prefill.pin()).close();
+        verify(decode.pin()).close();
+        verify(endpoint, never()).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+    }
+
+    private static PrefillState.WorkCapture stubPrefillCommit(PrefillEndpoint prefill) {
+        return stubRouteCommit(prefill, new org.flexlb.balance.projection.WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L));
+    }
+
+    private static PrefillState.WorkCapture stubRouteCommit(PrefillEndpoint endpoint,
             org.flexlb.balance.projection.WorkSnapshot precedingWork) {
         var commit = mock(PrefillEndpoint.RouteCommitAdmission.class);
         var handoff = mock(PrefillState.CommittedHandoff.class);
-        when(handoff.precedingWork()).thenReturn(precedingWork);
+        var capture = mock(PrefillState.WorkCapture.class);
+        when(capture.materialize()).thenReturn(precedingWork);
+        when(handoff.precedingWork()).thenReturn(capture);
         when(endpoint.tryBeginRouteCommitAdmission()).thenReturn(commit);
         when(commit.commit(any(), any())).thenReturn(handoff);
+        return capture;
     }
 
     private static DecodeEndpoint.EngineDispatchPermit stubDecodePermit(
@@ -381,7 +506,7 @@ class DefaultRouterTest {
         stubQueueSelection(
                 context, role, null, PlacementResult.blocked(role));
 
-        PlacementResult<RouteAdmission, PlacementKey> blocked = router.select(context);
+        PlacementResult<ProvisionalRoute, PlacementKey> blocked = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
 
         assertEquals(new PlacementKey(role, null), blocked.blocker());
@@ -396,7 +521,7 @@ class DefaultRouterTest {
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.blocked(RoleType.DECODE));
 
-        PlacementResult<RouteAdmission, PlacementKey> blocked = router.select(context);
+        PlacementResult<ProvisionalRoute, PlacementKey> blocked = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
 
         assertEquals(new PlacementKey(RoleType.DECODE, null),
@@ -415,16 +540,42 @@ class DefaultRouterTest {
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(
-                DecodeBinding.capture(context), "g1"))
+                RequestRequirements.capture(context), "g1"))
                 .thenReturn(PlacementResult.rejected(
                         Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
 
-        PlacementResult<RouteAdmission, PlacementKey> rejected = router.select(context);
+        PlacementResult<ProvisionalRoute, PlacementKey> rejected = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.REJECTED, rejected.status());
 
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 rejected.failure().getCode());
         verify(prefill.selection).close();
+    }
+
+    @Test
+    void selectionFailureClosesAllPinsInReverseOrderAndKeepsPrimaryCause() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE, RoleType.VIT));
+        BalanceContext context = context(120L);
+        var prefill = selection(RoleType.PREFILL, 120L, "p", 8001, "g1");
+        var decode = selection(RoleType.DECODE, 120L, "d", 8002, "g1");
+        when(prefillSelector.select(context, RoleType.PREFILL, null))
+                .thenReturn(PlacementResult.success(prefill.selection));
+        when(decodeSelector.select(RequestRequirements.capture(context), "g1"))
+                .thenReturn(PlacementResult.success(decode.selection));
+        var primary = new IllegalStateException("selection failed");
+        var decodeClose = new IllegalStateException("Decode pin close failed");
+        var prefillClose = new IllegalStateException("Prefill pin close failed");
+        when(vitSelector.select(context, RoleType.VIT, "g1")).thenThrow(primary);
+        doThrow(decodeClose).when(decode.selection).close();
+        doThrow(prefillClose).when(prefill.selection).close();
+
+        assertSame(primary, assertThrows(IllegalStateException.class, () -> router().select(freezeInputs(context), null)));
+
+        var order = org.mockito.Mockito.inOrder(decode.selection, prefill.selection);
+        order.verify(decode.selection).close();
+        order.verify(prefill.selection).close();
+        assertEquals(List.of(decodeClose), List.of(primary.getSuppressed()));
+        assertEquals(List.of(prefillClose), List.of(decodeClose.getSuppressed()));
     }
 
     @Test
@@ -438,13 +589,13 @@ class DefaultRouterTest {
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
 
-        PlacementResult<RouteAdmission, PlacementKey> admitted = router.select(context);
+        PlacementResult<ProvisionalRoute, PlacementKey> admitted = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
 
         assertTrue(admitted.value().response().isSuccess());
         assertEquals(List.of(prefill.status),
                 admitted.value().response().getServerStatus());
-        verify(prefill.selection).takeGenerationPin();
+        verify(prefill.selection).transferToRoute();
         verify(prefill.pin, never()).close();
 
         admitted.value().close();
@@ -467,7 +618,7 @@ class DefaultRouterTest {
         when(vitSelector.select(context, RoleType.VIT, "selected-group"))
                 .thenReturn(vit.selection);
 
-        PlacementResult<RouteAdmission, PlacementKey> admitted = router.select(context);
+        PlacementResult<ProvisionalRoute, PlacementKey> admitted = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
         admitted.value().close();
 
@@ -484,11 +635,14 @@ class DefaultRouterTest {
         when(modelMeta.requiredRoles())
                 .thenReturn(List.of(RoleType.PREFILL, RoleType.VIT));
         DefaultRouter router = router();
-        BalanceContext context = context(41L);
-        TrafficPolicyConfig groupSelector = mock(TrafficPolicyConfig.class);
-        context.getConfig().getRouter().setGroupSelector(groupSelector);
-        when(groupSelector.resolveTargetGroup(context.getRequest()))
-                .thenReturn(Optional.of("forced"));
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        SchedulingTestConfig.usePriorityQueue(config);
+        TrafficPolicyConfig groupSelector = new TrafficPolicyConfig();
+        var target = new TrafficPolicyConfig.Target();
+        target.setGroup("forced");
+        groupSelector.setDefaultTargets(List.of(target));
+        config.getRouter().setGroupSelector(groupSelector);
+        BalanceContext context = context(41L, config);
         SelectionFixture prefill = selection(
                 RoleType.PREFILL, 41L, "p", 8001, "other");
         SelectionFixture vit = selection(
@@ -499,7 +653,7 @@ class DefaultRouterTest {
         when(vitSelector.select(context, RoleType.VIT, "forced"))
                 .thenReturn(vit.selection);
 
-        PlacementResult<RouteAdmission, PlacementKey> admitted = router.select(context);
+        PlacementResult<ProvisionalRoute, PlacementKey> admitted = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
         admitted.value().close();
 
@@ -522,7 +676,7 @@ class DefaultRouterTest {
         when(vitSelector.select(context, RoleType.VIT, "g1"))
                 .thenReturn(null);
 
-        PlacementResult<RouteAdmission, PlacementKey> blocked = router.select(context);
+        PlacementResult<ProvisionalRoute, PlacementKey> blocked = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
 
         assertEquals(new PlacementKey(RoleType.VIT, "g1"),
@@ -542,16 +696,16 @@ class DefaultRouterTest {
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(
-                DecodeBinding.capture(context), "g1"))
+                RequestRequirements.capture(context), "g1"))
                 .thenReturn(PlacementResult.blocked(RoleType.DECODE));
 
-        PlacementResult<RouteAdmission, PlacementKey> blocked = router.select(context);
+        PlacementResult<ProvisionalRoute, PlacementKey> blocked = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
 
         assertEquals(new PlacementKey(RoleType.DECODE, "g1"),
                 blocked.blocker());
         verify(prefill.selection).close();
-        verify(prefill.selection, never()).takeGenerationPin();
+        verify(prefill.selection, never()).transferToRoute();
     }
 
     @Test
@@ -566,10 +720,10 @@ class DefaultRouterTest {
                 .thenReturn(PlacementResult.success(foreign.selection));
 
         assertThrows(IllegalStateException.class,
-                () -> router.select(context));
+                () -> router.select(freezeInputs(context), router.resolvePolicyGroup(context)));
 
         verify(foreign.selection).close();
-        verify(foreign.selection, never()).takeGenerationPin();
+        verify(foreign.selection, never()).transferToRoute();
     }
 
     @Test
@@ -586,7 +740,7 @@ class DefaultRouterTest {
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
 
-        PlacementResult<RouteAdmission, PlacementKey> admitted = router.select(context);
+        PlacementResult<ProvisionalRoute, PlacementKey> admitted = router.select(freezeInputs(context), router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
         admitted.value().close();
 
@@ -595,12 +749,9 @@ class DefaultRouterTest {
     }
 
     private RequestScheduler scheduler(DefaultRouter router, BalanceContext context) {
+        SchedulingTestConfig.freezeInputs(context);
         when(configService.loadBalanceConfig()).thenReturn(context.getConfig());
-        return new RequestScheduler(configService, router,
-                mock(org.flexlb.balance.endpoint.EndpointRegistry.class),
-                mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
-                mock(org.flexlb.balance.eviction.EvictionManager.class), requests,
-                new PlacementAvailability());
+        return org.flexlb.balance.scheduler.SchedulerTestSupport.configure(requests, configService.loadBalanceConfig(), router, mock(org.flexlb.service.monitor.BatchSchedulerReporter.class), mock(org.flexlb.balance.eviction.EvictionManager.class), new PlacementAvailability());
     }
 
     private DefaultRouter router() {
@@ -608,7 +759,6 @@ class DefaultRouterTest {
                 prefillSelector,
                 decodeSelector,
                 vitSelector,
-                configService,
                 modelMeta);
     }
 
@@ -621,16 +771,62 @@ class DefaultRouterTest {
             case PREFILL, PDFUSION -> when(prefillSelector.select(
                     context, role, group)).thenReturn(result);
             case DECODE -> when(decodeSelector.select(
-                    DecodeBinding.capture(context), group)).thenReturn(result);
+                    RequestRequirements.capture(context), group)).thenReturn(result);
             case VIT -> when(vitSelector.select(context, role, group))
                     .thenReturn(result.value());
             case FRONTEND -> throw new IllegalArgumentException();
         }
     }
 
+    @ParameterizedTest
+    @EnumSource(value = RoleType.class, names = {"PREFILL", "PDFUSION"})
+    void reportedBlockerResolvesExactRoleAndCapturedCapacityVersion(RoleType prefillRole) {
+        var context = context(990L);
+        var prefill = selection(prefillRole, 990L, "shared", 8080, "g1");
+        var decode = selection(RoleType.DECODE, 990L, "shared", 8080, "g1");
+        when(prefill.endpoint().ipPort()).thenReturn("shared:8080");
+        when(decode.endpoint().ipPort()).thenReturn("shared:8080");
+        when(prefill.selection().placementVersion()).thenReturn(11L);
+        when(decode.selection().placementVersion()).thenReturn(23L);
+        var prefillEndpoint = (PrefillEndpoint) prefill.endpoint();
+        var decodeEndpoint = (DecodeEndpoint) decode.endpoint();
+        when(prefillEndpoint.placementVersion()).thenReturn(11L);
+        when(decodeEndpoint.placementVersion()).thenReturn(23L);
+        try (var route = ProvisionalRoute.prepare(context,
+                List.of(prefill.selection(), decode.selection()), new Response())) {
+            var prefillKey = route.prefillPlacementKey();
+            var decodeKey = route.decodePlacementKey();
+            assertSame(prefillEndpoint, route.blockedEndpointIfCurrent(prefillKey));
+            assertSame(decodeEndpoint, route.blockedEndpointIfCurrent(decodeKey));
+            // Changing one role does not invalidate the other role at the same address.
+            when(decodeEndpoint.placementVersion()).thenReturn(24L);
+            org.junit.jupiter.api.Assertions.assertNull(route.blockedEndpointIfCurrent(decodeKey));
+            assertSame(prefillEndpoint, route.blockedEndpointIfCurrent(prefillKey));
+            when(prefillEndpoint.placementVersion()).thenReturn(12L);
+            org.junit.jupiter.api.Assertions.assertNull(route.blockedEndpointIfCurrent(prefillKey));
+            assertThrows(IllegalArgumentException.class, () -> route.blockedEndpointIfCurrent(
+                    PlacementKey.exact(RoleType.DECODE, "g1", "other:8080")));
+            assertThrows(IllegalArgumentException.class, () -> route.blockedEndpointIfCurrent(
+                    PlacementKey.exact(RoleType.DECODE, "other-group", "shared:8080")));
+        }
+        verify(prefill.pin()).close();
+        verify(decode.pin()).close();
+    }
+
+    private static BalanceContext directContext(long requestId) {
+        FlexlbConfig config = SchedulingTestConfig.newConfig();
+        config.setScheduler(org.flexlb.config.SchedulerConfig.direct());
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        return context(requestId, config);
+    }
+
     private static BalanceContext context(long requestId) {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.usePriorityQueue(config);
+        return context(requestId, config);
+    }
+
+    private static BalanceContext context(long requestId, FlexlbConfig config) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(32L);
@@ -664,16 +860,17 @@ class DefaultRouterTest {
         status.setGroup(group);
         when(selection.serverStatus()).thenReturn(status);
         when(selection.prefillWorkMs()).thenReturn(1L);
-        when(selection.takeGenerationPin()).thenReturn(pin);
+        when(selection.generationPin()).thenReturn(pin);
+        when(selection.endpoint()).thenReturn(endpoint);
+        var selectionOpen = new java.util.concurrent.atomic.AtomicBoolean(true);
+        org.mockito.Mockito.doAnswer(call -> {
+            if (selectionOpen.compareAndSet(true, false)) { pin.close(); }
+            return null;
+        }).when(selection).close();
         when(pin.endpoint()).thenReturn(endpoint);
         return new SelectionFixture(selection, pin, endpoint, status);
     }
 
-    private record SelectionFixture(
-            SelectedRole selection,
-            WorkerEndpoint.GenerationPin pin,
-            WorkerEndpoint endpoint,
-            ServerStatus status) {
+    private record SelectionFixture(SelectedRole selection, WorkerEndpoint.GenerationPin pin, WorkerEndpoint endpoint, ServerStatus status) {
     }
-
 }

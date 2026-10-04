@@ -11,8 +11,8 @@ import java.util.OptionalDouble;
 /** Projects one incoming route against immutable, coherently captured inputs. */
 public final class RouteProjection {
 
-    private static final ThreadLocal<Session> SESSIONS =
-            ThreadLocal.withInitial(Session::new);
+    private static final ThreadLocal<RouteTimelineProjector> PROJECTORS =
+            ThreadLocal.withInitial(RouteTimelineProjector::new);
 
     private RouteProjection() {
     }
@@ -32,15 +32,9 @@ public final class RouteProjection {
         /** Invocation-local, prefix-aware planning cursor. */
         GroupPlanning planning(Predictions predictions);
 
-        GroupService service(
-                GroupPlanner.Plan<GroupPlanner.Item> plan,
-                Predictions predictions);
-
-        /** Service for the result of this exact planning cursor, with the same frozen model and inputs. */
-        default GroupService service(GroupPlanner.Plan<GroupPlanner.Item> plan,
-                                     Predictions predictions, GroupPlanning planning) {
-            return service(plan, predictions);
-        }
+        /** Compute the one required completion prefix, reusing only this exact planning cursor. */
+        long completionOffsetMs(List<GroupPlanner.Item> items, int memberIndex,
+                                Predictions predictions, GroupPlanning planning);
 
     }
 
@@ -72,12 +66,8 @@ public final class RouteProjection {
                     seqLen, hitCache));
         }
 
-        double batchPlanningDurationMs(List<GroupPlanner.Item> items);
-
-        /** Optional append-only implementation, scoped to one GroupPlanner invocation. */
-        default PrefillTimePredictor.BatchPrediction newBatchPrediction() {
-            return null;
-        }
+        /** Fresh append-only session; full-batch models adapt through Evaluator's default implementation. */
+        PrefillTimePredictor.BatchPrediction newBatchPrediction();
 
         long batchDurationMs(List<GroupPlanner.Item> items);
 
@@ -88,16 +78,6 @@ public final class RouteProjection {
                     seqLen, hitCache)));
         }
 
-    }
-
-    /** Invocation-local lazy service cursor for one exact planned group. */
-    public interface GroupService {
-
-        /** Predict only through this member's completion. */
-        long completionOffsetMs(int memberIndex);
-
-        /** Predict a complete group that runs before the probe. */
-        long totalDurationMs();
     }
 
     /** Effect of a captured blocked head after a probe has overtaken it. */
@@ -184,7 +164,9 @@ public final class RouteProjection {
         public static final long UNKNOWN = -1L;
 
         public Candidate {
-            requireKnownOrUnknown(projectedTtftMsValue, "projectedTtftMs");
+            if (projectedTtftMsValue < UNKNOWN) {
+                throw new IllegalArgumentException("projectedTtftMs must be non-negative");
+            }
             if ((state == State.MODELED)
                     != (projectedTtftMsValue != UNKNOWN)) {
                 throw new IllegalArgumentException(
@@ -208,35 +190,8 @@ public final class RouteProjection {
         }
 
         public OptionalLong projectedTtftMs() {
-            return optional(projectedTtftMsValue);
-        }
-
-        public long requiredProjectedTtftMs() {
-            if (projectedTtftMsValue == UNKNOWN) {
-                throw new IllegalStateException(
-                        "candidate projected TTFT is unknown");
-            }
-            return projectedTtftMsValue;
-        }
-
-        public boolean engineWorkUnmodeled() {
-            return state == State.UNMODELED_ENGINE_WORK;
-        }
-
-        public boolean selectable() {
-            return state == State.MODELED
-                    && projectedTtftMsValue != UNKNOWN;
-        }
-
-        private static void requireKnownOrUnknown(long value, String name) {
-            if (value < 0L && value != UNKNOWN) {
-                throw new IllegalArgumentException(name + " must be non-negative");
-            }
-        }
-
-        private static OptionalLong optional(long value) {
-            return value == UNKNOWN
-                    ? OptionalLong.empty() : OptionalLong.of(value);
+            return projectedTtftMsValue == UNKNOWN
+                    ? OptionalLong.empty() : OptionalLong.of(projectedTtftMsValue);
         }
 
         public enum InitialHeadDisposition {
@@ -295,7 +250,7 @@ public final class RouteProjection {
             PrefillTimePredictor.Evaluator evaluator,
             DeliveryProjection deliveryProjection,
             long planningAtMs) {
-        CandidateView view = projectView(
+        CandidateView view = projector().projectView(
                 inputs, probe.requestId(), probe.priority(),
                 probe.enqueuedAtMs(), probe.expiresAtMs(), probe.seqLen(),
                 probe.hitCache(), probe.routingCacheMatchTokens(),
@@ -303,64 +258,13 @@ public final class RouteProjection {
         return immutable(view);
     }
 
-    /**
-     * Allocation-free full-fleet projection. The returned view is overwritten
-     * by the next projection on the same thread and must be copied immediately.
-     */
-    public static CandidateView projectView(
-            Inputs inputs,
-            long requestId,
-            int priority,
-            long enqueuedAtMs,
-            long expiresAtMs,
-            long seqLen,
-            long hitCache,
-            long routingCacheMatchTokens,
-            PrefillTimePredictor.Evaluator evaluator,
-            DeliveryProjection deliveryProjection,
-            long planningAtMs) {
-        return session().projectView(
-                inputs, requestId, priority, enqueuedAtMs, expiresAtMs,
-                seqLen, hitCache, routingCacheMatchTokens,
-                evaluator, deliveryProjection, planningAtMs);
-    }
-
-    /** Reusable projector owned by one planner thread for one fleet traversal. */
-    public static Session session() {
-        return SESSIONS.get();
-    }
-
-    public static final class Session {
-        private final RouteTimelineProjector projector =
-                new RouteTimelineProjector();
-
-        private Session() {
-        }
-
-        public CandidateView projectView(
-                Inputs inputs,
-                long requestId,
-                int priority,
-                long enqueuedAtMs,
-                long expiresAtMs,
-                long seqLen,
-                long hitCache,
-                long routingCacheMatchTokens,
-                PrefillTimePredictor.Evaluator evaluator,
-                DeliveryProjection deliveryProjection,
-                long planningAtMs) {
-            projector.reset(
-                    requestId, priority, enqueuedAtMs, expiresAtMs,
-                    seqLen, hitCache, routingCacheMatchTokens);
-            CandidateView candidate = projector.project(
-                    inputs.queue(), inputs.work(), evaluator,
-                    deliveryProjection, planningAtMs);
-            return applyAdmissionPolicy(inputs.queue(), candidate);
-        }
+    /** Reusable projector owned by the current planner thread. */
+    public static RouteTimelineProjector projector() {
+        return PROJECTORS.get();
     }
 
     /** Apply one observed worker admission wait without inventing a release duration. */
-    private static CandidateView applyAdmissionPolicy(
+    static CandidateView applyAdmissionPolicy(
             QueueSnapshot queue,
             CandidateView candidate) {
         QueueSnapshot.AdmissionBlock observation = queue.admissionBlock();
@@ -371,71 +275,33 @@ public final class RouteProjection {
                         && !candidate.engineWorkUnmodeled())) {
             return candidate;
         }
-        if (candidate.engineWorkUnmodeled()) {
-            return copyAdmissionResult(
-                    candidate,
-                    Candidate.State.BLOCKED,
-                    Candidate.UNKNOWN,
-                    observation.semantics().blockedDetail(),
-                    blockerRole(observation.semantics()));
+        AdmissionBlockSemantics semantics = observation.semantics();
+        Candidate.State state = Candidate.State.BLOCKED;
+        String detail = semantics.blockedDetail();
+        if (!candidate.engineWorkUnmodeled()) {
+            switch (candidate.initialHeadDisposition()) {
+                case TERMINAL_PRUNED -> { return candidate; }
+                case NONE -> throw new IllegalStateException(
+                        "admission-blocked ACTIVE head was not projected");
+                case BEFORE_PROBE -> { }
+                case AFTER_PROBE -> {
+                    state = switch (semantics.afterProbe()) {
+                        case BLOCKED -> Candidate.State.BLOCKED;
+                        case UNAVAILABLE -> Candidate.State.UNAVAILABLE;
+                    };
+                    detail = semantics.afterProbeDetail();
+                }
+            }
         }
-
-        return switch (candidate.initialHeadDisposition()) {
-            case TERMINAL_PRUNED -> candidate;
-            case BEFORE_PROBE -> copyAdmissionResult(
-                    candidate,
-                    Candidate.State.BLOCKED,
-                    Candidate.UNKNOWN,
-                    observation.semantics().blockedDetail(),
-                    blockerRole(observation.semantics()));
-            case NONE -> throw new IllegalStateException(
-                    "admission-blocked ACTIVE head was not projected");
-            case AFTER_PROBE -> applyAfterProbeAdmission(
-                    observation.semantics(), candidate);
-        };
-    }
-
-    private static CandidateView applyAfterProbeAdmission(
-            AdmissionBlockSemantics semantics,
-            CandidateView candidate) {
-        return switch (semantics.afterProbe()) {
-            case BLOCKED -> copyAdmissionResult(
-                    candidate,
-                    Candidate.State.BLOCKED,
-                    Candidate.UNKNOWN,
-                    semantics.afterProbeDetail(),
-                    null);
-            case UNAVAILABLE -> copyAdmissionResult(
-                    candidate,
-                    Candidate.State.UNAVAILABLE,
-                    Candidate.UNKNOWN,
-                    semantics.afterProbeDetail(),
-                    blockerRole(semantics));
-        };
-    }
-
-    private static RoleType blockerRole(
-            AdmissionBlockSemantics semantics) {
-        return semantics.afterProbe() == AfterProbeAdmission.UNAVAILABLE
-                ? semantics.blockerRole()
-                : null;
-    }
-
-    private static Candidate copyAdmissionResult(
-            CandidateView source,
-            Candidate.State state,
-            long projectedTtftMs,
-            String detail,
-            RoleType blockerRole) {
         return new Candidate(
                 state,
-                projectedTtftMs,
-                source.incomingPrefillMs(),
-                source.initialHeadDisposition(),
+                Candidate.UNKNOWN,
+                candidate.incomingPrefillMs(),
+                candidate.initialHeadDisposition(),
                 detail,
-                blockerRole,
-                source.cacheHitTokens(),
-                source.routingCacheMatchTokens());
+                semantics.afterProbe() == AfterProbeAdmission.UNAVAILABLE ? semantics.blockerRole() : null,
+                candidate.cacheHitTokens(),
+                candidate.routingCacheMatchTokens());
     }
 
     private static Candidate immutable(CandidateView source) {

@@ -11,6 +11,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
@@ -671,6 +672,9 @@ public final class JavaMockEngineCluster {
         // ACTIVE_CANCEL marker, whose cancel retries stay ACCEPTED) and from
         // cancelledRidHistory (terminal history, whose late cancels answer
         // NOT_FOUND — seen-but-terminal, the production recently-seen set).
+        private final Object ordinaryCleanupLock = new Object();
+        private final Map<Long, CancelReason> ordinaryFences = com.google.common.cache.CacheBuilder.newBuilder()
+                .expireAfterWrite(10, TimeUnit.MINUTES).<Long, CancelReason>build().asMap();
         private final LinkedHashSet<Long> fencedRequestIds = new LinkedHashSet<>();
         // Recent execution times for snapshot prefill_ms_*/decode_ms_* fields.
         private final ArrayDeque<Double> recentPrefillTimes = new ArrayDeque<>();
@@ -1099,6 +1103,7 @@ public final class JavaMockEngineCluster {
             }
 
             Runnable process = () -> {
+                synchronized (ordinaryCleanupLock) {
                 // ── Enqueue-ACK fault pre-admission split (enqueue_ack_partial_fail /
                 // enqueue_ack_error_code) ──
                 // Rejected members are diverted to the ack errors BEFORE any
@@ -1155,6 +1160,12 @@ public final class JavaMockEngineCluster {
                         // (PRIORITY_PREEMPTED) error — before the scheduler,
                         // before any engine state is created (the fenced rid
                         // stays unknown to every bookkeeping map).
+                        if (ordinaryFences.containsKey(requestId)) {
+                            response.addErrorsBuilder().setRequestId(requestId)
+                                    .setErrorInfo(ordinaryCancellationError(requestId));
+                            requestStates.put(requestId, "rejected");
+                            continue;
+                        }
                         if (hasFencedRequestId(requestId)) {
                             response.addErrorsBuilder()
                                     .setRequestId(requestId)
@@ -1324,6 +1335,7 @@ public final class JavaMockEngineCluster {
                 }
                 observer.onNext(response.build());
                 observer.onCompleted();
+                }
             };
 
             lastEnqueueTime.set(System.nanoTime());
@@ -1389,6 +1401,7 @@ public final class JavaMockEngineCluster {
             // the same caliber getCacheStatus and /snapshot report, so the master
             // sees one consistent number on every surface.
             EngineRpcService.WorkerStatusPB.Builder status = EngineRpcService.WorkerStatusPB.newBuilder()
+                    .setSupportsRequestCleanup(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                     .setAlive(!stopped)
                     .setRole("RoleType." + roleName)
                     .setRoleType(roleType)
@@ -1991,14 +2004,11 @@ public final class JavaMockEngineCluster {
                     // RUNNING remains the fallback when no entry was found.
                     .setPhase(cancelledPhase != null
                             ? cancelledPhase : EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
-                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                            .setErrorCode(priorityPreemption
-                                    ? PRIORITY_PREEMPTED_ERROR_CODE
-                                    : EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
-                            .setErrorMessage(priorityPreemption
-                                    ? "preempted by higher-priority request"
-                                    : "cancelled by client")
-                            .build())
+                    .setErrorInfo(priorityPreemption
+                            ? EngineRpcService.ErrorDetailsPB.newBuilder()
+                                    .setErrorCode(PRIORITY_PREEMPTED_ERROR_CODE)
+                                    .setErrorMessage("preempted by higher-priority request").build()
+                            : ordinaryCancellationError(requestId))
                     .setEndTimeMs(System.currentTimeMillis())
                     .setDpRank(0);
             // Same upstream fix as recordPriorityPreemptionCanceled: the typed
@@ -2072,6 +2082,39 @@ public final class JavaMockEngineCluster {
             return null;
         }
 
+        /** Ordinary no-fetch cleanup shares the same exact P-to-D ownership graph. */
+        void cleanUpRequest(long requestId, CancelReason reason) {
+            if (roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
+                throw new UnsupportedOperationException("request cleanup is owned by the original Prefill");
+            }
+            synchronized (ordinaryCleanupLock) {
+                ordinaryFences.putIfAbsent(requestId, hasPriorityCancelledRequestId(requestId) || hasFencedRequestId(requestId)
+                        ? CancelReason.PRIORITY_PREEMPTED : reason);
+                FastRpcService decode = downstreamDecodeOwners.get(requestId);
+                if (decode != null) { decode.cancelFromClientGone(requestId, this); }
+                if (runningTasks.containsKey(requestId)) { cancel(requestId, false, false); }
+                releaseBlockLease(requestId);
+                releaseReservedDecode(requestId);
+                responseQueues.remove(requestId);
+            }
+        }
+
+        private EngineRpcService.ErrorDetailsPB ordinaryCancellationError(long requestId) {
+            CancelReason reason = ordinaryFences.getOrDefault(requestId, CancelReason.CLIENT_CANCELLED);
+            return EngineRpcService.ErrorDetailsPB.newBuilder()
+                    .setErrorCode(switch (reason) {
+                        case DEADLINE_EXCEEDED -> 603; // Engine ErrorCode::GENERATE_TIMEOUT
+                        case PRIORITY_PREEMPTED -> PRIORITY_PREEMPTED_ERROR_CODE;
+                        default -> EngineRpcService.ErrorCodePB.CANCELLED.getNumber();
+                    })
+                    .setErrorMessage(switch (reason) {
+                        case CLIENT_CANCELLED -> "cancelled by client";
+                        case DEADLINE_EXCEEDED -> "request deadline exceeded";
+                        case SHUTDOWN -> "request cancelled during shutdown";
+                        case PRIORITY_PREEMPTED -> "preempted by higher-priority request";
+                    }).build();
+        }
+
         /**
          * Three-branch cancel used by {@link MockEngineCancelChannel} and the
          * gRPC Cancel handler, mapped to the production C++ Prefill contract:
@@ -2100,6 +2143,9 @@ public final class JavaMockEngineCluster {
             if (roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
                 throw new UnsupportedOperationException(
                         "priority Cancel is only implemented by the original Prefill");
+            }
+            if (ordinaryFences.containsKey(requestId)) {
+                return new CancelResult(false, null, false);
             }
             if (hasPriorityCancelledRequestId(requestId)) {
                 stats.cancelCensusAlreadyCancelled.increment();
@@ -2384,10 +2430,7 @@ public final class JavaMockEngineCluster {
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(requestId)
                     .setPhase(phase)
-                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                            .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
-                            .setErrorMessage("cancelled by client (stream gone)")
-                            .build())
+                    .setErrorInfo(ordinaryCancellationError(requestId))
                     .setEndTimeMs(System.currentTimeMillis())
                     .setDpRank(0);
             long batchId = positiveLifecycleBatchId(requestId);
@@ -3306,6 +3349,9 @@ public final class JavaMockEngineCluster {
         }
 
         private boolean startDecode(MockPerformanceModel.RequestShape shape, long batchId) {
+            synchronized (ordinaryCleanupLock) {
+                if (ordinaryFences.containsKey(shape.input().getRequestId())) { return false; }
+
             EngineRpcService.GenerateInputPB input = shape.input();
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
                     responseQueues.get(input.getRequestId());
@@ -3336,6 +3382,7 @@ public final class JavaMockEngineCluster {
                 decodeReservationOwners.remove(input.getRequestId());
             }
             return accepted;
+            }
         }
 
         /**
@@ -4405,6 +4452,21 @@ public final class JavaMockEngineCluster {
                     observer.onCompleted();
                     return;
                 }
+                if (request.getReason() != EngineRpcService.RequestCancelReasonPB.REQUEST_CANCEL_REASON_UNSPECIFIED
+                        && request.getReason() != EngineRpcService.RequestCancelReasonPB.REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED) {
+                    var reason = switch (request.getReason()) {
+                        case REQUEST_CANCEL_REASON_CLIENT_CANCELLED -> CancelReason.CLIENT_CANCELLED;
+                        case REQUEST_CANCEL_REASON_DEADLINE_EXCEEDED -> CancelReason.DEADLINE_EXCEEDED;
+                        case REQUEST_CANCEL_REASON_SHUTDOWN -> CancelReason.SHUTDOWN;
+                        default -> throw new IllegalArgumentException("unknown cancellation reason");
+                    };
+                    cleanUpRequest(request.getRequestId(), reason);
+                    observer.onNext(EngineRpcService.CancelResponsePB.newBuilder()
+                            .setStatus(EngineRpcService.CancelStatusPB.CANCEL_STATUS_TOMBSTONED)
+                            .setDecodeCleanupComplete(true).build());
+                    observer.onCompleted();
+                    return;
+                }
                 CancelResult result = cancelRequest(request.getRequestId());
                 EngineRpcService.CancelStatusPB status;
                 if (result.found()) {
@@ -4619,6 +4681,7 @@ public final class JavaMockEngineCluster {
             requestStates.clear();
             activeBlockLeases.clear();
             cancelledRequests.clear();
+            ordinaryFences.clear();
             // Queued work dies with the process: pending prefill batches,
             // direct-stream parks, decode wait queue and running streams.
             synchronized (prefillQueueLock) {

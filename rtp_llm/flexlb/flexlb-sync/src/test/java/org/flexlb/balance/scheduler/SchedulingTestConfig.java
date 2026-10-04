@@ -12,6 +12,21 @@ import java.util.EnumSet;
 
 /** Test-only builders for the public scheduler and dispatcher variants. */
 public final class SchedulingTestConfig {
+    /** Standalone component fixtures use the same immutable inputs as registered requests. */
+    public static BalanceContext freezeInputs(BalanceContext context) {
+        if (context.getRequirements() == null) {
+            org.springframework.test.util.ReflectionTestUtils.setField(context, "requirements", RequestRequirements.capture(context));
+        }
+        return context;
+    }
+
+    public static RequestRequirements decodeRequirements(int priority, long hardKv, long expectedKv,
+            org.flexlb.balance.endpoint.DecodeEndpoint.AdmissionCapacity capacity) {
+        return new RequestRequirements(99L, priority, expectedKv, capacity,
+                RequestRequirements.DecodeMode.PREEMPT_AT_PLACEMENT,
+                newConfig().getRouter().getRoles().getDecode().getCostEstimator().compiledFormula(),
+                hardKv, null, java.util.List.of(), 0L, true, 0);
+    }
 
     private SchedulingTestConfig() {
     }

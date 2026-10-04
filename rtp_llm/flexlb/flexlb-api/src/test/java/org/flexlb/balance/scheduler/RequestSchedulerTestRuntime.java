@@ -2,19 +2,20 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -39,8 +40,7 @@ import java.util.function.Supplier;
  */
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
-    private final RequestRegistry lifecycle;
-    private final EndpointEventProjector endpointEvents;
+    private final RequestRepository requests = new RequestRepository();
     private final PlacementAvailability placementAvailability =
             new PlacementAvailability();
     private final EndpointRegistry registry;
@@ -55,51 +55,50 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     prepareBatchSubmission,
             BatchSchedulerReporter batchReporter,
             RequestSchedulerReporter requestReporter) {
-        this.lifecycle = new RequestRegistry(
-                configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventProjector(lifecycle);
+        this(configService, prepareBatchSubmission, batchReporter, requestReporter,
+                localDeliveryCleanup());
+    }
+
+    /** In-memory delivery fixtures own no remote resources; model their explicit cleanup response. */
+    private static org.flexlb.balance.eviction.EngineCancelChannel localDeliveryCleanup() {
+        var channel = org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
+        org.mockito.Mockito.when(channel.cancel(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED));
+        return channel;
+    }
+
+    public RequestSchedulerTestRuntime(ConfigService configService,
+            Supplier<CapacityBoundary.Attempt<BatchDeliveryStrategy.PreparedSubmission>> prepareBatchSubmission,
+            BatchSchedulerReporter batchReporter, RequestSchedulerReporter requestReporter,
+            org.flexlb.balance.eviction.EngineCancelChannel cancelChannel) {
         DispatcherConfig dispatcher = Objects.requireNonNull(
                 configService.loadBalanceConfig().getDispatcher(),
                 "dispatcher");
         DeliveryStrategy deliveryStrategy = switch (dispatcher.getType()) {
             case BATCH -> {
                 AtomicLong batchIds = new AtomicLong();
-                yield new BatchDeliveryStrategy(
-                        Objects.requireNonNull(
+                yield new BatchDeliveryStrategy(Objects.requireNonNull(
                                 prepareBatchSubmission,
-                                "prepareBatchSubmission"),
-                        batchIds::incrementAndGet,
-                        lifecycle,
-                        new DeliveryMetrics(batchReporter));
+                                "prepareBatchSubmission"), batchIds::incrementAndGet, batchReporter);
             }
             case NON_BATCH ->
-                    new RouteDeliveryStrategy(
-                            lifecycle,
-                            new DeliveryMetrics(batchReporter));
+                    new RouteDeliveryStrategy(batchReporter);
         };
-        this.registry = new EndpointRegistry(
-                configService,
-                endpointEvents,
-                batchReporter,
-                deliveryStrategy,
-                placementAvailability);
-        this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);
-        var cancelChannel = org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
-        var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, lifecycle);
-        this.scheduler = new RequestScheduler(
-                configService,
-                router,
-                registry,
-                batchReporter,
-                new EvictionManager(requestReporter, cancelChannel, preemption, lifecycle, batchReporter),
-                lifecycle,
-                placementAvailability);
-        this.runtime = new SchedulerRuntime(
-                lifecycle, registry, batchReporter, requestReporter, scheduler);
+        this.registry = new EndpointRegistry(configService, requests, batchReporter, deliveryStrategy, placementAvailability);
+        this.router = new BindingRouter(registry);
+        this.runtime = new SchedulerRuntime(requests, registry, batchReporter, requestReporter,
+                org.mockito.Mockito.mock(DefaultBatchDispatcher.class), configService,
+                new org.flexlb.service.RecentCacheKeyTraceReporter(), cancelChannel);
+        var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, requests, runtime);
+        var eviction = new EvictionManager(requestReporter, cancelChannel, preemption, requests);
+        runtime.initializeScheduler(PlacementConfiguration.create(runtime, configService.loadBalanceConfig(),
+                router, batchReporter, eviction, placementAvailability));
+        this.scheduler = runtime.scheduler();
     }
 
-    public RequestRegistry requestRegistry() {
-        return lifecycle;
+    public RequestRepository requestRegistry() {
+        return requests;
     }
 
     public RequestScheduler scheduler() {
@@ -116,13 +115,13 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     /** Return the canonical request future retained by the exact test slot. */
     public CompletableFuture<Response> requestFuture(long requestId) {
-        RequestSlot slot = lifecycle.requestSlot(requestId);
+        BalanceContext slot = requests.findActive(requestId);
         return slot == null ? null : slot.future();
     }
 
     /** Return the exact item currently owned by a fixture request slot. */
-    public ScheduledRequest activeItem(long requestId) {
-        RequestSlot slot = lifecycle.requestSlot(requestId);
+    public RequestRoute activeItem(long requestId) {
+        BalanceContext slot = requests.findActive(requestId);
         if (slot == null) {
             return null;
         }
@@ -191,9 +190,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     /**
      * Convert a fixture's successful route metadata into the exact pinned
-     * queue-admission capability consumed by {@link RequestScheduler}.
+     * queue-admission capability consumed by {@link AbstractRequestScheduler}.
      */
-    public PlacementResult<RouteAdmission, PlacementKey> admittedRoute(
+    public PlacementResult<ProvisionalRoute, PlacementKey> admittedRoute(
             BalanceContext context, Response response) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(response, "response");
@@ -219,8 +218,10 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 SelectedRole selected = select(pin, status);
                 selections.add(selected);
             }
-            return PlacementResult.success(
-                    RouteAdmission.prepare(context, selections, response));
+            var result = PlacementResult.<ProvisionalRoute, PlacementKey>success(
+                    ProvisionalRoute.prepare(context, selections, response));
+            selections.clear();
+            return result;
         } finally {
             for (SelectedRole selection : selections) {
                 selection.close();
@@ -233,8 +234,10 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         try {
             return switch (status.getRole()) {
                 case PREFILL, PDFUSION -> SelectedRole.prefill(
-                        pin, status, Math.max(0L, status.getPrefillTime()));
-                case DECODE -> SelectedRole.decode(pin, status);
+                        pin, status, Math.max(0L, status.getPrefillTime()),
+                        ((PrefillEndpoint) pin.endpoint()).placementVersion());
+                case DECODE -> SelectedRole.decode(
+                        pin, status, ((DecodeEndpoint) pin.endpoint()).placementVersion());
                 case VIT -> SelectedRole.stateless(pin, status);
                 case FRONTEND -> throw new IllegalArgumentException(
                         "FRONTEND cannot be a worker route");
@@ -253,15 +256,14 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private static final class BindingRouter extends DefaultRouter {
         private DefaultRouter delegate;
 
-        private BindingRouter(org.flexlb.sync.status.WorkerDirectory workers, ConfigService configs, RequestRegistry lifecycle) {
+        private BindingRouter(EndpointRegistry workers) {
             // Real constructor dependencies keep Mockito instrumentation out of
             // the selector classes exercised by the bound production router.
             super(new CostBasedPrefillStrategy(workers,
                             org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
-                            org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class)),
+                            org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class), org.mockito.Mockito.mock(CacheMetricsReporter.class)),
                     new DecodeSelector(workers),
                     new RandomStrategy(workers),
-                    configs,
                     emptyModelMeta());
         }
 
@@ -274,12 +276,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
 
         @Override
-        public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
-            return requireBound().select(context);
-        }
-
-        @Override
-        public PlacementResult<RouteAdmission, PlacementKey> select(
+        public PlacementResult<ProvisionalRoute, PlacementKey> select(
                 BalanceContext context, String policyGroup) {
             return requireBound().select(context, policyGroup);
         }

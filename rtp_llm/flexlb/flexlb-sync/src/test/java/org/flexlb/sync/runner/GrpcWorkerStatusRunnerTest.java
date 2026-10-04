@@ -9,10 +9,10 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.concurrent.CompletableFuture;
@@ -43,7 +43,7 @@ class GrpcWorkerStatusRunnerTest {
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(config);
         WorkerStatus status = RunnerTestSupport.discovered(
                 role, null, "127.0.0.1", 8080, 8081, "test-site");
-        WorkerDirectory directory = directory(registry, status);
+        EndpointRegistry directory = directory(registry, status);
         WorkerEndpoint endpoint = RunnerTestSupport.publishEndpoint(
                 registry, role, status.getIpPort(), status);
         CacheAwareService cache = mock(CacheAwareService.class);
@@ -57,7 +57,7 @@ class GrpcWorkerStatusRunnerTest {
             WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
             assertNotNull(lease);
             new GrpcWorkerStatusRunner(
-                    "test-model", status.getIpPort(), "test-site", role, null,
+                    "test-model",
                     status, lease, directory, mock(EngineHealthReporter.class),
                     grpc, 5_000L, cache, Runnable::run).run();
             if (failure < 3) {
@@ -89,13 +89,9 @@ class GrpcWorkerStatusRunnerTest {
         AtomicBoolean publicationHeldLock = new AtomicBoolean();
         AtomicBoolean projectionReleasedLock = new AtomicBoolean();
         WorkerEndpoint endpoint = mock(WorkerEndpoint.class);
-        EndpointRegistry registry = mock(EndpointRegistry.class);
-        WorkerDirectory directory = directory(registry, status);
-        when(registry.publishPreparedEndpoint(
-                org.mockito.Mockito.eq(ipPort),
-                org.mockito.Mockito.eq(status),
-                any(WorkerStatus.PreparedStatus.class)))
-                .thenAnswer(invocation -> {
+        EndpointRegistry registry = org.mockito.Mockito.spy(RunnerTestSupport.endpointRegistry(mock(ConfigService.class)));
+        EndpointRegistry directory = directory(registry, status);
+        org.mockito.Mockito.doAnswer(invocation -> {
                     publicationHeldLock.set(
                             status.lock.isHeldByCurrentThread());
                     status.publishPreparedStatus(invocation.getArgument(2));
@@ -103,7 +99,9 @@ class GrpcWorkerStatusRunnerTest {
                             endpoint,
                             () -> projectionReleasedLock.set(
                                     !status.lock.isHeldByCurrentThread()));
-                });
+                }).when(registry).publishPreparedEndpoint(
+                        org.mockito.Mockito.eq(ipPort), org.mockito.Mockito.eq(status),
+                        any(WorkerStatus.PreparedStatus.class));
 
         EngineRpcService.WorkerStatusPB response =
                 EngineRpcService.WorkerStatusPB.newBuilder()
@@ -119,7 +117,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         new GrpcWorkerStatusRunner(
-                "test-model", ipPort, "test-site", RoleType.DECODE, null,
+                "test-model",
                 status, pollLease, directory,
                 mock(EngineHealthReporter.class), grpc, 5_000L,
                 mock(CacheAwareService.class), Runnable::run)
@@ -141,8 +139,8 @@ class GrpcWorkerStatusRunnerTest {
         assertNotNull(pollLease);
 
         WorkerEndpoint endpoint = mock(WorkerEndpoint.class);
-        EndpointRegistry registry = mock(EndpointRegistry.class);
-        WorkerDirectory directory = directory(registry, status);
+        EndpointRegistry registry = org.mockito.Mockito.spy(RunnerTestSupport.endpointRegistry(mock(ConfigService.class)));
+        EndpointRegistry directory = directory(registry, status);
         when(registry.get(RoleType.DECODE, ipPort, status))
                 .thenReturn(endpoint);
         java.util.concurrent.atomic.AtomicBoolean projected =
@@ -169,7 +167,7 @@ class GrpcWorkerStatusRunnerTest {
                 anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
         new GrpcWorkerStatusRunner(
-                "test-model", ipPort, "test-site", RoleType.DECODE, null,
+                "test-model",
                 status, pollLease, directory,
                 mock(EngineHealthReporter.class), grpc, 5_000L,
                 mock(CacheAwareService.class), Runnable::run)
@@ -187,9 +185,42 @@ class GrpcWorkerStatusRunnerTest {
         nextPoll.close();
     }
 
-    private static WorkerDirectory directory(
+    @ParameterizedTest
+    @ValueSource(longs = {1L, 2L})
+    void committedStatusWithoutItsExactEndpointRetiresOnHeartbeatOrNewVersion(long responseVersion) {
+        RoleType role = RoleType.DECODE;
+        WorkerStatus status = RunnerTestSupport.alive(
+                role, null, "127.0.0.1", 8080, 8081, "test-site");
+        EndpointRegistry registry = org.mockito.Mockito.spy(
+                RunnerTestSupport.endpointRegistry(mock(ConfigService.class)));
+        directory(registry, status);
+        assertNull(registry.get(role, status.getIpPort()), "the committed cursor has no endpoint");
+        WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
+        assertNotNull(lease);
+        EngineRpcService.WorkerStatusPB response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(role.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                .setStatusVersion(responseVersion)
+                .setAlive(true)
+                .build();
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        new GrpcWorkerStatusRunner("test-model", status, lease, registry,
+                mock(EngineHealthReporter.class), grpc, 5_000L,
+                mock(CacheAwareService.class), Runnable::run).run();
+
+        assertTrue(registry.statusSnapshot(role).isEmpty());
+        assertNull(status.tryBeginStatusPoll(), "a missing committed endpoint retires its status generation");
+        assertNull(registry.get(role, status.getIpPort()));
+        verify(registry, org.mockito.Mockito.never()).publishPreparedEndpoint(
+                anyString(), org.mockito.Mockito.same(status), any(WorkerStatus.PreparedStatus.class));
+    }
+
+    private static EndpointRegistry directory(
             EndpointRegistry registry, WorkerStatus status) {
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        EndpointRegistry directory = registry;
         directory.currentOrDiscover(
                 status.getRole(), status.getIpPort(), () -> status);
         return directory;

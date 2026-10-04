@@ -59,8 +59,13 @@ class RouteProjectionTest {
 
     @Test
     void probeCompletionMatchesEveryPriorityPositionAcrossConsumedGroups() {
-        // A tiny budget rejects the last appended item; zero disables prediction.
-        for (long budget : new long[]{0L, 25L}) {
+        // Exercise full groups and tails rejected by prediction, compute or KV capacity.
+        for (var limits : List.of(
+                new GroupPlanner.Constraints(1, Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L),
+                new GroupPlanner.Constraints(3, Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L),
+                new GroupPlanner.Constraints(3, Long.MAX_VALUE, Long.MAX_VALUE, 25L, 0L),
+                new GroupPlanner.Constraints(3, 25L, Long.MAX_VALUE, 0L, 0L),
+                new GroupPlanner.Constraints(3, Long.MAX_VALUE, 25L, 0L, 0L))) {
             for (int position = 0; position <= 12; position++) {
                 var active = new java.util.ArrayList<GroupPlanner.Item>();
                 long precedingMs = 0L;
@@ -72,8 +77,6 @@ class RouteProjectionTest {
                         precedingMs += 10L;
                     }
                 }
-                var limits = new GroupPlanner.Constraints(
-                        3, Long.MAX_VALUE, Long.MAX_VALUE, budget, 0L);
                 for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
                     var result = project(queue(true, limits, active), noCommittedWork(),
                             TOKEN_EVALUATOR, probe(99L, 101 - 2 * position, 7L, 0L), delivery);
@@ -97,6 +100,31 @@ class RouteProjectionTest {
         for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
             assertModeled(project(snapshot, noCommittedWork(), TOKEN_EVALUATOR,
                     probe(99L, 70, 80L, 0L), delivery), 159L);
+        }
+    }
+
+    @Test
+    void emptyQueueUsesTheSameWindowAndBudgetReadinessAsLiveGrouping() {
+        for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+            var waiting = project(queue(false, constraints(4, 30L), List.of()), noCommittedWork(),
+                    TOKEN_EVALUATOR, probe(99L, 50, 20L, 0L), delivery);
+            assertModeled(waiting, 50L);
+            var capped = project(queue(false, new GroupPlanner.Constraints(4, Long.MAX_VALUE,
+                    Long.MAX_VALUE, 20L, 30L), List.of()), noCommittedWork(),
+                    TOKEN_EVALUATOR, probe(99L, 50, 20L, 0L), delivery);
+            assertModeled(capped, 20L);
+        }
+    }
+
+    @Test
+    void emptyQueueCannotProjectDeliveryBeyondAvailableKv() {
+        var limits = new GroupPlanner.Constraints(4, Long.MAX_VALUE, 19L, 0L, 30L);
+        for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+            var result = project(queue(false, limits, List.of()), noCommittedWork(),
+                    TOKEN_EVALUATOR, probe(99L, 50, 20L, 0L), delivery);
+            assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
+            assertEquals("PREFILL_KV_CAPACITY", result.detail());
+            assertEquals(RouteProjection.Candidate.InitialHeadDisposition.NONE, result.initialHeadDisposition());
         }
     }
 
@@ -264,6 +292,21 @@ class RouteProjectionTest {
     }
 
     @Test
+    void singlePredictionExecutionFailureRetainsItsStageDiagnosis() {
+        PrefillTimePredictor.Evaluator failing = evaluator(
+                (tokens, hits) -> { throw new IllegalStateException("predictor failed"); },
+                items -> 1.0);
+
+        RouteProjection.Candidate result = project(
+                queue(true, constraints(1, 0L), List.of()),
+                noCommittedWork(), failing, probe(99L, 50, 20L, 0L), ROUTE);
+
+        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, result.state());
+        assertEquals("SINGLE_PREDICTION_FAILED", result.detail());
+        assertEquals(OptionalLong.empty(), result.projectedTtftMs());
+    }
+
+    @Test
     void negativeSinglePredictionIsUnavailableInsteadOfClamped() {
         PrefillTimePredictor.Evaluator invalid = evaluator(
                 (tokens, hits) -> tokens == 20L ? -1L : tokens,
@@ -400,6 +443,73 @@ class RouteProjectionTest {
         assertModeled(result, 50L);
         assertEquals(RouteProjection.Candidate.InitialHeadDisposition
                 .TERMINAL_PRUNED, result.initialHeadDisposition());
+    }
+
+    @Test
+    void collectionWaitReusesPredictionUntilExpiryOrBudgetChangesTheDecision() {
+        AtomicInteger planningCalls = new AtomicInteger();
+        AtomicInteger predictionCalls = new AtomicInteger();
+        RouteProjection.DeliveryProjection counted = new RouteProjection.DeliveryProjection() {
+            @Override
+            public long singletonCompletionOffsetMs(long seqLen, long hitCache,
+                    RouteProjection.Predictions predictions) {
+                return ROUTE.singletonCompletionOffsetMs(seqLen, hitCache, predictions);
+            }
+
+            @Override
+            public RouteProjection.GroupPlanning planning(RouteProjection.Predictions predictions) {
+                planningCalls.incrementAndGet();
+                RouteProjection.GroupPlanning delegate = ROUTE.planning(predictions);
+                return (items, index) -> {
+                    predictionCalls.incrementAndGet();
+                    return delegate.durationMs(items, index);
+                };
+            }
+
+            @Override
+            public long completionOffsetMs(List<GroupPlanner.Item> items, int memberIndex,
+                    RouteProjection.Predictions predictions, RouteProjection.GroupPlanning planning) {
+                return ROUTE.completionOffsetMs(items, memberIndex, predictions, planning);
+            }
+        };
+        List<GroupPlanner.Item> active = List.of(item(1L, 50, 1L, 10L));
+
+        RouteProjection.Candidate waited = project(
+                queue(false, new GroupPlanner.Constraints(3, 1_000_000L, 1_000_000L, 31L, 30L), active),
+                noCommittedWork(), TOKEN_EVALUATOR,
+                probe(99L, 50, NOW_MS, NOW_MS + 30L, 20L, 0L), counted);
+        assertModeled(waited, 59L);
+        assertEquals(1, planningCalls.get());
+        assertEquals(2, predictionCalls.get(), "the frozen group is predicted once across the wait");
+
+        planningCalls.set(0);
+        predictionCalls.set(0);
+        RouteProjection.Candidate expiredPrefix = project(
+                queue(false, new GroupPlanner.Constraints(3, 1_000_000L, 1_000_000L, 31L, 30L),
+                        List.of(item(0L, 50, 0L, 10L, NOW_MS), active.getFirst())),
+                noCommittedWork(), TOKEN_EVALUATOR,
+                probe(99L, 50, NOW_MS, NOW_MS + 30L, 20L, 0L), counted);
+        assertModeled(expiredPrefix, 59L);
+        assertEquals(1, planningCalls.get(), "an already expired prefix does not change the waiting group");
+        assertEquals(2, predictionCalls.get(), "the surviving frozen group is predicted once");
+
+        planningCalls.set(0);
+        predictionCalls.set(0);
+        RouteProjection.Candidate expired = project(
+                queue(false, new GroupPlanner.Constraints(3, 1_000_000L, 1_000_000L, 31L, 30L), active),
+                noCommittedWork(), TOKEN_EVALUATOR,
+                probe(99L, 50, NOW_MS, NOW_MS + 29L, 20L, 0L), counted);
+        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, expired.state());
+        assertEquals("INCOMING_EXPIRED_BEFORE_DISPATCH", expired.detail());
+        assertEquals(1, planningCalls.get());
+
+        planningCalls.set(0);
+        RouteProjection.Candidate budgetReady = project(
+                queue(false, new GroupPlanner.Constraints(3, 1_000_000L, 1_000_000L, 30L, 30L), active),
+                noCommittedWork(), TOKEN_EVALUATOR,
+                probe(99L, 50, NOW_MS, NOW_MS + 29L, 20L, 0L), counted);
+        assertModeled(budgetReady, 30L);
+        assertEquals(1, planningCalls.get());
     }
 
     @Test

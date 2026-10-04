@@ -1,27 +1,29 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.scheduler.BalanceContext.PublicationKind;
+import org.flexlb.balance.scheduler.BalanceContext.RequestFuture;
+import org.flexlb.balance.scheduler.BalanceContext.ResponseResult;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
-import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.balance.scheduler.RequestSlot.PublicationKind;
 
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
-
-import java.util.ArrayDeque;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Publishes frontend completions without running user continuations on a
  * scheduler, endpoint, or transport critical path.
  *
- * <p>RequestSlot selects a concrete publication before calling this executor.
- * The publisher manages execution, in-flight accounting and shutdown only;
- * it never invokes a request transition or arbitrates between responses.
+ * <p>BalanceContext alone arbitrates frontend results. Delivery acknowledgement
+ * reporting runs here before asking the context to select its response; a terminal
+ * fact recorded in the meantime can invalidate that acknowledgement. Already
+ * selected terminal responses are queued directly. This executor owns execution,
+ * in-flight accounting and shutdown, while resource settlement remains with the scheduler.
  * External Future operations execute synchronously; internal responses are
  * queued so user continuations run outside scheduler and endpoint locks.
  */
@@ -32,91 +34,97 @@ final class RequestCompletionPublisher implements AutoCloseable {
      * publication. The capability is never stored in a slot or registry.
      */
     static final class PublicationPermit {
+
         private final RequestCompletionPublisher publisher;
-        final RequestSlot slot;
+
+        final BalanceContext slot;
+
         final PublicationKind kind;
+
         private final AtomicBoolean claimed = new AtomicBoolean();
+
         private final AtomicBoolean closed = new AtomicBoolean();
 
-        PublicationPermit(
-                RequestCompletionPublisher publisher,
-                RequestSlot slot,
-                PublicationKind kind) {
+        PublicationPermit(RequestCompletionPublisher publisher, BalanceContext slot, PublicationKind kind) {
             this.publisher = Objects.requireNonNull(publisher, "publisher");
             this.slot = slot;
             this.kind = kind;
         }
 
-        RequestSlot slot() {
+        BalanceContext slot() {
             return slot;
-        }
-
-        boolean ownedBy(RequestCompletionPublisher expected) {
-            return publisher == expected;
         }
 
         void closePublication() {
             if (closed.compareAndSet(false, true)) {
                 publisher.exitPublication();
+                slot.scheduler().release();
             }
         }
 
-        /** Abandon a permit only when no other submitter consumed it. */
+        /**
+         * Abandon a permit only when no other submitter consumed it.
+         */
         void abandonIfUnclaimed() {
             if (claimed.compareAndSet(false, true)) {
                 closePublication();
             }
         }
 
-        /** Settle a claim whose publication could not enter its executor. */
-        void abortClaimedPublication() {
-            closePublication();
-        }
-
         void claim() {
             if (!claimed.compareAndSet(false, true)) {
-                throw new IllegalStateException(
-                        "publication permit already consumed for request "
-                                + slot.requestId());
+                throw new IllegalStateException("publication permit already consumed for request " + slot.getRequestId());
             }
         }
     }
 
+    enum ResponseCompletion {
 
-    enum ResponseCompletion { RESPONSE, FAILURE, CANCELLATION }
+        RESPONSE, FAILURE, CANCELLATION
+    }
 
-    /** Immutable result of Slot arbitration. Execution never re-enters request decisions. */
-    record SelectedPublication(PublicationPermit permit, RequestFuture future, boolean selected,
-            ResponseCompletion completion, Response response, Throwable failure, boolean mayInterruptIfRunning) {
+    /**
+     * Frozen response selection; a null result publishes nothing.
+     */
+    record SelectedPublication(PublicationPermit permit, RequestFuture future, ResponseResult result) {
+
         boolean complete() {
-            if (!selected) { return false; }
-            return switch (completion) {
-                case RESPONSE -> future.completeOwned(response);
-                case FAILURE -> future.completeExceptionallyOwned(failure);
-                case CANCELLATION -> future.cancelOwned(mayInterruptIfRunning);
+            if (result == null) {
+                return false;
+            }
+            return switch (result.completion()) {
+                case RESPONSE ->
+                    future.completeOwned(result.response());
+                case FAILURE ->
+                    future.completeExceptionallyOwned(result.failure());
+                case CANCELLATION ->
+                    future.cancelOwned(result.interrupt());
             };
         }
     }
 
-
     private static final int DEFAULT_PUBLISHER_WORKERS = 8;
 
     private final org.flexlb.service.monitor.BatchSchedulerReporter reporter;
+
     private final ThreadPoolExecutor executor;
+    private final java.util.concurrent.ExecutorService recovery = java.util.concurrent.Executors.newSingleThreadExecutor(
+            Thread.ofPlatform().daemon().name("request-completion-publisher-recovery-", 1).factory());
+
     private final Object lifecycleMonitor = new Object();
-    private final ThreadLocal<ArrayDeque<Runnable>> localDrain =
+
+    private final ThreadLocal<Boolean> publicationActive =
             new ThreadLocal<>();
-    private final ThreadLocal<Integer> publicationDepth =
-            new ThreadLocal<>();
-    private PublisherPhase phase = PublisherPhase.OPEN;
+
+    /** Null while open; otherwise the shared, uninterruptible close result. */
+    private CompletableFuture<Throwable> closeCompletion;
+
     private int inFlightPublications;
-    private Throwable closeFailure;
 
     RequestCompletionPublisher(int configuredWorkers, org.flexlb.service.monitor.BatchSchedulerReporter reporter) {
         this.reporter = reporter;
         int workers = configuredWorkers > 0
                 ? configuredWorkers : DEFAULT_PUBLISHER_WORKERS;
-        AtomicInteger workerSequence = new AtomicInteger();
         executor = new ThreadPoolExecutor(
                 workers,
                 workers,
@@ -126,30 +134,20 @@ final class RequestCompletionPublisher implements AutoCloseable {
                 // inline on a decision thread. Slot owns request lifetime; the
                 // publisher owns only these in-flight frontend completions.
                 new LinkedBlockingQueue<>(),
-                runnable -> {
-                    Thread thread = new Thread(
-                            runnable,
-                            "request-completion-publisher-"
-                                    + workerSequence.getAndIncrement());
-                    thread.setDaemon(true);
-                    return thread;
-                },
+                Thread.ofPlatform().daemon().name("request-completion-publisher-", 0).factory(),
                 new ThreadPoolExecutor.AbortPolicy());
         executor.prestartAllCoreThreads();
     }
 
     // ── 发布许可：认领与归还执行计数 ──
-
-    RequestCompletionPublisher.PublicationPermit tryReservePublication(
-            RequestSlot exactSlot,
-            RequestSlot.PublicationKind kind) {
+    RequestCompletionPublisher.PublicationPermit tryReservePublication(BalanceContext exactSlot, BalanceContext.PublicationKind kind) {
         synchronized (lifecycleMonitor) {
-            if (phase != PublisherPhase.OPEN) {
+            if (closeCompletion != null) {
                 return null;
             }
             inFlightPublications++;
-            return new RequestCompletionPublisher.PublicationPermit(
-                    this, exactSlot, kind);
+            exactSlot.scheduler().retain();
+            return new RequestCompletionPublisher.PublicationPermit(this, exactSlot, kind);
         }
     }
 
@@ -168,161 +166,111 @@ final class RequestCompletionPublisher implements AutoCloseable {
 
     private void requireOwnedPermit(
             RequestCompletionPublisher.PublicationPermit permit) {
-        if (!permit.ownedBy(this)) {
-            permit.closePublication();
+        if (permit.publisher != this) {
             throw new IllegalStateException(
                     "publication permit belongs to another publisher");
         }
     }
 
     // ── 响应入口：ACK、异步提交与同步 Future 完成 ──
-
-    void submitDelivery(RequestSlot.DeliveryPublication delivery, ExpirationTimer expirationTimer) {
+    void submitDelivery(BalanceContext.DeliveryPublication delivery) {
         try {
-            if (delivery.requestDeadline() != null) { expirationTimer.cancel(delivery.requestDeadline()); }
+            if (delivery.requestDeadline() != null) {
+                delivery.requestDeadline().cancel();
+            }
         } catch (Throwable failure) {
             Logger.error("Delivery deadline cancellation failed request_id={}", delivery.item().requestId(), failure);
         }
         try {
-            if (delivery.batchEnqueueStartedAtMs() > 0L && delivery.item().ctx().getAckAtMs() > 0L) {
-                reporter.reportDispatchAckTimeMs(org.flexlb.dao.route.RoleType.PREFILL.name(),
-                        delivery.item().prefillEp() == null ? "" : delivery.item().prefillEp().getIp(),
-                        Math.max(0L, delivery.item().ctx().getAckAtMs() - delivery.batchEnqueueStartedAtMs()));
-            }
-        } catch (Throwable failure) {
-            Logger.error("Delivery ACK reporting failed request_id={}", delivery.item().requestId(), failure);
+            enqueue(() -> {
+                try {
+                    if (delivery.batchEnqueueStartedAtMs() > 0L && delivery.item().ctx().getAckAtMs() > 0L) {
+                        reporter.reportLatency(BatchSchedulerReporter.Latency.DISPATCH_ACK,
+                                org.flexlb.dao.route.RoleType.PREFILL.name(),
+                                delivery.item().prefillEp() == null ? "" : delivery.item().prefillEp().getIp(),
+                                Math.max(0L, delivery.item().ctx().getAckAtMs() - delivery.batchEnqueueStartedAtMs()));
+                    }
+                } catch (Throwable failure) {
+                    Logger.error("Delivery ACK reporting failed request_id={}", delivery.item().requestId(), failure);
+                }
+                publishNow(BalanceContext.selectPublication(delivery.publication().slot(), delivery.publication(),
+                        ResponseCompletion.RESPONSE, delivery.response(), null, false));
+            });
+        } catch (RuntimeException | Error failure) {
+            delivery.publication().closePublication();
+            throw failure;
         }
-        submit(delivery.publication().slot().selectPublication(delivery.publication(),
-                RequestCompletionPublisher.ResponseCompletion.RESPONSE, delivery.response(), null, false));
     }
 
-    /** Queue an already-selected result; all request arbitration has finished. */
+    /**
+     * Queue an already-selected result; all request arbitration has finished.
+     */
     void submit(RequestCompletionPublisher.SelectedPublication publication) {
         RequestCompletionPublisher.PublicationPermit permit = publication.permit();
-        requireOutsideSlotLock(permit.slot(), "response submission");
+        permit.slot().requireOutsideSlotLock("response submission");
         try {
-            enqueue(() -> executePublication(publication));
+            requireOwnedPermit(permit);
+            enqueue(() -> publishNow(publication));
         } catch (RuntimeException | Error enqueueFailure) {
-            permit.abortClaimedPublication();
+            permit.closePublication();
             throw enqueueFailure;
         }
     }
 
-    /** External Future operations preserve their synchronous completion semantics. */
-    boolean publishNow(RequestCompletionPublisher.SelectedPublication publication) {
-        try {
-            return executePublication(publication);
-        } catch (RuntimeException | Error executionFailure) {
-            publication.permit().abortClaimedPublication();
-            throw executionFailure;
-        }
-    }
-
-    // ── 执行：排队、重入排空与完成 Future ──
-
+    // The unbounded executor queue also owns publications submitted by callbacks.
+    // No second thread-local queue is needed for reentrant submissions.
     private void enqueue(Runnable publication) {
-        ArrayDeque<Runnable> activeDrain = localDrain.get();
-        if (activeDrain != null) {
-            // A user continuation re-entered the scheduler from a dedicated
-            // publisher thread. Append locally so bounded-queue backpressure
-            // cannot make every publisher worker wait on its own queue.
-            activeDrain.addLast(publication);
-            return;
-        }
-
-        Runnable drainTask = () -> drainPublications(publication);
         try {
-            executor.execute(drainTask);
+            executor.execute(publication);
         } catch (RejectedExecutionException closed) {
-            throw new IllegalStateException(
-                    "accepted completion publication was rejected", closed);
+            // The result and permit have already been selected. Rejection must
+            // not strand the Future or run client callbacks on a scheduler owner.
+            recovery.execute(publication);
         }
     }
 
-    private void drainPublications(Runnable first) {
-        if (localDrain.get() != null) {
-            throw new IllegalStateException(
-                    "completion publication drain is already active");
-        }
-        ArrayDeque<Runnable> drain = new ArrayDeque<>();
-        localDrain.set(drain);
-        drain.addLast(first);
-        Throwable failure = null;
-        try {
-            while (!drain.isEmpty()) {
-                try {
-                    drain.removeFirst().run();
-                } catch (Throwable publicationFailure) {
-                    failure = appendFailure(failure, publicationFailure);
-                }
-            }
-        } finally {
-            localDrain.remove();
-        }
-        rethrowPublicationFailure(failure);
-    }
-
-    private boolean executePublication(RequestCompletionPublisher.SelectedPublication publication) {
+    /** Execute a selected result synchronously, including nested external Future completions. */
+    boolean publishNow(RequestCompletionPublisher.SelectedPublication publication) {
         RequestCompletionPublisher.PublicationPermit permit = publication.permit();
-        requireOutsideSlotLock(permit.slot(), "response completion");
-        requireOwnedPermit(permit);
-        Integer currentDepth = publicationDepth.get();
-        publicationDepth.set(currentDepth == null ? 1 : currentDepth + 1);
+        boolean outermost = false;
         try {
+            permit.slot().requireOutsideSlotLock("response completion");
+            requireOwnedPermit(permit);
+            outermost = publicationActive.get() == null;
+            if (outermost) {
+                publicationActive.set(Boolean.TRUE);
+            }
             return publication.complete();
         } finally {
-            if (currentDepth == null) {
-                publicationDepth.remove();
-            } else {
-                publicationDepth.set(currentDepth);
+            if (outermost) {
+                publicationActive.remove();
             }
             permit.closePublication();
         }
     }
 
-    private static void requireOutsideSlotLock(
-            RequestSlot exactSlot,
-            String operation) {
-        if (Thread.holdsLock(exactSlot)) {
-            throw new IllegalStateException(
-                    operation + " must run outside the RequestSlot lock");
-        }
-    }
-
     // ── 关闭：停止接收、等待在途发布、关闭线程池 ──
-
     @Override
     public void close() {
-        boolean reentrant = publicationDepth.get() != null;
-        boolean interrupted = false;
-        boolean closeOwner = false;
+        boolean reentrant = publicationActive.get() != null;
+        boolean alreadyClosing;
+        CompletableFuture<Throwable> completion;
         synchronized (lifecycleMonitor) {
-            if (phase == PublisherPhase.CLOSED) {
-                rethrow(closeFailure);
-                return;
+            alreadyClosing = closeCompletion != null;
+            if (!alreadyClosing) {
+                closeCompletion = new CompletableFuture<>();
             }
-            if (phase == PublisherPhase.CLOSING) {
-                if (reentrant) {
-                    return;
-                }
-                while (phase != PublisherPhase.CLOSED) {
-                    try {
-                        lifecycleMonitor.wait();
-                    } catch (InterruptedException interruption) {
-                        interrupted = true;
-                    }
-                }
-                if (interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-                rethrow(closeFailure);
-                return;
+            completion = closeCompletion;
+        }
+        if (alreadyClosing) {
+            // A callback cannot wait for itself; external callers join the same result.
+            if (!reentrant || completion.isDone()) {
+                Failures.rethrow(completion.join(), "completion publisher close failed");
             }
-            phase = PublisherPhase.CLOSING;
-            closeOwner = true;
+            return;
         }
 
-        if (closeOwner && reentrant) {
+        if (reentrant) {
             try {
                 Thread closer = new Thread(
                         this::finishClose,
@@ -335,16 +283,13 @@ final class RequestCompletionPublisher implements AutoCloseable {
                 } catch (Throwable shutdownFailure) {
                     startFailure.addSuppressed(shutdownFailure);
                 }
-                completeClose(startFailure);
+                completion.complete(startFailure);
                 throw startFailure;
             }
             return;
         }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
         finishClose();
-        rethrow(closeFailure);
+        Failures.rethrow(completion.join(), "completion publisher close failed");
     }
 
     private void finishClose() {
@@ -362,9 +307,11 @@ final class RequestCompletionPublisher implements AutoCloseable {
         Throwable failure = null;
         try {
             executor.shutdown();
-            while (!executor.isTerminated()) {
+            recovery.shutdown();
+            while (!executor.isTerminated() || !recovery.isTerminated()) {
                 try {
                     executor.awaitTermination(1, TimeUnit.DAYS);
+                    recovery.awaitTermination(1, TimeUnit.DAYS);
                 } catch (InterruptedException interruption) {
                     interrupted = true;
                 }
@@ -372,103 +319,11 @@ final class RequestCompletionPublisher implements AutoCloseable {
         } catch (Throwable shutdownFailure) {
             failure = shutdownFailure;
         } finally {
-            completeClose(failure);
+            closeCompletion.complete(failure);
             if (interrupted) {
                 Thread.currentThread().interrupt();
             }
         }
     }
 
-    private void completeClose(Throwable failure) {
-        synchronized (lifecycleMonitor) {
-            closeFailure = failure;
-            phase = PublisherPhase.CLOSED;
-            lifecycleMonitor.notifyAll();
-        }
-    }
-
-    // ── 异常汇总 ──
-
-    private static Throwable appendFailure(
-            Throwable first,
-            Throwable next) {
-        if (first == null) {
-            return next;
-        }
-        if (first != next) {
-            first.addSuppressed(next);
-        }
-        return first;
-    }
-
-    private static void rethrowPublicationFailure(Throwable failure) {
-        if (failure instanceof RuntimeException runtime) {
-            throw runtime;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        if (failure != null) {
-            throw new IllegalStateException(
-                    "completion publication failed", failure);
-        }
-    }
-
-    private static void rethrow(Throwable failure) {
-        if (failure instanceof RuntimeException runtime) {
-            throw runtime;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        if (failure != null) {
-            throw new IllegalStateException(
-                    "completion publisher close failed", failure);
-        }
-    }
-
-    // ── 本类使用的数据类型 ──
-
-    private enum PublisherPhase {
-        OPEN,
-        CLOSING,
-        CLOSED
-    }
-}
-
-
-/** Stateless public-future adapter bound to one exact canonical slot. */
-final class RequestFuture extends CompletableFuture<Response> {
-    private final RequestSlot slot;
-
-    RequestFuture(RequestSlot slot) {
-        this.slot = slot;
-    }
-
-    @Override
-    public boolean complete(Response response) {
-        return slot.completeExternal(RequestCompletionPublisher.ResponseCompletion.RESPONSE, response, null, false);
-    }
-
-    @Override
-    public boolean completeExceptionally(Throwable error) {
-        return slot.completeExternal(RequestCompletionPublisher.ResponseCompletion.FAILURE, null, error, false);
-    }
-
-    @Override
-    public boolean cancel(boolean mayInterruptIfRunning) {
-        return slot.completeExternal(RequestCompletionPublisher.ResponseCompletion.CANCELLATION, null, null, mayInterruptIfRunning);
-    }
-
-    boolean completeOwned(Response response) {
-        return super.complete(response);
-    }
-
-    boolean completeExceptionallyOwned(Throwable error) {
-        return super.completeExceptionally(error);
-    }
-
-    boolean cancelOwned(boolean mayInterruptIfRunning) {
-        return super.cancel(mayInterruptIfRunning);
-    }
 }

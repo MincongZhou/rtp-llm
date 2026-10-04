@@ -1,19 +1,17 @@
 package org.flexlb.balance.composition;
 
-import org.flexlb.balance.delivery.DeliveryMetrics;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
-
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -49,14 +47,12 @@ public class DeliveryBindingConfiguration {
     @Bean
     public DeliveryStrategy activePrefillDeliveryStrategy(
             ConfigService configService,
-            RequestRegistry requests,
             DefaultBatchDispatcher batchSubmission,
             BatchSchedulerReporter reporter,
             Environment environment) {
         DispatcherConfig dispatcher = Objects.requireNonNull(
                 configService.loadBalanceConfig().getDispatcher(),
                 "dispatcher");
-        DeliveryMetrics telemetry = new DeliveryMetrics(reporter);
         return switch (dispatcher.getType()) {
             case BATCH -> {
                 LongSupplier ids = batchIds(
@@ -64,13 +60,11 @@ public class DeliveryBindingConfiguration {
                 yield new BatchDeliveryStrategy(
                         batchSubmission::tryPrepareSubmission,
                         ids,
-                        requests,
-                        telemetry);
+                        reporter);
             }
             case NON_BATCH ->
                     new RouteDeliveryStrategy(
-                            requests,
-                            telemetry);
+                                reporter);
         };
     }
 

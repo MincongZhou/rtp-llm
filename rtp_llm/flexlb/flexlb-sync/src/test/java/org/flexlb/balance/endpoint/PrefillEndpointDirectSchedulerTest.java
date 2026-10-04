@@ -29,10 +29,7 @@ class PrefillEndpointDirectSchedulerTest {
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(4);
         var runtime = EndpointTestSupport.requestRuntime();
-        PrefillEndpoint endpoint = new PrefillEndpoint(
-                EndpointTestSupport.workerStatus(role, "127.0.0.82", 8082, 9082),
-                config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
-                mock(BatchSchedulerReporter.class));
+        PrefillEndpoint endpoint = EndpointTestSupport.prefill(EndpointTestSupport.workerStatus(role, "127.0.0.82", 8082, 9082), config, EndpointTestSupport.routeStrategy(runtime), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(runtime.events()), mock(BatchSchedulerReporter.class));
         endpoint.startGeneration();
         try (var executor = Executors.newFixedThreadPool(8)) {
             List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> futures =
@@ -84,20 +81,15 @@ class PrefillEndpointDirectSchedulerTest {
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
         PrefillEndpoint endpoint = assertDoesNotThrow(() -> {
-            PrefillEndpoint created = new PrefillEndpoint(
-                    workerStatus(),
-                    config,
-                    EndpointTestSupport.routeStrategy(requestRuntime),
-                    requestRuntime.events(),
-                    mock(BatchSchedulerReporter.class));
+            PrefillEndpoint created = EndpointTestSupport.prefill(workerStatus(), config, EndpointTestSupport.routeStrategy(requestRuntime), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestRuntime.events()), mock(BatchSchedulerReporter.class));
             created.startGeneration();
             return created;
         });
         endpoint.close();
     }
 
-    private static org.flexlb.balance.scheduler.ScheduledRequest item(long requestId) {
-        var item = mock(org.flexlb.balance.scheduler.ScheduledRequest.class);
+    private static org.flexlb.balance.scheduler.RequestRoute item(long requestId) {
+        var item = mock(org.flexlb.balance.scheduler.RequestRoute.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(requestId);
         org.mockito.Mockito.when(item.seqLen()).thenReturn(128L);
         return item;

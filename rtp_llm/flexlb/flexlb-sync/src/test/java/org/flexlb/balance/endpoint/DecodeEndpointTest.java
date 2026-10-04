@@ -5,17 +5,24 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.enums.DecodeTaskPhase;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 class DecodeEndpointTest {
 
@@ -28,8 +35,43 @@ class DecodeEndpointTest {
     void setUp() {
         status = EndpointTestSupport.workerStatus(
                 RoleType.DECODE, "10.0.0.1", 8080, 8081);
-        endpoint = new DecodeEndpoint(
-                status, EndpointTestSupport.noopEventSink());
+        endpoint = new DecodeEndpoint(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
+    }
+
+    @ParameterizedTest
+    @EnumSource(TaskPhase.class)
+    void activeFactsPreserveExactOwnershipWhileLedgerKeepsResourcePhase(TaskPhase phase) {
+        var sink = EndpointTestSupport.noopEventSink();
+        endpoint = new DecodeEndpoint(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(sink));
+        var reservation = reserve(100L, 500L, 500L);
+        TaskInfo active = task(100L);
+        active.setPhase(phase);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRunningTaskInfo(Map.of("100", active));
+        response.setTotalKvCacheTokens(10000L);
+        response.setAvailableKvCacheTokens(10000L);
+
+        EndpointTestSupport.applyStatus(endpoint, response).run();
+        var fact = DecodeEndpoint.WorkerStatusFact.active(reservation);
+        verify(sink).onDecodeStatus(endpoint, List.of(fact));
+        boolean allocated = phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING;
+        assertEquals(allocated, endpoint.isAcceptedByEngine(reservation));
+        assertEquals(allocated ? 0 : 1, endpoint.getInflightCount());
+        assertEquals(phase == TaskPhase.RUNNING ? DecodeTaskPhase.RUNNING
+                        : allocated ? DecodeTaskPhase.ACCEPTED_NOT_RUNNING : DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
+                endpoint.resourceSnapshot().requests().get(100L).phase());
+
+        endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response)).run();
+        verify(sink, times(2)).onDecodeStatus(endpoint, List.of(fact));
+        assertEquals(allocated, endpoint.isAcceptedByEngine(reservation));
+
+        WorkerStatusResponse finished = new WorkerStatusResponse();
+        finished.setFinishedTaskInfo(Map.of("100", task(100L)));
+        EndpointTestSupport.applyStatus(endpoint, finished).run();
+        verify(sink).onDecodeStatus(endpoint,
+                List.of(DecodeEndpoint.WorkerStatusFact.terminal(reservation, 0L)));
+        assertFalse(endpoint.resourceSnapshot().requests().containsKey(100L));
+        assertEquals(0, endpoint.getInflightCount());
     }
 
     @Test
@@ -37,7 +79,7 @@ class DecodeEndpointTest {
         updateStatus(null, null, 10000);
         reserve(100L, 500, 500);
         assertEquals(1, endpoint.getInflightCount());
-        assertEquals(9500, endpoint.realKvAvailable());
+        assertEquals(9500, endpoint.routingView().realKvAvailable());
     }
 
     @Test
@@ -62,7 +104,7 @@ class DecodeEndpointTest {
         release(100L);
         release(100L);
         assertEquals(0, endpoint.getInflightCount());
-        assertEquals(0, endpoint.realKvAvailable());
+        assertEquals(0, endpoint.routingView().realKvAvailable());
     }
 
     @Test
@@ -74,7 +116,7 @@ class DecodeEndpointTest {
         updateStatus(Map.of("100", running), null, 10000);
 
         assertEquals(0, endpoint.getInflightCount());
-        assertEquals(10000, endpoint.realKvAvailable());
+        assertEquals(10000, endpoint.routingView().realKvAvailable());
     }
 
     @Test
@@ -105,7 +147,7 @@ class DecodeEndpointTest {
         reserve(100L, 500, 500);
         updateStatus(null, null, 10000);
 
-        assertEquals(9500, endpoint.realKvAvailable());
+        assertEquals(9500, endpoint.routingView().realKvAvailable());
     }
 
     @Test
@@ -115,7 +157,7 @@ class DecodeEndpointTest {
         reserve(100L, 3000, 3000);
         reserve(101L, 2000, 2000);
 
-        assertEquals(5000, endpoint.realKvAvailable());
+        assertEquals(5000, endpoint.routingView().realKvAvailable());
     }
 
     @Test
@@ -140,9 +182,18 @@ class DecodeEndpointTest {
         markQueued(2L);
         assertEquals(1, endpoint.routingView().engineLoad());
 
+        var queued = endpoint.resourceSnapshot().requests().get(1L);
+        assertTrue(queued.queued());
+        assertEquals(DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED, queued.phase());
+        assertFalse(endpoint.isAcceptedByEngine(reservations.get(1L)));
+
         // Commit req 1's pre-delivery permit → back to engine load 2.
         assertEquals(TRANSFERRED, acquirePermit(1L).dispatch());
         assertEquals(2, endpoint.routingView().engineLoad());
+        var dispatched = endpoint.resourceSnapshot().requests().get(1L);
+        assertFalse(dispatched.queued());
+        assertEquals(DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN, dispatched.phase());
+        assertTrue(queued.queued(), "dispatch cannot change the previously captured phase");
 
         // release req 2 (was queued) → inflight=2, queued=0
         release(2L);
@@ -177,6 +228,13 @@ class DecodeEndpointTest {
         TaskInfo running = task(1L);
         running.setPhase(TaskPhase.KV_ALLOCATED);
         updateStatus(Map.of("1", running), null, 10000);
+
+        var confirmed = endpoint.resourceSnapshot().requests().get(1L);
+        assertEquals(1L, confirmed.requestId());
+        assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING, confirmed.phase());
+        assertFalse(confirmed.queued());
+        assertTrue(endpoint.isAcceptedByEngine(reservations.get(1L)));
+        assertTrue(endpoint.resourceSnapshot().requests().get(2L).queued());
 
         // req 2 still queued, inflight=1 (req2), confirmed=1 (req1)
         // engineLoad = confirmed(1) + max(0, inflight(1) - queued(1)) = 1
@@ -253,11 +311,12 @@ class DecodeEndpointTest {
     private void setQueuedPhaseCount(int value) throws Exception {
         java.lang.reflect.Field owner = DecodeEndpoint.class.getDeclaredField("state");
         owner.setAccessible(true);
-        java.lang.reflect.Field f = DecodeState.class.getDeclaredField("queuedPhaseCount");
-        f.setAccessible(true);
-        java.util.concurrent.atomic.AtomicInteger counter =
-                (java.util.concurrent.atomic.AtomicInteger) f.get(owner.get(endpoint));
-        counter.set(value);
+        java.lang.reflect.Field usage = DecodeState.class.getDeclaredField("queuedUsage");
+        usage.setAccessible(true);
+        Object counter = usage.get(owner.get(endpoint));
+        java.lang.reflect.Field requests = counter.getClass().getDeclaredField("requests");
+        requests.setAccessible(true);
+        requests.setInt(counter, value);
     }
 
     private void updateStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished,

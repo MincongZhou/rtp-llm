@@ -1,16 +1,17 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.util.CommonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
-
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -20,10 +21,10 @@ public final class RandomStrategy {
     private static final Logger LOGGER =
             LoggerFactory.getLogger(RandomStrategy.class);
 
-    private final WorkerDirectory workerDirectory;
+    private final EndpointRegistry endpointRegistry;
 
-    public RandomStrategy(WorkerDirectory workerDirectory) {
-        this.workerDirectory = workerDirectory;
+    public RandomStrategy(EndpointRegistry endpointRegistry) {
+        this.endpointRegistry = endpointRegistry;
     }
 
     public SelectedRole select(
@@ -33,39 +34,24 @@ public final class RandomStrategy {
                     "RANDOM endpoint selection is supported only for VIT");
         }
         List<String> addresses =
-                workerDirectory.endpointAddressSnapshot(RoleType.VIT);
+                endpointRegistry.endpointAddressSnapshot(RoleType.VIT);
         if (addresses.isEmpty()) {
             return null;
         }
 
         int start = ThreadLocalRandom.current().nextInt(addresses.size());
-        for (int offset = 0; offset < addresses.size(); offset++) {
-            String address = addresses.get((start + offset) % addresses.size());
-            WorkerEndpoint.GenerationPin pin =
-                    workerDirectory.captureEndpoint(RoleType.VIT, address);
-            if (pin == null) {
-                continue;
-            }
-            try {
-                WorkerStatus status = pin.endpoint().getStatus();
-                WorkerStatus.TopologySnapshot topology =
-                        status.topologySnapshot();
-                if (group != null && !group.equals(topology.group())) {
-                    continue;
-                }
-                WorkerStatus.EngineObservation engine =
-                        status.committedEngineObservation();
-                WorkerEndpoint.GenerationPin selectedPin = pin;
-                pin = null;
-                return selected(
-                        selectedPin,
-                        topology,
-                        engine,
-                        context.getRequestId());
-            } finally {
-                if (pin != null) {
-                    pin.close();
-                }
+        SelectedRole selected = capture(addresses.get(start), group, context.getRequestId());
+        if (selected != null) {
+            return selected;
+        }
+        // Randomize only after a rejected address; a sequential fallback biases group selection.
+        List<String> remaining = new ArrayList<>(addresses);
+        remaining.remove(start);
+        Collections.shuffle(remaining, ThreadLocalRandom.current());
+        for (String address : remaining) {
+            selected = capture(address, group, context.getRequestId());
+            if (selected != null) {
+                return selected;
             }
         }
         LOGGER.warn(
@@ -74,12 +60,18 @@ public final class RandomStrategy {
         return null;
     }
 
-    private static SelectedRole selected(
-            WorkerEndpoint.GenerationPin pin,
-            WorkerStatus.TopologySnapshot topology,
-            WorkerStatus.EngineObservation engine,
-            long requestId) {
+    private SelectedRole capture(String address, String group, long requestId) {
+        WorkerEndpoint.GenerationPin pin = endpointRegistry.capture(RoleType.VIT, address);
+        if (pin == null) {
+            return null;
+        }
         try {
+            WorkerStatus status = pin.endpoint().getStatus();
+            WorkerStatus.TopologySnapshot topology = status.topologySnapshot();
+            if (group != null && !group.equals(topology.group())) {
+                return null;
+            }
+            WorkerStatus.EngineObservation engine = status.committedEngineObservation();
             ServerStatus result = new ServerStatus();
             result.setSuccess(true);
             result.setRole(RoleType.VIT);
@@ -90,9 +82,9 @@ public final class RandomStrategy {
             result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
             result.setDpRank(engine.dpRank());
 
-            WorkerEndpoint.GenerationPin owned = pin;
+            SelectedRole selected = SelectedRole.stateless(pin, result);
             pin = null;
-            return SelectedRole.stateless(owned, result);
+            return selected;
         } finally {
             if (pin != null) {
                 pin.close();

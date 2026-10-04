@@ -1,15 +1,13 @@
 package org.flexlb.mockengine;
 
 import org.flexlb.config.DecisionPolicyConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Regression coverage for production endpoint selection in the mock-engine loop. */

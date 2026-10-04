@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -17,11 +17,11 @@ import static org.junit.jupiter.api.Assertions.*;
 public final class DeliverySettlementTestSupport {
     private final ReentrantLock lock = new ReentrantLock();
     public final PrefillState prefill = new PrefillState(lock,
-            PrefillActiveIndex.ordered(4, Comparator.comparingLong(ScheduledRequest::requestId)),
+            PrefillActiveIndex.ordered(4, Comparator.comparingLong(RequestRoute::requestId)),
             System::currentTimeMillis, () -> { });
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
-    public void enqueue(ScheduledRequest item) {
+    public void enqueue(RequestRoute item) {
         lock.lock();
         try {
             assertTrue(prefill.enqueueActiveUnderLock(item, Long.MAX_VALUE));
@@ -31,14 +31,14 @@ public final class DeliverySettlementTestSupport {
     }
 
     public PrefillState.ReservationResult<PrefillState.BatchReservation> reserveBatch(
-            ScheduledRequest head, long batchId, int maxBatches) {
+            RequestRoute head, long batchId, int maxBatches) {
         return prefill.reserveBatch(head, batchId, maxBatches, generation.tryAcquireHandoff());
     }
 
-    public void commit(long batchId, List<ScheduledRequest> items) {
+    public void commit(long batchId, List<RequestRoute> items) {
         lock.lock();
         try {
-            for (ScheduledRequest item : items) {
+            for (RequestRoute item : items) {
                 assertTrue(prefill.enqueueActiveUnderLock(item, Long.MAX_VALUE));
             }
         } finally {
@@ -53,7 +53,7 @@ public final class DeliverySettlementTestSupport {
         }
     }
 
-    public List<PrefillState.WorkerStatusFact> finish(long batchId, ScheduledRequest item) {
+    public List<PrefillState.WorkerStatusFact> finish(long batchId, RequestRoute item) {
         TaskInfo finished = new TaskInfo();
         finished.setRequestId(item.requestId());
         finished.setBatchId(batchId);

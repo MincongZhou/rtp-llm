@@ -1,7 +1,7 @@
 package org.flexlb.mock.grpc;
 
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -10,12 +10,10 @@ import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -37,7 +35,7 @@ import static org.mockito.Mockito.when;
  * <p>Key mechanism:
  * <ul>
  *   <li>The base class starts one prefill worker (worker A) and registers it in
- *       {@code EndpointRegistry} and {@code WorkerDirectory}</li>
+ *       {@code EndpointRegistry} and {@code EndpointRegistry}</li>
  *   <li>{@link #addPrefillWorker} starts an additional worker B, creates its
  *       {@code WorkerStatus} and {@code PrefillEndpoint}, and registers both</li>
  *   <li>The mock {@code DefaultRouter} is reset and reconfigured to return routing

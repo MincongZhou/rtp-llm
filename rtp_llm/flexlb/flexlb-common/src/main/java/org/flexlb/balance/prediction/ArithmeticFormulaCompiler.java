@@ -23,13 +23,19 @@ final class ArithmeticFormulaCompiler {
     private static final String CLASS_NAME = "org/flexlb/balance/prediction/ArithmeticFormula$Generated";
     private static final String SIGNATURE = "([DLjava/util/List;)D";
     private final MethodVisitor method;
+    private final boolean objectBindings;
     private int nextLocal = 3; // this, scalar variables, batch items
 
     private ArithmeticFormulaCompiler(MethodVisitor method) {
-        this.method = method;
+        this(method, false);
     }
 
-    static Executable compile(Node root) {
+    private ArithmeticFormulaCompiler(MethodVisitor method, boolean objectBindings) {
+        this.method = method;
+        this.objectBindings = objectBindings;
+    }
+
+    static Executable compile(Node root, boolean objectBindings) {
         try {
             ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
             writer.visit(V17, ACC_FINAL | ACC_SUPER, CLASS_NAME, null, "java/lang/Object",
@@ -43,7 +49,7 @@ final class ArithmeticFormulaCompiler {
             init.visitEnd();
             MethodVisitor method = writer.visitMethod(ACC_PUBLIC, "evaluate", SIGNATURE, null, null);
             method.visitCode();
-            new ArithmeticFormulaCompiler(method).expression(root);
+            new ArithmeticFormulaCompiler(method, objectBindings).expression(root);
             method.visitInsn(DRETURN);
             method.visitMaxs(0, 0);
             method.visitEnd();
@@ -191,9 +197,10 @@ final class ArithmeticFormulaCompiler {
         method.visitJumpInsn(IFEQ, done);
         method.visitVarInsn(ALOAD, iterator);
         method.visitMethodInsn(INVOKEINTERFACE, "java/util/Iterator", "next", "()Ljava/lang/Object;", true);
-        method.visitTypeInsn(CHECKCAST, "[D");
+        method.visitTypeInsn(CHECKCAST, objectBindings
+                ? "org/flexlb/balance/prediction/ArithmeticFormula$Variables" : "[D");
         method.visitVarInsn(ASTORE, vars);
-        Scope itemScope = new Scope(vars, -1);
+        Scope itemScope = new Scope(vars, -1, objectBindings);
         for (var entry : aggregates.entrySet()) {
             method.visitVarInsn(DLOAD, entry.getValue());
             emit(entry.getKey().arg(), itemScope);
@@ -223,7 +230,13 @@ final class ArithmeticFormulaCompiler {
             case VariableNode variable -> {
                 method.visitVarInsn(ALOAD, scope.vars);
                 method.visitLdcInsn(variable.varIndex());
-                method.visitInsn(DALOAD);
+                if (scope.objectBindings) {
+                    method.visitMethodInsn(INVOKEINTERFACE,
+                            "org/flexlb/balance/prediction/ArithmeticFormula$Variables",
+                            "variable", "(I)D", true);
+                } else {
+                    method.visitInsn(DALOAD);
+                }
             }
             case UnaryNode unary -> {
                 emit(unary.operand(), scope);
@@ -278,11 +291,17 @@ final class ArithmeticFormulaCompiler {
     private static final class Scope {
         private final int vars;
         private final int items;
+        private final boolean objectBindings;
         private final Map<Node, Integer> locals = new HashMap<>();
 
         private Scope(int vars, int items) {
+            this(vars, items, false);
+        }
+
+        private Scope(int vars, int items, boolean objectBindings) {
             this.vars = vars;
             this.items = items;
+            this.objectBindings = objectBindings;
         }
     }
 }

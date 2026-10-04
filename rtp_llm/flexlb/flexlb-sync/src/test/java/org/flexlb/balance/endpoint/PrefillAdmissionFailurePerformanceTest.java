@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.DispatcherConfig;
@@ -39,14 +39,14 @@ class PrefillAdmissionFailurePerformanceTest {
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         var delivery = mock(DeliveryStrategy.class);
-        var events = mock(EndpointEventProjector.class);
+        var events = mock(AbstractRequestScheduler.class);
         var reporter = mock(BatchSchedulerReporter.class);
         long singleWorkerAllocation = 0L;
         for (int workerCount : new int[]{1, 64, 512, 1024}) {
             List<EndpointRegistry.PrefillRoutingEntry> directory = new ArrayList<>();
             for (int i = 0; i < workerCount; i++) {
                 var status = EndpointTestSupport.workerStatus(RoleType.PREFILL, "worker-" + i, 8080, 8090);
-                var endpoint = new PrefillEndpoint(status, config, delivery, events, reporter);
+                var endpoint = EndpointTestSupport.prefill(status, config, delivery, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(events), reporter);
                 var observation = new WorkerStatusResponse();
                 observation.setAlive(true);
                 observation.setRunningQueryLen(1L);

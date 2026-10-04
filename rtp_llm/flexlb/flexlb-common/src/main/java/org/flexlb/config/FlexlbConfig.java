@@ -25,7 +25,13 @@ public final class FlexlbConfig {
     private GrpcServerConfig grpcServer = new GrpcServerConfig();
 
     @JsonIgnore
-    private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();
+    private final InternalRuntimeSettings internalRuntime;
+
+    public FlexlbConfig() { this(new InternalRuntimeSettings()); }
+
+    public FlexlbConfig(InternalRuntimeSettings internalRuntime) {
+        this.internalRuntime = java.util.Objects.requireNonNull(internalRuntime, "internalRuntime");
+    }
 
     @JsonIgnore
     public boolean isDirect() {
@@ -50,6 +56,16 @@ public final class FlexlbConfig {
                 && scheduler.getOrdering().getPreemption().allows(stage);
     }
 
+    @JsonIgnore
+    public long resolveExpiresAtMs(long startTime) {
+        return isQueue() ? scheduler.resolveExpiresAtMs(startTime) : Long.MAX_VALUE;
+    }
+
+    @JsonIgnore
+    public int defaultPriority() {
+        return isPriorityOrdering() ? scheduler.getOrdering().getDefaultPriority() : 50;
+    }
+
     /** Resolve the QUEUE decision policy from its single configuration owner. */
     @JsonIgnore
     public DecisionPolicyConfig decisionPolicy() {
@@ -66,16 +82,6 @@ public final class FlexlbConfig {
     public boolean isFixedWindowDecision() {
         return isQueue() && queueScheduler().getDecision().getType()
                 == DecisionPolicyConfig.Type.FIXED_WINDOW;
-    }
-
-    @JsonIgnore
-    public DecisionPolicyConfig fixedWindowDecision() {
-        DecisionPolicyConfig policy = decisionPolicy();
-        if (policy.getType() == DecisionPolicyConfig.Type.FIXED_WINDOW) {
-            return policy;
-        }
-        throw new IllegalStateException(
-                "fixed-window decision configuration is not active");
     }
 
     @JsonIgnore

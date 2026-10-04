@@ -5,20 +5,19 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
+import org.flexlb.balance.scheduler.RequestRequirements;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.VictimStage;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,7 +26,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
-
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
@@ -79,7 +77,7 @@ class DecodeSelectorTest {
     }
 
     private DecodeSelector availableStrategy(EndpointRegistry registry) {
-        return new DecodeSelector(new WorkerDirectory(registry));
+        return new DecodeSelector(registry);
     }
 
     private BalanceContext context(long sequenceLength, long requestId) {
@@ -127,7 +125,7 @@ class DecodeSelectorTest {
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
         EndpointRegistry emptyRegistry = StrategyTestSupport.endpointRegistry(configService);
-        WorkerDirectory engineWorkerStatus = new WorkerDirectory(emptyRegistry);
+        EndpointRegistry engineWorkerStatus = emptyRegistry;
         DecodeSelector decodeSelector = new DecodeSelector(
                 engineWorkerStatus);
 
@@ -144,7 +142,7 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 10_000, 9_000);
         registerWorker("127.0.0.2", 10_000, 9_000);
         EndpointRegistry registry = decodeRegistry();
-        WorkerDirectory actual = new WorkerDirectory(registry);
+        EndpointRegistry actual = registry;
         Map<String, DecodeEndpoint.DecodeRoutingView> views = new HashMap<>();
         for (DecodeEndpoint.DecodeRoutingView view
                 : actual.decodeRoutingSnapshot(null)) {
@@ -159,7 +157,7 @@ class DecodeSelectorTest {
                 decodeEndpoint(registry, replacement.address()));
         Mockito.when(replacementPin.generationId()).thenReturn(
                 replacement.generationId());
-        WorkerDirectory racing = Mockito.mock(WorkerDirectory.class);
+        EndpointRegistry racing = Mockito.mock(EndpointRegistry.class);
         Mockito.when(racing.decodeRoutingSnapshot(null))
                 .thenReturn(List.of(stale))
                 .thenReturn(List.of(replacement));
@@ -169,7 +167,7 @@ class DecodeSelectorTest {
 
         PlacementResult<SelectedRole, RoleType> result =
                 new DecodeSelector(racing).select(
-                        DecodeBinding.capture(context(1_000, 1_001L)), null);
+                        RequestRequirements.capture(context(1_000, 1_001L)), null);
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
         SelectedRole selected = result.value();
@@ -332,7 +330,7 @@ class DecodeSelectorTest {
         DecodeSelector strategy = availableStrategy(decodeRegistry());
 
         IllegalStateException error = Assertions.assertThrows(IllegalStateException.class,
-                () -> strategy.select(DecodeBinding.capture(context(100L, 1_001L)), null));
+                () -> strategy.select(RequestRequirements.capture(context(100L, 1_001L)), null));
 
         Assertions.assertTrue(error.getMessage().contains("Decode cost formula produced no finite score"));
     }
@@ -468,7 +466,7 @@ class DecodeSelectorTest {
         context.getRequest().setMaxNewTokens(1);
 
         PlacementResult<SelectedRole, RoleType> result = strategy.select(
-                DecodeBinding.capture(context), null);
+                RequestRequirements.capture(context), null);
 
         Assertions.assertEquals(PlacementResult.Status.REJECTED, result.status());
         Assertions.assertTrue(result.failure().getErrorMessage().contains("demand=258"));
@@ -481,7 +479,7 @@ class DecodeSelectorTest {
         DecodeSelector strategy = availableStrategy(decodeRegistry());
 
         PlacementResult<SelectedRole, RoleType> result = strategy.select(
-                DecodeBinding.capture(context(1_000_000L, 3_051L)), null);
+                RequestRequirements.capture(context(1_000_000L, 3_051L)), null);
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
         result.value().close();
@@ -517,13 +515,13 @@ class DecodeSelectorTest {
         Assertions.assertEquals(0L, endpoint.routingView().engineFacingKvUsed());
 
         DecodeSelector strategy = new DecodeSelector(
-                new WorkerDirectory(registry));
+                registry);
 
         BalanceContext context = context(100, 3L);
         Request request = context.getRequest();
 
         PlacementResult<SelectedRole, RoleType> fifoPlacement = strategy.select(
-                DecodeBinding.capture(context), null);
+                RequestRequirements.capture(context), null);
         Assertions.assertEquals(
                 PlacementResult.Status.SUCCESS, fifoPlacement.status());
         SelectedRole fifoSelection = fifoPlacement.value();
@@ -541,12 +539,37 @@ class DecodeSelectorTest {
                 .setOrdering(preemptiveOrdering);
         request.setRequestId(4L);
         PlacementResult<SelectedRole, RoleType> priorityPlacement =
-                strategy.select(DecodeBinding.capture(context), null);
+                strategy.select(RequestRequirements.capture(context), null);
         Assertions.assertEquals(
                 PlacementResult.Status.SUCCESS, priorityPlacement.status());
         Assertions.assertFalse(endpoint.resourceSnapshot().isQueued(4L),
                 "priority planning must leave capacity acquisition to commit");
         priorityPlacement.value().close();
+    }
+
+    @Test
+    void directReportsCapacityBlockWhenEveryWorkerIsTemporarilyBusy() {
+        configureCost("running_size");
+        configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
+        configService.loadBalanceConfig().getRouter().getRoles().getDecode()
+                .getAvailability().setMaxEngineRequests(1L);
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        registerWorker("127.0.0.2", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            reservePinned(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
+            reservePinned(decodeEndpoint(registry, "127.0.0.2:8080"), 92L, 0L, 0L, 50);
+
+            var result = availableStrategy(registry).select(
+                    RequestRequirements.capture(context(100L, 1_001L)), null);
+
+            Assertions.assertEquals(PlacementResult.Status.BLOCKED, result.status());
+            Assertions.assertEquals(RoleType.DECODE, result.blocker());
+            Assertions.assertNotNull(result.failure());
+            Assertions.assertEquals("Decode capacity exhausted", result.diagnostics().get("cause"));
+        } finally {
+            registry.close();
+        }
     }
 
     @Test
@@ -583,7 +606,7 @@ class DecodeSelectorTest {
         for (int index = 0; index < 10; index++) {
             long requestId = 123L + index;
             PlacementResult<SelectedRole, RoleType> result = strategy.select(
-                    DecodeBinding.capture(context(100L, requestId)), null);
+                    RequestRequirements.capture(context(100L, requestId)), null);
             Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
             try (SelectedRole selected = result.value()) {
                 counts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
@@ -688,7 +711,7 @@ class DecodeSelectorTest {
         BalanceContext context = context(500L, 991L);
         context.getRequest().setMaxNewTokens(10_000);
         Assertions.assertEquals(PlacementResult.Status.REJECTED,
-                availableStrategy(decodeRegistry()).select(DecodeBinding.capture(context), null).status());
+                availableStrategy(decodeRegistry()).select(RequestRequirements.capture(context), null).status());
     }
 
     @ParameterizedTest
@@ -697,7 +720,7 @@ class DecodeSelectorTest {
         configService.loadBalanceConfig().getRouter().getRoles().getDecode()
                 .getAvailability().setMaxKvUsagePercent(percent);
         Assertions.assertThrows(IllegalArgumentException.class,
-                () -> DecodeBinding.capture(context(1L, 992L)));
+                () -> RequestRequirements.capture(context(1L, 992L)));
     }
 
     private void configureCost(String expression) {
@@ -755,7 +778,7 @@ class DecodeSelectorTest {
             RoleType role,
             String group) {
         PlacementResult<SelectedRole, RoleType> result =
-                strategy.select(DecodeBinding.capture(context), group);
+                strategy.select(RequestRequirements.capture(context), group);
         if (result.status() != PlacementResult.Status.SUCCESS) {
             return null;
         }

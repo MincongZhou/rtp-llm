@@ -22,8 +22,7 @@ final class PlacementWaitQueue {
     private final PlacementAvailability availability;
     private final Comparator<GlobalQueueEntry> order;
     private final Map<PlacementKey, Domain> domains = new HashMap<>();
-    private final Map<GlobalQueueEntry, Domain> waiting = new IdentityHashMap<>();
-    private final Map<GlobalQueueEntry, Domain> retrying = new IdentityHashMap<>();
+    private final Map<GlobalQueueEntry, Domain> membership = new IdentityHashMap<>();
     private final NavigableSet<Domain> ready;
 
     PlacementWaitQueue(boolean priorityOrdering, PlacementAvailability availability) {
@@ -36,22 +35,22 @@ final class PlacementWaitQueue {
     }
 
     boolean isWaiting(GlobalQueueEntry entry) {
-        return waiting.containsKey(entry);
+        Domain domain = membership.get(entry);
+        return domain != null && domain.retry != entry;
     }
 
     /** The only park boundary: do not sleep through an edge published during planning. */
     boolean park(GlobalQueueEntry entry, PlacementKey blocker, long observedSequence) {
         Objects.requireNonNull(blocker, "blocker");
-        if (availability.lastChangedSequence(waitKey(blocker)) > observedSequence) {
+        if (availability.lastChangedSequence(blocker.capacityDomain()) > observedSequence) {
             return false;
         }
-        finishRetry(entry, false);
-        removeWaiting(entry);
-        PlacementKey key = waitKey(blocker);
+        remove(entry, false);
+        PlacementKey key = blocker.capacityDomain();
         Domain domain = domains.computeIfAbsent(key, Domain::new);
         unindex(domain);
         domain.entries.add(entry);
-        waiting.put(entry, domain);
+        membership.put(entry, domain);
         index(domain);
         return true;
     }
@@ -59,7 +58,7 @@ final class PlacementWaitQueue {
     /** Constant number of domain lookups, independent of backlog size. */
     void capacityChanged(PlacementKey key) {
         if (key.endpoint() != null) {
-            release(waitKey(key));
+            release(key.capacityDomain());
         }
         if (key.group() != null) {
             release(new PlacementKey(key.role(), key.group()));
@@ -75,10 +74,8 @@ final class PlacementWaitQueue {
         for (int count = 0; count < limit && !ready.isEmpty(); count++) {
             Domain domain = ready.pollFirst();
             GlobalQueueEntry entry = domain.entries.pollFirst();
-            domain.active = true;
+            domain.retry = entry;
             domain.available = false;
-            waiting.remove(entry);
-            retrying.put(entry, domain);
             // Even completed entries need an owner-side cleanup opportunity.
             resume.accept(entry);
         }
@@ -86,35 +83,27 @@ final class PlacementWaitQueue {
 
     /** A departing request did not consume the remaining retry opportunity. */
     void remove(GlobalQueueEntry entry) {
-        finishRetry(entry, true);
-        removeWaiting(entry);
+        remove(entry, true);
     }
 
     void clear() {
         domains.clear();
         ready.clear();
-        waiting.clear();
-        retrying.clear();
+        membership.clear();
     }
 
-    private void finishRetry(GlobalQueueEntry entry, boolean progress) {
-        Domain domain = retrying.remove(entry);
-        if (domain == null) {
-            return;
-        }
-        domain.active = false;
-        // An edge arriving while the retry was active remains available.
-        domain.available |= progress;
-        index(domain);
-    }
-
-    private void removeWaiting(GlobalQueueEntry entry) {
-        Domain domain = waiting.remove(entry);
-        if (domain != null) {
-            unindex(domain);
+    private void remove(GlobalQueueEntry entry, boolean progress) {
+        Domain domain = membership.remove(entry);
+        if (domain == null) { return; }
+        unindex(domain);
+        if (domain.retry == entry) {
+            domain.retry = null;
+            // An edge arriving during this retry remains available.
+            domain.available |= progress;
+        } else {
             domain.entries.remove(entry);
-            index(domain);
         }
+        index(domain);
     }
 
     private void release(PlacementKey key) {
@@ -132,7 +121,7 @@ final class PlacementWaitQueue {
     }
 
     private void index(Domain domain) {
-        if (!domain.active) {
+        if (domain.retry == null) {
             if (domain.entries.isEmpty()) {
                 domains.remove(domain.key, domain);
             } else if (domain.available) {
@@ -141,16 +130,11 @@ final class PlacementWaitQueue {
         }
     }
 
-    private static PlacementKey waitKey(PlacementKey key) {
-        // Exact waiters follow role/address even when a replacement changes groups.
-        return key.endpoint() == null ? key : PlacementKey.exact(key.role(), null, key.endpoint());
-    }
-
     private final class Domain {
         private final PlacementKey key;
         private final NavigableSet<GlobalQueueEntry> entries = new TreeSet<>(order);
         private boolean available;
-        private boolean active;
+        private GlobalQueueEntry retry;
 
         private Domain(PlacementKey key) {
             this.key = key;

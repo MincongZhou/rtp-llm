@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -63,7 +64,17 @@ class PreemptionRegistrationTest {
         assertFalse(inFlight.isReleasable());
     }
 
+    @Test
+    void requestIdentitySurvivesChangesToTheOriginalInput() {
+        PreemptionRegistration registration = registration();
+        registration.owner.getRequest().setRequestId(99L);
+
+        assertEquals(7L, registration.requestId());
+    }
+
     private static PreemptionRegistration registration() {
-        return new PreemptionRegistration(null, 7L, 11L, "test preemption");
+        BalanceContext context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 7L);
+        context.activate(new BalanceContext.RequestFuture((completion, response, failure, interrupt) -> false));
+        return new PreemptionRegistration(context, 11L, "test preemption");
     }
 }

@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.eviction.DecodeEndpointSnapshot;
+import org.flexlb.config.FlexlbConfig;
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.decodeRequirements;
 import org.flexlb.balance.eviction.DecodeEvictionProposal;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.EvictionPlanner;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
@@ -71,7 +71,7 @@ class DecodeCapacityPreemptionTest {
         assertTrue(policy.evaluate(endpoint.routingView().dispatchUsage(), hardKvTokens, expectedKvTokens).fits());
         DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
-        assertTrue(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
+        assertNotNull(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
         assertNull(endpoint.reservationHandle(1L));
         assertNotNull(endpoint.reservationHandle(9L));
     }
@@ -88,7 +88,7 @@ class DecodeCapacityPreemptionTest {
         }
         DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(List.of(1L), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
-        assertTrue(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
+        assertNotNull(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
         assertEquals(200L, endpoint.routingView().inflightExpectedKv());
     }
 
@@ -96,19 +96,15 @@ class DecodeCapacityPreemptionTest {
                                                 DecodeEndpoint.AdmissionCapacity policy, VictimStage stage) {
         PreemptionConfig preemption = new PreemptionConfig();
         preemption.setAllowedVictimStages(EnumSet.of(stage));
-        EngineCancelChannel channel = mock(EngineCancelChannel.class);
-        when(channel.isSupported(endpoint)).thenReturn(true);
         var failures = new HashMap<String, String>();
-        DecodeEvictionProposal proposal = EvictionPlanner.planDecode(70, hardKvTokens, expectedKvTokens,
-                List.of(DecodeEndpointSnapshot.capture(endpoint, policy)), preemption, channel, failures);
+        DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
+                decodeRequirements(70, hardKvTokens, expectedKvTokens, policy), endpoint.resourceSnapshot(), preemption, true, failures);
         assertNotNull(proposal, failures.toString());
         return proposal;
     }
 
     private static DecodeEndpoint endpoint(long availableKv) {
-        DecodeEndpoint endpoint = new DecodeEndpoint(
-                EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081),
-                EndpointTestSupport.noopEventSink());
+        DecodeEndpoint endpoint = new DecodeEndpoint(EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
         updateCapacity(endpoint, availableKv);
         return endpoint;
     }

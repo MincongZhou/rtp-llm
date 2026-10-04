@@ -3,21 +3,21 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
 
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 /**
  * Exact ownership token for one priority-preemption attempt.
  *
- * <p>This class owns only the attempt-local protocol. RequestSlot remains the
+ * <p>This class owns only the attempt-local protocol. RequestRepository remains the
  * aggregate root and decides when a transition is legal for the request as a
  * whole. Keeping this small state machine separate makes that boundary
  * explicit and prevents transport bookkeeping from obscuring request
  * lifecycle decisions.</p>
  */
 public final class PreemptionRegistration {
-    private final RequestSlot owner;
-    private final long requestId;
+    final BalanceContext owner;
     private final long attemptToken;
     private final String detail;
     private final CompletableFuture<VictimTerminal> terminal =
@@ -25,28 +25,23 @@ public final class PreemptionRegistration {
 
     private PreemptionCancelPhase phase = PreemptionCancelPhase.CLAIMED;
     private boolean finished;
+    private boolean cancelAcknowledged;
     private DeferredTerminal pendingTerminal;
     private boolean pendingDeliveryConfirmation;
-    private long pendingConfirmationBatchId;
 
     PreemptionRegistration(
-            RequestSlot owner, long requestId,
+            BalanceContext owner,
             long attemptToken,
             String detail) {
-        this.owner = owner;
-        this.requestId = requestId;
+        this.owner = Objects.requireNonNull(owner, "owner");
         this.attemptToken = attemptToken;
         this.detail = detail == null ? "priority preemption" : detail;
     }
 
-    public boolean applyPhase(PreemptionCancelPhase phase) { return owner.updatePreemption(this, phase); }
-
-    public boolean release() { return owner.releasePreemption(this); }
-
-    public boolean completePreemption(String detail) { return owner.completePreemption(this, detail); }
+    public AbstractRequestScheduler scheduler() { return owner.scheduler(); }
 
     public long requestId() {
-        return requestId;
+        return owner.getRequestId();
     }
 
     public long attemptToken() {
@@ -73,15 +68,12 @@ public final class PreemptionRegistration {
         return pendingDeliveryConfirmation;
     }
 
-    long pendingConfirmationBatchId() {
-        return pendingConfirmationBatchId;
-    }
-
     boolean advanceTo(PreemptionCancelPhase next) {
         if (finished || !phase.canTransitionTo(next)) {
             return false;
         }
         phase = next;
+        cancelAcknowledged |= next == PreemptionCancelPhase.CANCEL_REQUESTED;
         return true;
     }
 
@@ -97,6 +89,8 @@ public final class PreemptionRegistration {
     boolean isReleasable() {
         return !finished && phase.isLocallyReleasable();
     }
+
+    boolean isCancelRequested() { return cancelAcknowledged; }
 
     boolean isNotFound() {
         return !finished && phase == PreemptionCancelPhase.NOT_FOUND_STALE;
@@ -118,10 +112,7 @@ public final class PreemptionRegistration {
         pendingTerminal = selected;
     }
 
-    void recordDeliveryConfirmation(long batchId) {
-        if (!pendingDeliveryConfirmation) {
-            pendingDeliveryConfirmation = true;
-            pendingConfirmationBatchId = batchId;
-        }
+    void recordDeliveryConfirmation() {
+        pendingDeliveryConfirmation = true;
     }
 }

@@ -2,22 +2,25 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
-import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.BalanceContext.AdmissionHandle;
+import org.flexlb.balance.scheduler.BalanceContext.DeliveryClaim;
+import org.flexlb.balance.scheduler.BalanceContext.RequestStage;
+import org.flexlb.balance.scheduler.RequestProtocolTestSupport.Registered;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
-import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -28,12 +31,14 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCondition;
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.commitRoute;
+import static org.flexlb.balance.scheduler.RequestProtocolTestSupport.awaitCondition;
+import static org.flexlb.balance.scheduler.RequestProtocolTestSupport.commitRoute;
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.freezeInputs;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -42,11 +47,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Canonical request-generation ownership tests, independent of the facade. */
+/**
+ * Canonical request-generation ownership tests, independent of the facade.
+ */
 class RequestRegistryTest {
 
     private FlexlbConfig config;
-    private RequestRegistry lifecycle;
+
+    private AbstractRequestScheduler lifecycle;
 
     @BeforeEach
     void setUp() {
@@ -54,83 +62,394 @@ class RequestRegistryTest {
         SchedulingTestConfig.usePriorityQueue(config);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        lifecycle = new RequestRegistry(
-                configService,
-                mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class));
+        lifecycle = org.flexlb.balance.scheduler.SchedulerTestSupport.create(configService, mock(BatchSchedulerReporter.class), mock(RequestSchedulerReporter.class),
+                mock(RecentCacheKeyTraceReporter.class));
     }
 
     @AfterEach
     void tearDown() {
-        if (lifecycle.closeAdmissionAndAwaitMutations()) {
+        if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle)) {
             lifecycle.closeOutstandingAndTerminalize();
-            lifecycle.closeExpiration();
-            lifecycle.closePublisher();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle).timer().close();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle).closeRequestExecutors();
         }
+    }
+
+    @Test
+    void registrationCapturesCurrentIdentityAndKeepsItAfterFutureCompletion() {
+        BalanceContext context = context(890L);
+        SchedulingTestConfig.freezeInputs(context);
+        context.getRequest().setRequestId(891L);
+        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        assertSame(future, context.getFuture());
+        assertEquals(891L, context.getRequirements().requestId());
+        BalanceContext other = context(893L);
+        assertThrows(IllegalStateException.class, () -> other.setFuture(future));
+        assertEquals(893L, other.getRequestId());
+        var otherFuture = RequestProtocolTestSupport.register(lifecycle, other);
+        assertFalse(otherFuture.isDone());
+        assertSame(otherFuture, other.getFuture());
+        assertEquals(893L, other.getRequestId());
+        context.getRequest().setRequestId(892L);
+        assertEquals(891L, context.getRequestId());
+        assertTrue(future.cancel(false));
+        assertEquals(891L, context.getRequestId());
+        assertThrows(IllegalStateException.class, () -> context.setFuture(new CompletableFuture<>()));
+        assertTrue(RequestProtocolTestSupport.register(lifecycle, context).isDone());
+        assertSame(future, context.getFuture());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void registrationFreezesPriorityAndDeadline(boolean suppliedMetadata) {
+        BalanceContext context = context(806L);
+        context.getRequest().setPriority(73);
+        context.setSchedulingMetadata(suppliedMetadata
+                ? SchedulingMetadata.explicit(64, Long.MAX_VALUE) : null);
+        int priority = context.getPriority();
+        long expiresAt = context.getRequestExpiresAtMs();
+        RequestProtocolTestSupport.register(lifecycle, context);
+        assertNotNull(context.getRequirements());
+        var metadata = context.getSchedulingMetadata();
+        assertNotNull(metadata);
+        context.setSchedulingMetadata(metadata);
+        assertThrows(IllegalStateException.class, () -> context.setSchedulingMetadata(null));
+        assertThrows(IllegalStateException.class, () -> context.setSchedulingMetadata(
+                SchedulingMetadata.explicit(1, 1L)));
+        context.getRequest().setPriority(1);
+        context.setStartTime(1L);
+        assertEquals(priority, context.getPriority());
+        assertEquals(expiresAt, context.getRequestExpiresAtMs());
+        assertEquals(priority, RequestRequirements.capture(context).priority());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void registrationFreezesRoutingInputsAcrossRouteAttempts(boolean routeDelivery) {
+        var dispatcher = config.getDispatcher();
+        dispatcher.setType(routeDelivery ? org.flexlb.config.DispatcherConfig.Type.NON_BATCH
+                : org.flexlb.config.DispatcherConfig.Type.BATCH);
+        dispatcher.setMaxInflightPerPrefillWorker(3);
+        BalanceContext context = context(807L);
+        var request = context.getRequest();
+        var cacheKeys = new ArrayList<>(List.of(11L, 22L));
+        request.setSeqLen(64L);
+        request.setMaxNewTokens(32);
+        request.setApiKey("original");
+        request.setBlockCacheKeys(cacheKeys);
+        request.setCacheKeyBlockSize(16L);
+        RequestProtocolTestSupport.register(lifecycle, context);
+        var inputs = context.getRequirements();
+        request.setRequestId(808L);
+        request.setSeqLen(1L);
+        request.setMaxNewTokens(2);
+        request.setApiKey("changed");
+        request.setCacheKeyBlockSize(1L);
+        cacheKeys.clear();
+        dispatcher.setType(routeDelivery ? org.flexlb.config.DispatcherConfig.Type.BATCH
+                : org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        dispatcher.setMaxInflightPerPrefillWorker(99);
+        var first = org.flexlb.balance.scheduler.RequestRoute.create(context, null, null, null, null, null, null, 123L);
+        var retry = org.flexlb.balance.scheduler.RequestRoute.create(context, null, null, null, null, null, null, 456L);
+        assertSame(inputs, first.requirements());
+        assertSame(inputs, retry.requirements());
+        assertEquals(routeDelivery, first.requiresRouteReservation());
+        assertEquals(routeDelivery, retry.requiresRouteReservation());
+        assertEquals(routeDelivery ? 0 : 3, retry.requirements().maxInflightBatchesPerPrefillWorker());
+        assertEquals(807L, retry.requestId());
+        assertEquals(64L, retry.seqLen());
+        assertEquals(96L, inputs.expectedKvTokens());
+        assertEquals("original", inputs.apiKey());
+        assertEquals(List.of(11L, 22L), inputs.blockCacheKeys());
+        assertEquals(16L, inputs.cacheKeyBlockSize());
+        assertThrows(UnsupportedOperationException.class, () -> inputs.blockCacheKeys().clear());
+        assertEquals(first.enqueueSeq(), retry.enqueueSeq());
+        assertEquals(123L, retry.enqueuedAtMs());
+    }
+
+    @Test
+    void invalidRouteInputsDoNotInitializeWorkerFifoIdentity() {
+        BalanceContext context = context(804L);
+        assertThrows(NullPointerException.class, () -> org.flexlb.balance.scheduler.RequestRoute.create(context, null, null, null, null, null, null, 123L));
+        assertThrows(IllegalArgumentException.class, () -> org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), null, null, null, null, null,
+                new DecodeEndpoint.ReservationHandle(1L, 805L, 1L), 123L));
+        assertEquals(0L, context.getWorkerEnqueueSequence());
+        assertEquals(0L, context.getFirstWorkerEnqueueTime());
+    }
+
+    @Test
+    void registrationAndFutureInitializationShareTheContextMonitor() throws Exception {
+        BalanceContext context = context(803L);
+        CompletableFuture<Response> placeholder = new CompletableFuture<>();
+        AtomicReference<CompletableFuture<Response>> registered = new AtomicReference<>();
+        Thread registrar = new Thread(() -> registered.set(RequestProtocolTestSupport.register(lifecycle, context)), "registration-test");
+        synchronized (context) {
+            registrar.start();
+            awaitCondition(() -> registrar.getState() == Thread.State.BLOCKED);
+            assertNull(context.getRequirements(), "binding must wait for the Context monitor");
+            context.setFuture(placeholder);
+        }
+        registrar.join(5_000L);
+        assertFalse(registrar.isAlive());
+        assertNotNull(registered.get());
+        assertSame(registered.get(), context.getFuture());
+        assertTrue(context.getFuture() instanceof BalanceContext.RequestFuture);
+        assertFalse(context.getFuture().isDone());
+    }
+
+    @Test
+    void duplicateSubmitPreservesCanonicalFutureAndRequestId() {
+        BalanceContext context = context(800L);
+        CompletableFuture<Response> canonical = RequestProtocolTestSupport.register(lifecycle, context);
+        context.getRequest().setRequestId(801L);
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), RequestProtocolTestSupport.register(lifecycle, context).join().getCode());
+        assertSame(canonical, context.getFuture());
+        assertEquals(800L, context.getRequestId());
+        assertEquals(800L, RequestRequirements.capture(context).requestId());
+        assertThrows(IllegalStateException.class, () -> context.setFuture(new CompletableFuture<>()));
+        lifecycle.cancelRequest(800L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.onGlobalControl(800L, canonical);
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), canonical.join().getCode());
+        assertNull(lifecycle.requestSlot(800L));
+        assertEquals(RequestState.Phase.CANCELLED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(800L, 0L).state());
+        assertNull(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(801L, 0L));
+    }
+
+    @Test
+    void expiredTerminalAllowsNewContextButCannotReuseOldContext() {
+        BalanceContext old = context(802L);
+        CompletableFuture<Response> original = RequestProtocolTestSupport.register(lifecycle, old);
+        lifecycle.cancelRequest(802L, 0L, CancelReason.CLIENT_CANCELLED);
+        original.join();
+        assertTrue(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).removeExactTerminal(org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(lifecycle, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(802L, 0L)), Long.MAX_VALUE));
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), RequestProtocolTestSupport.register(lifecycle, old).join().getCode());
+        assertSame(original, old.getFuture());
+        CompletableFuture<Response> replacement = RequestProtocolTestSupport.register(lifecycle, context(802L));
+        assertFalse(replacement.isDone());
+        assertSame(replacement, lifecycle.requestSlot(802L).getFuture());
     }
 
     @Test
     void duplicateRegistrationCannotReplaceTheCanonicalExactGeneration() {
         BalanceContext context = context(101L);
-        CompletableFuture<Response> canonical = lifecycle.register(context);
-
-        CompletableFuture<Response> duplicate = lifecycle.register(context(101L));
-
+        CompletableFuture<Response> canonical = RequestProtocolTestSupport.register(lifecycle, context);
+        CompletableFuture<Response> duplicate = RequestProtocolTestSupport.register(lifecycle, context(101L));
         assertFalse(canonical.isDone());
         assertTrue(duplicate.isDone());
-        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                duplicate.join().getCode());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), duplicate.join().getCode());
         assertSame(canonical, lifecycle.requestSlot(101L).future());
-        assertEquals(1, lifecycle.liveRequestCount());
+        assertEquals(1, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
+    }
+
+    @Test
+    void successfulExternalCompletionBeforeDeliveryCannotStrandTheSlot() {
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(10001L));
+        Response success = new Response();
+        success.setSuccess(true);
+        assertFalse(future.complete(success));
+        assertFalse(future.isDone());
+        assertEquals(RequestState.Phase.QUEUED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(10001L, 0L).state());
+        assertEquals(1, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
+    }
+
+    @Test
+    void futureCancelDuringAdmissionIsSynchronousAndTheAdmissionOwnerSettlesIt() {
+        QueuedRequestScheduler queue = (QueuedRequestScheduler) lifecycle;
+        org.mockito.Mockito.doNothing().when(queue).signalControl(org.mockito.ArgumentMatchers.any());
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(10003L));
+        BalanceContext slot = lifecycle.requestSlot(10003L);
+        AdmissionHandle admission = lifecycle.claimAdmissionHandle(10003L, future);
+        assertNotNull(admission);
+        assertTrue(future.cancel(false));
+        assertTrue(future.isCancelled());
+        assertEquals(RequestState.Phase.CANCEL_REQUESTED, slot.snapshot().state());
+        admission.finish();
+        assertEquals(RequestState.Phase.CANCELLED, slot.snapshot().state());
+        assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
+        verify(queue).signalControl(slot);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void schedulingDeadlineDuringAdmissionRetainsItsOwnEntryRuleAfterDeliveryClaim(boolean timer) {
+        var context = context(10007L);
+        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var deadline = context.requestDeadline();
+        assertNotNull(deadline);
+        var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null,
+                mock(PrefillEndpoint.class), null, null, System.currentTimeMillis());
+        try (var admission = lifecycle.claimAdmissionHandle(context.getRequestId(), future); var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(admission);
+            assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
+            assertNotNull(RequestProtocolTestSupport.claimRouteWithoutPrediction(lifecycle, item, () -> true));
+            if (timer) {
+                lifecycle.onSchedulingDeadline(context, deadline);
+            } else {
+                lifecycle.cancelRequest(context, 0L, CancelReason.DEADLINE_EXCEEDED);
+            }
+            assertEquals(timer ? CancelReason.DEADLINE_EXCEEDED : null, context.cancellationReason());
+            assertSame(timer ? null : deadline, context.requestDeadline());
+            assertEquals(RequestStage.DELIVERING, context.stage());
+            assertSame(item, context.item());
+            assertFalse(future.isDone(), "admission owner must settle the timer fact");
+        }
+    }
+
+    @Test
+    void notificationFailureAfterPublicationKeepsTheExactRouteAndDoesNotRollback() {
+        var context = context(10005L);
+        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var prefill = mock(PrefillEndpoint.class);
+        var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null,
+                prefill, null, null, System.currentTimeMillis());
+        var failure = new IllegalStateException("route-ready notification failed");
+        org.mockito.Mockito.doThrow(failure).when(prefill).signalRouteReady();
+        try (var admission = lifecycle.claimAdmissionHandle(context.getRequestId(), future); var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(admission);
+            assertSame(failure, assertThrows(IllegalStateException.class,
+                    () -> lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true))));
+            assertSame(item, context.item());
+            assertEquals(RequestStage.READY_TO_DELIVER, context.stage());
+            assertEquals(0, failure.getSuppressed().length, "committed binding must not be rolled back");
+        }
+    }
+
+    @Test
+    void publicationFailureAfterHandoffPreservesBindingAndWakesDelivery() {
+        var context = context(10008L);
+        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var prefill = mock(PrefillEndpoint.class);
+        var item = RequestRoute.create(freezeInputs(context), new Response(), null, null,
+                prefill, null, null, System.currentTimeMillis());
+        var failure = new IllegalStateException("failure after handoff");
+        var publication = new ProvisionalRoute.Publication() {
+            private boolean published;
+            @Override public void publish() { published = true; throw failure; }
+            @Override public boolean published() { return published; }
+        };
+        try (var admission = lifecycle.claimAdmissionHandle(context.getRequestId(), future);
+             var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertSame(failure, assertThrows(IllegalStateException.class,
+                    () -> lifecycle.commitRoute(item, publication)));
+            assertSame(item, context.item());
+            assertEquals(RequestStage.READY_TO_DELIVER, context.stage());
+            verify(prefill).signalRouteReady();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedPublicationUnbindsTheRouteBeforeAdmissionCloses(boolean throwsFailure) {
+        var context = context(10006L);
+        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null,
+                mock(PrefillEndpoint.class), null, null, System.currentTimeMillis());
+        var failure = new IllegalStateException("publication failed");
+        try (var admission = lifecycle.claimAdmissionHandle(context.getRequestId(), future); var admissionCompletion3 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(admission);
+            if (throwsFailure) {
+                assertSame(failure, assertThrows(IllegalStateException.class,
+                        () -> lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> { throw failure; }))));
+            } else {
+                assertEquals(PlacementResult.Status.BLOCKED, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> false)));
+            }
+            assertNull(context.item());
+            assertEquals(RequestStage.ROUTING, context.stage());
+        }
+        assertEquals(RequestStage.QUEUED, context.stage());
+    }
+
+    @Test
+    void futureCancelAfterQueuePublicationStillWinsBeforeAdmissionHandleCloses() {
+        BalanceContext context = context(10004L);
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context);
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        context.setFuture(future);
+        RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null, prefill, null, null, System.currentTimeMillis());
+        when(prefill.signalQueuedControl(item)).thenReturn(true);
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(10004L, future); var admissionCompletion4 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(admission);
+            assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
+            assertTrue(future.cancel(false));
+            assertTrue(future.isCancelled());
+        }
+        verify(prefill, org.mockito.Mockito.atLeastOnce()).signalQueuedControl(item);
+        lifecycle.onQueuedItemControl(item);
+        assertEquals(RequestState.Phase.CANCELLED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(10004L, 0L).state());
+        assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
+    }
+
+    @Test
+    void globalCloseConsumesAnAcceptedInactivityFactBeforeShutdownFailure() throws Exception {
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(10002L));
+        BalanceContext context = lifecycle.requestSlot(10002L);
+        lifecycle.enqueueInactivityDeadline(context, RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(context, "inactivityDeadline"), Long.MAX_VALUE, () -> {
+        });
+        lifecycle.settleGlobalQueueClose(10002L, future);
+        assertEquals(RequestState.Phase.TIMED_OUT, context.snapshot().state());
+        assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
     }
 
     @Test
     void terminalRecordPreservesIdentityWithoutRetainingRequestContext() throws Exception {
-        WeakReference<BalanceContext> contextReference = cancelAndReferenceContext(103L);
-        RequestSlot terminal = lifecycle.requestSlot(103L);
-        assertEquals(RequestState.Phase.CANCELLED, terminal.snapshot().state());
-
-        for (int attempt = 0; attempt < 20 && !contextReference.refersTo(null); attempt++) {
-            System.gc();
-            Thread.sleep(50L);
-        }
-
-        assertTrue(contextReference.refersTo(null), "terminal identity must not retain the request payload");
-        assertSame(terminal, lifecycle.requestSlot(103L));
-        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                lifecycle.register(context(103L)).join().getCode());
+        BalanceContext context = context(103L);
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context);
+        lifecycle.cancelRequest(103L, 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), future.get(5, TimeUnit.SECONDS).getCode());
+        awaitCondition(() -> org.springframework.test.util.ReflectionTestUtils.getField(future, "target") == null);
+        RequestState terminal = org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(103L, 0L);
+        assertEquals(RequestState.Phase.CANCELLED, terminal.state());
+        assertNull(lifecycle.requestSlot(103L));
+        assertSame(terminal, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(103L, 0L));
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), RequestProtocolTestSupport.register(lifecycle, context(103L)).join().getCode());
     }
 
     @Test
     void globalWaitingRequestsHaveNoQuantityAdmissionLimit() {
         var low = context(1L);
         low.setSchedulingMetadata(SchedulingMetadata.explicit(10, Long.MAX_VALUE));
-        var waiting = lifecycle.register(low);
+        var waiting = RequestProtocolTestSupport.register(lifecycle, low);
         for (long id = 2; id <= 1001; id++) {
             var high = context(id);
             high.setSchedulingMetadata(SchedulingMetadata.explicit(90, Long.MAX_VALUE));
-            assertFalse(lifecycle.register(high).isDone());
+            assertFalse(RequestProtocolTestSupport.register(lifecycle, high).isDone());
         }
         assertFalse(waiting.isDone(), "higher priority arrivals must not evict waiting requests");
-        assertEquals(1001, lifecycle.liveRequestCount());
+        assertEquals(1001, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                lifecycle.register(context(1L)).join().getCode());
+                RequestProtocolTestSupport.register(lifecycle, context(1L)).join().getCode());
         for (long id = 1; id <= 1001; id++) {
             lifecycle.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
         }
-        assertEquals(0, lifecycle.liveRequestCount());
+        assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
+    }
+
+    @Test
+    void globalWaitingCancellationWaitsForDecisionOwnerTicket() throws Exception {
+        QueuedRequestScheduler queue = (QueuedRequestScheduler) lifecycle;
+        org.mockito.Mockito.doNothing().when(queue).signalControl(org.mockito.ArgumentMatchers.any());
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(1002L));
+
+        assertEquals(RequestState.Phase.CANCEL_REQUESTED,
+                lifecycle.cancelRequest(1002L, 0L, CancelReason.CLIENT_CANCELLED).state());
+        assertFalse(future.isDone());
+        verify(queue).signalControl(lifecycle.requestSlot(1002L));
+
+        lifecycle.onGlobalControl(1002L, future);
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                future.get(5, TimeUnit.SECONDS).getCode());
+        assertEquals(RequestState.Phase.CANCELLED,
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(1002L, 0L).state());
     }
 
     @Test
     void publicQueriesOwnTheirLockAndPrivateDecisionsStillRequireIt() {
-        lifecycle.register(context(102L));
-        RequestSlot slot = lifecycle.requestSlot(102L);
+        RequestProtocolTestSupport.register(lifecycle, context(102L));
+        BalanceContext slot = lifecycle.requestSlot(102L);
         assertNull(slot.activeItem());
         assertTrue(slot.isOpen());
         assertTrue(slot.isLiveGeneration());
-        IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                        slot, "recordCancellationLocked", CancelReason.CLIENT_CANCELLED, "client cancelled"));
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () -> org.springframework.test.util.ReflectionTestUtils.invokeMethod(slot, "recordCancellationLocked", CancelReason.CLIENT_CANCELLED, "client cancelled"));
         assertTrue(failure.getMessage().contains("requires slot lock"));
         assertEquals(RequestState.Phase.QUEUED, slot.snapshot().state());
     }
@@ -141,15 +460,195 @@ class RequestRegistryTest {
             Registered registered = registerItem(id);
             assertEquals(PlacementResult.Status.SUCCESS,
                     commitRoute(lifecycle, registered));
-            assertNotNull(RequestLifecycleTestSupport.claimRoute(
+            assertNotNull(RequestProtocolTestSupport.claimRoute(
                     lifecycle, registered.item(), () -> true));
         }
-        assertEquals(201, lifecycle.liveRequestCount());
+        assertEquals(201, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
+    }
+
+    @Test
+    void itemEntryPointsRejectAnotherSchedulersLiveContext() {
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        AbstractRequestScheduler other = org.flexlb.balance.scheduler.SchedulerTestSupport.create(configService,
+                mock(BatchSchedulerReporter.class), mock(RequestSchedulerReporter.class),
+                mock(RecentCacheKeyTraceReporter.class));
+        Registered registered = registerItem(806L);
+        CompletableFuture<Response> otherFuture = other.register(context(806L), StrategyErrorType.BATCH_SLO_EXPIRED);
+        RequestRoute item = registered.item();
+        try {
+            try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(806L, registered.future()); var admissionCompletion5 = RequestProtocolTestSupport.finishOnExit(admission)) {
+                assertNotNull(admission);
+                assertEquals(PlacementResult.Status.CLOSED, other.commitRoute(item, RequestProtocolTestSupport.publication(() -> {
+                    throw new AssertionError("foreign scheduler published the route");
+                })));
+                assertEquals(BalanceContext.RequestStage.ROUTING, item.ctx().stage());
+                assertNull(item.ctx().item());
+                assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
+            }
+            Runnable prepare = mock(Runnable.class);
+            var preparation = other.prepareDispatch(item, exact -> {
+                prepare.run();
+                throw new AssertionError("foreign scheduler prepared delivery");
+            });
+            assertSame(org.flexlb.balance.delivery.CapacityBoundary.OWNERSHIP_LOST, preparation);
+            org.mockito.Mockito.verifyNoInteractions(prepare);
+            assertNull(other.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 41L, RequestProtocolTestSupport.handoff(() -> {
+                throw new AssertionError("foreign scheduler transferred endpoint ownership");
+            })));
+            other.failDeliveryPreparation(item, new IllegalStateException("foreign failure"));
+            other.onQueuedItemExpired(item);
+            other.onQueuedItemControl(item);
+            other.onQueueOfferFailure(item, new IllegalStateException("foreign queue failure"));
+            other.onQueuedItemPreempted(item, item);
+            assertEquals(BalanceContext.RequestStage.READY_TO_DELIVER, item.ctx().stage());
+            assertEquals(BalanceContext.RequestStage.QUEUED, other.requestSlot(806L).stage());
+            assertFalse(registered.future().isDone());
+            assertFalse(otherFuture.isDone());
+            assertNotNull(lifecycle.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 41L, RequestProtocolTestSupport.handoff(() -> true)));
+        } finally {
+            RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(other);
+            other.closeOutstandingAndTerminalize();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(other).timer().close();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(other).closeRequestExecutors();
+        }
+    }
+
+    @Test
+    void failedPublicationKeepsSchedulingStageAndAllowsExactRetry() {
+        Registered registered = registerItem(706L);
+        BalanceContext slot = lifecycle.requestSlot(706L);
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(706L, registered.future()); var admissionCompletion6 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(admission);
+            assertEquals(PlacementResult.Status.BLOCKED, lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> false)));
+            assertEquals("ROUTING", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(slot, "stage")));
+            assertNull(slot.activeItem());
+            assertEquals(RequestState.Phase.QUEUED, slot.snapshot().state());
+            assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> true)));
+            assertEquals("READY_TO_DELIVER", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(slot, "stage")));
+        }
+    }
+
+    @Test
+    void acceptedQueuedCancellationSurvivesEndpointStopFailure() throws Exception {
+        BalanceContext context = context(707L);
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context);
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        context.setFuture(future);
+        RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(),
+                null, null, prefill, null, null, System.currentTimeMillis());
+        when(prefill.signalQueuedControl(item)).thenReturn(true);
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(707L, future); var admissionCompletion7 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(admission);
+            assertEquals(PlacementResult.Status.SUCCESS,
+                    lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
+        }
+
+        assertEquals(RequestState.Phase.CANCEL_REQUESTED,
+                lifecycle.cancelRequest(707L, 0L, CancelReason.CLIENT_CANCELLED).state());
+        assertFalse(future.isDone(), "local owner has not consumed its control ticket");
+        lifecycle.onQueueOfferFailure(item, new IllegalStateException("endpoint stopped"));
+
+        assertEquals(RequestState.Phase.CANCELLED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(707L, 0L).state());
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                future.get(5, TimeUnit.SECONDS).getCode());
+    }
+
+    @Test
+    void stoppedLocalOwnerFallsBackToSharedContinuationInsteadOfTimerThread() throws Exception {
+        BalanceContext context = context(708L);
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context);
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        context.setFuture(future);
+        RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null, prefill, null, null, System.currentTimeMillis());
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(708L, future); var admissionCompletion8 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(admission);
+            assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
+        }
+        AtomicReference<Thread> cleanupThread = new AtomicReference<>();
+        when(prefill.removeQueued(item, "TERMINAL_RELEASE")).thenAnswer(invocation -> {
+            cleanupThread.set(Thread.currentThread());
+            return true;
+        });
+        BalanceContext slot = lifecycle.requestSlot(708L);
+        RequestContinuationExecutor continuations = (RequestContinuationExecutor) org.springframework.test.util.ReflectionTestUtils.getField(lifecycle, "continuations");
+        lifecycle.enqueueInactivityDeadline(slot, RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(slot, "inactivityDeadline"), Long.MAX_VALUE, () -> {
+        });
+        assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
+        assertNotNull(cleanupThread.get());
+        assertNotEquals(Thread.currentThread(), cleanupThread.get());
+        assertEquals(RequestState.Phase.TIMED_OUT, slot.snapshot().state());
+    }
+
+    @Test
+    void terminalRecordDropsUnconsumedExactOwnerFactReferences() {
+        BalanceContext context = context(709L);
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context);
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        context.setFuture(future);
+        RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null, prefill, null, null, System.currentTimeMillis());
+        when(prefill.signalQueuedControl(item)).thenReturn(true);
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(709L, future); var admissionCompletion9 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(admission);
+            assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
+        }
+        BalanceContext slot = lifecycle.requestSlot(709L);
+        RequestContinuationExecutor continuations = (RequestContinuationExecutor) org.springframework.test.util.ReflectionTestUtils.getField(lifecycle, "continuations");
+        lifecycle.enqueueInactivityDeadline(slot, RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(slot, "inactivityDeadline"), Long.MAX_VALUE, () -> {
+        });
+        try {
+            assertTrue(RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle));
+            lifecycle.closeOutstandingAndTerminalize();
+            lifecycle.runtime.continuations().awaitIdle();
+            assertEquals("FINISHED", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(slot, "stage")));
+            assertNull(slot.activeItem());
+            assertNull(slot.item());
+            assertNull(slot.requestDeadline());
+            assertNull(slot.decisionDeadline());
+            assertNull(RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(slot, "inactivityDeadline"));
+            assertNull(lifecycle.requestSlot(709L));
+            RequestState terminal = org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(709L, 0L);
+            assertTrue(terminal.state().isTerminal());
+            assertSame(terminal, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(709L, 0L));
+        } finally {
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle).timer().close();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle).closeRequestExecutors();
+        }
+    }
+
+    @Test
+    void endpointStopCannotReplaceAnAcceptedTimeoutDuringCleanup() throws Exception {
+        BalanceContext context = context(710L);
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context);
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        context.setFuture(future);
+        RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null, prefill, null, null, System.currentTimeMillis());
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(710L, future); var admissionCompletion10 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(admission);
+            assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
+        }
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(prefill.removeQueued(item, "TERMINAL_RELEASE")).thenAnswer(call -> {
+            entered.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return true;
+        });
+        try {
+            lifecycle.enqueueInactivityDeadline(context, RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(context, "inactivityDeadline"), Long.MAX_VALUE, () -> {
+            });
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            lifecycle.onQueueOfferFailure(item, new IllegalStateException("endpoint stopped"));
+            assertEquals(RequestState.Phase.TIMED_OUT, context.snapshot().state());
+        } finally {
+            release.countDown();
+        }
+        assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
     }
 
     @Test
     void admissionHandleDefersCancellationUntilItsExactCapabilityCloses() {
-        CompletableFuture<Response> future = lifecycle.register(context(301L));
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(301L));
         AdmissionHandle scope =
                 lifecycle.claimAdmissionHandle(301L, future);
         assertNotNull(scope);
@@ -161,17 +660,17 @@ class RequestRegistryTest {
         assertFalse(future.isDone(),
                 "the admission mutation still owns rollback and terminal cleanup");
 
-        scope.close();
+        scope.finish();
 
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.join().getCode());
         assertEquals(RequestState.Phase.CANCELLED,
-                lifecycle.getRequestState(301L, 0L).state());
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(301L, 0L).state());
     }
 
     @Test
     void repeatedCancellationDuringAdmissionKeepsTheFirstCause() throws Exception {
-        CompletableFuture<Response> future = lifecycle.register(context(303L));
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(303L));
         AdmissionHandle admission = lifecycle.claimAdmissionHandle(303L, future);
         assertNotNull(admission);
 
@@ -179,35 +678,46 @@ class RequestRegistryTest {
         lifecycle.cancelRequest(303L, 0L, CancelReason.DEADLINE_EXCEEDED);
         assertFalse(future.isDone());
 
-        admission.close();
+        admission.finish();
 
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.get(5, TimeUnit.SECONDS).getCode());
         assertEquals(RequestState.Phase.CANCELLED,
-                lifecycle.getRequestState(303L, 0L).state());
-        assertEquals(0, lifecycle.liveRequestCount());
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(303L, 0L).state());
+        assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
     }
 
     @Test
     void admissionFailurePreservesAnEarlierCancellation() throws Exception {
-        CompletableFuture<Response> future = lifecycle.register(context(304L));
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(304L));
         AdmissionHandle admission = lifecycle.claimAdmissionHandle(304L, future);
         assertNotNull(admission);
 
         lifecycle.cancelRequest(304L, 0L, CancelReason.CLIENT_CANCELLED);
         admission.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
-        admission.close();
+        admission.finish();
 
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.get(5, TimeUnit.SECONDS).getCode());
         assertEquals(RequestState.Phase.CANCELLED,
-                lifecycle.getRequestState(304L, 0L).state());
-        assertEquals(0, lifecycle.liveRequestCount());
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(304L, 0L).state());
+        assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
+    }
+
+    @Test
+    void shutdownIntentSurvivesAdmissionFailureWithoutAnItem() throws Exception {
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(305L));
+        AdmissionHandle admission = lifecycle.claimAdmissionHandle(305L, future);
+        assertNotNull(admission);
+        assertNull(lifecycle.requestSlot(305L).claimShutdownAction(() -> { throw new AssertionError("active admission cannot publish"); }));
+        admission.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), future.get(5, TimeUnit.SECONDS).getCode());
+        assertEquals(RequestState.Phase.FAILED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(305L, 0L).state());
     }
 
     @Test
     void queueDecisionResponsePublishesOutsideTheDecisionCaller() throws Exception {
-        CompletableFuture<Response> future = lifecycle.register(context(302L));
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(302L));
         CountDownLatch published = new CountDownLatch(1);
         AtomicReference<String> callbackThread = new AtomicReference<>();
         future.thenAccept(response -> {
@@ -228,28 +738,28 @@ class RequestRegistryTest {
     void shutdownGateWaitsForTheExactAdmissionHandleAndRejectsNewWork()
             throws Exception {
         CompletableFuture<Response> heldFuture =
-                lifecycle.register(context(401L));
+                RequestProtocolTestSupport.register(lifecycle, context(401L));
         AdmissionHandle held =
                 lifecycle.claimAdmissionHandle(401L, heldFuture);
         assertNotNull(held);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             Future<Boolean> shutdownOwner =
-                    executor.submit(lifecycle::closeAdmissionAndAwaitMutations);
-            awaitCondition(lifecycle::isShuttingDown);
+                    executor.submit(() -> RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle));
+            awaitCondition(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)::isClosed);
             assertFalse(shutdownOwner.isDone(),
                     "shutdown must not overtake an exact admission mutation");
 
             CompletableFuture<Response> rejected =
-                    lifecycle.register(context(402L));
+                    RequestProtocolTestSupport.register(lifecycle, context(402L));
             assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                     rejected.join().getCode());
 
-            held.close();
+            held.finish();
             assertTrue(shutdownOwner.get(5, TimeUnit.SECONDS));
             lifecycle.closeOutstandingAndTerminalize();
-            lifecycle.closeExpiration();
-            lifecycle.closePublisher();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle).timer().close();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle).closeRequestExecutors();
             assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                     heldFuture.get(5, TimeUnit.SECONDS).getCode());
         } finally {
@@ -259,7 +769,7 @@ class RequestRegistryTest {
 
     @Test
     void cancelRequiresTheExpectedBatchGenerationAndUnknownIdsStayAbsent() {
-        CompletableFuture<Response> future = lifecycle.register(context(501L));
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(501L));
 
         assertNull(lifecycle.cancelRequest(
                 999L, 0L, CancelReason.CLIENT_CANCELLED));
@@ -277,31 +787,26 @@ class RequestRegistryTest {
     @Test
     void publishedQueueDeadlineReleasesLocalReservationWithoutEngineCancel() {
         Registered registered = registerItem(602L);
-        assertEquals(PlacementResult.Status.SUCCESS,
-                commitRoute(lifecycle, registered));
-        RequestSlot slot = lifecycle.requestSlot(602L);
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        BalanceContext slot = lifecycle.requestSlot(602L);
         synchronized (slot) {
-            org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL,
-                    org.flexlb.balance.endpoint.PrefillState.WorkerStatusFact.active(registered.item()), System.currentTimeMillis());
+            slot.acceptPrefillStatus(registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL, org.flexlb.balance.endpoint.PrefillState.WorkerStatusFact.active(registered.item()), System.currentTimeMillis());
         }
         lifecycle.cancelRequest(602L, 0L, CancelReason.DEADLINE_EXCEEDED);
-        assertEquals(RequestState.Phase.TIMED_OUT,
-                lifecycle.getRequestState(602L, 0L).state());
-        verify(registered.item().decodeEp()).release(
-                registered.item().decodeReservation(),
-                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+        assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(602L, 0L).state());
+        verify(registered.item().decodeEp()).release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
     }
 
     @Test
     void expiredArrivalDoesNotDisturbTheWaitingRequests() throws Exception {
-        var low = lifecycle.register(context(1));
+        var low = RequestProtocolTestSupport.register(lifecycle, context(1));
         var expired = context(2);
         expired.setSchedulingMetadata(SchedulingMetadata.explicit(90, System.currentTimeMillis() - 1L));
         // QUEUE expiry before placement is admission capacity exhaustion (8431).
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
-                lifecycle.register(expired).get(5, TimeUnit.SECONDS).getCode());
+                RequestProtocolTestSupport.register(lifecycle, expired).get(5, TimeUnit.SECONDS).getCode());
         assertFalse(low.isDone());
-        assertEquals(1, lifecycle.liveRequestCount());
+        assertEquals(1, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
     }
 
     @Test
@@ -310,50 +815,71 @@ class RequestRegistryTest {
             List<Future<CompletableFuture<Response>>> futures = new ArrayList<>();
             for (long id = 1; id <= 128; id++) {
                 long requestId = id;
-                futures.add(executor.submit(() -> lifecycle.register(context(requestId))));
+                futures.add(executor.submit(() -> RequestProtocolTestSupport.register(lifecycle, context(requestId))));
             }
             for (var future : futures) {
                 assertFalse(future.get(5, TimeUnit.SECONDS).isDone());
             }
-            assertEquals(128, lifecycle.liveRequestCount());
+            assertEquals(128, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
         }
     }
 
     @Test
-    void oldDeliveryAndPreemptionCapabilitiesCannotReachAReusedRequestId() {
+    void oldDeliveryAndPreemptionCapabilitiesCannotReachAReusedRequestId() throws Exception {
         Registered registered = registerItem(703L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
-        RequestSlot old = lifecycle.requestSlot(703L);
-        DeliveryClaim delivery = RequestLifecycleTestSupport.claimBatchWithoutPrediction(lifecycle, registered.item(), 17L, () -> true);
+        BalanceContext old = lifecycle.requestSlot(703L);
+        DeliveryClaim delivery = RequestProtocolTestSupport.claimBatchWithoutPrediction(lifecycle, registered.item(), 17L, () -> true);
         assertNotNull(delivery);
         PreemptionRegistration preemption = lifecycle.tryClaim(703L, 1L, 19L, "victim").orElseThrow();
-
-        old.expireInactiveRequest(
-                RequestLifecycleTestSupport.<Long>inspect(old, "inactivityExpiresAtMsLocked"));
+        RequestProtocolTestSupport.expireInactiveRequest(lifecycle, old, RequestProtocolTestSupport.<Long>inspect(lifecycle, old, "inactivityExpiresAtMsLocked"));
         registered.future().join();
-        assertTrue(lifecycle.removeExactTerminalRecord(old, Long.MAX_VALUE));
-        CompletableFuture<Response> replacement = lifecycle.register(context(703L));
-
-        delivery.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
-        assertFalse(preemption.completePreemption("late engine cancellation"));
-        assertFalse(preemption.release());
-        assertNull(old.cancelRequest(0L, CancelReason.CLIENT_CANCELLED));
+        assertTrue(lifecycle.requests.isCurrent(old), "sender still owns prepared delivery");
+        delivery.complete(org.flexlb.balance.delivery.DeliveryResult.notSent(new IllegalStateException("expired before send")));
+        lifecycle.runtime.continuations().awaitIdle();
+        assertTrue(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).removeExactTerminal(org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(lifecycle, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(703L, 0L)), Long.MAX_VALUE));
+        CompletableFuture<Response> replacement = RequestProtocolTestSupport.register(lifecycle, context(703L));
+        assertSame(registered.future(), registered.item().future());
+        assertNotSame(replacement, registered.item().future());
+        assertThrows(IllegalStateException.class, () -> old.setFuture(replacement));
+        assertSame(registered.future(), registered.item().future());
+        assertThrows(IllegalStateException.class, () -> delivery.complete(org.flexlb.balance.delivery.DeliveryResult.delivered()));
+        assertFalse(lifecycle.completePreemption(preemption, "late engine cancellation"));
+        assertFalse(lifecycle.releasePreemption(preemption));
+        lifecycle.cancelRequest(old, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.onQueuedItemExpired(registered.item());
+        lifecycle.onQueuedItemControl(registered.item());
+        lifecycle.onQueueOfferFailure(registered.item(), new IllegalStateException("late queue failure"));
+        lifecycle.onQueuedItemPreempted(registered.item(), registered.item());
         assertFalse(replacement.isDone());
-        assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState(703L, 0L).state());
+        assertEquals(RequestState.Phase.QUEUED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(703L, 0L).state());
+    }
+
+    @Test
+    void deliveryCannotConsumeAnotherRoutesHandoffReceipt() {
+        Registered registered = registerItem(705L);
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        Registered other = registerItem(706L);
+        var wrongReceipt = new PrefillAdmissionResources.Member(other.item(), null);
+        assertThrows(IllegalArgumentException.class,
+                () -> lifecycle.claimDelivery(registered.item(), DeliveryClaimKind.BATCH_ENQUEUE, 7L, wrongReceipt));
+        assertNull(registered.item().ctx().delivery());
+        assertEquals(RequestStage.READY_TO_DELIVER, registered.item().ctx().stage());
+        assertFalse(registered.future().isDone());
     }
 
     @Test
     void invalidBatchIdentityCannotTransferEndpointOwnership() {
         Registered registered = registerItem(704L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
-        var transaction = mock(BatchDeliveryStrategy.BatchTransaction.class);
-        when(transaction.batchId()).thenReturn(0L);
+        var transfer = mock(java.util.function.BooleanSupplier.class);
 
         assertThrows(IllegalArgumentException.class,
-                () -> lifecycle.claimBatchDelivery(registered.item(), transaction));
+                () -> lifecycle.claimDelivery(registered.item(), DeliveryClaimKind.BATCH_ENQUEUE,
+                        0L, RequestProtocolTestSupport.handoff(transfer)));
 
-        org.mockito.Mockito.verify(transaction, org.mockito.Mockito.never()).transferToEndpoint(registered.item());
-        assertEquals(RequestState.Phase.QUEUED, lifecycle.getRequestState(704L, 0L).state());
+        org.mockito.Mockito.verify(transfer, org.mockito.Mockito.never()).getAsBoolean();
+        assertEquals(RequestState.Phase.QUEUED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(704L, 0L).state());
         assertFalse(registered.future().isDone());
     }
 
@@ -361,43 +887,34 @@ class RequestRegistryTest {
     void invalidResultDoesNotConsumeDeliveryAndDuplicateResultCannotChangeItsOutcome() throws Exception {
         Registered registered = registerItem(705L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
-        DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(lifecycle, registered.item(), 23L, () -> true);
+        DeliveryClaim claim = RequestProtocolTestSupport.claimBatch(lifecycle, registered.item(), 23L, () -> true);
         assertNotNull(claim);
 
         assertThrows(NullPointerException.class, () -> claim.complete(null));
-        assertEquals(RequestState.Phase.DISPATCHING, lifecycle.getRequestState(705L, 23L).state());
+        assertEquals(RequestState.Phase.DISPATCHING, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(705L, 23L).state());
         claim.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
         assertTrue(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
         assertThrows(IllegalStateException.class, () -> claim.complete(
                 org.flexlb.balance.delivery.DeliveryResult.notSent(new IllegalStateException("duplicate failure"))));
 
-        assertEquals(RequestState.Phase.ACKNOWLEDGED, lifecycle.getRequestState(705L, 23L).state());
+        assertEquals(RequestState.Phase.ACKNOWLEDGED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(705L, 23L).state());
         org.mockito.Mockito.verify(registered.item().decodeEp(), org.mockito.Mockito.never())
                 .release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.NOT_SENT);
     }
 
-    private WeakReference<BalanceContext> cancelAndReferenceContext(long requestId) {
-        BalanceContext context = context(requestId);
-        CompletableFuture<Response> future = lifecycle.register(context);
-        lifecycle.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
-        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), future.join().getCode());
-        return new WeakReference<>(context);
-    }
-
     private BalanceContext context(long requestId) {
-        return RequestLifecycleTestSupport.context(config, requestId);
+        return RequestProtocolTestSupport.context(config, requestId);
     }
 
     private Registered registerItem(long requestId) {
         BalanceContext context = context(requestId);
-        CompletableFuture<Response> future = lifecycle.register(context);
+        CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         DecodeEndpoint.ReservationHandle reservation =
                 new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
+        context.setFuture(future);
         return new Registered(
-                new ScheduledRequest(
-                        context,
-                        future,
+                org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context),
                         new Response(),
                         null,
                         null,

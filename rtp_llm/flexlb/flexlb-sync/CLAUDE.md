@@ -15,9 +15,14 @@ flexlb-sync is the core load balancing module of FlexLB. It handles:
 
 ### Routing and scheduling
 - `DefaultRouter` performs one multi-role selection and returns exact endpoint-generation capabilities
-- `RequestScheduler` and `GlobalQueueCoordinator` own model-wide QUEUE ordering and commit
-- `WorkerBatcher` is the sole endpoint-local SINGLE/FIXED_WINDOW group owner
-- `DeliveryStrategy` implementations choose NON_BATCH or BATCH delivery without reselecting endpoints
+- `RequestScheduler` exposes submit, cancel, stopAccepting, and termination for both modes
+- `AbstractRequestScheduler` executes protocol effects outside the request lock and tracks all generation obligations
+- `DirectRequestScheduler` accepts requests and owns immediate selection and commit
+- `QueuedRequestScheduler` accepts requests and owns ordering, planning, capacity waits, and commit
+- `PlacementConfiguration` constructs the fixed-mode scheduler at startup
+- `RequestRepository` owns shared registration, identity lookup, and archival; each request retains its original Scheduler
+- `WorkerBatcher` owns the endpoint queue and delivery runtime; stateless `GroupingPolicy` choices select SINGLE/FIXED_WINDOW groups for both live scheduling and projection
+- `DeliveryStrategy` implementations choose NON_BATCH or BATCH delivery without reselecting endpoints, using the exact request owner and its `BalanceContext.DeliveryClaim`
 
 ### Role-Based Routing
 The system routes requests through multiple worker types based on model requirements:
@@ -29,12 +34,13 @@ The system routes requests through multiple worker types based on model requirem
 Key classes:
 - `RoleType` (in flexlb-common): Enum defining worker roles
 - `DefaultRouter`: Implements multi-role routing with rollback support
-- `BalanceContext`: Carries request context through routing pipeline
+- `BalanceContext`: Owns private request lifecycle and exact admission, cleanup, deadline, and preemption participation state; behavior methods preserve the request monitor contract
+- `RequestRepository`: Owns shared request identities and exact archival only
+- `SchedulerRuntime`: Creates one startup scheduler and owns maintenance and ordered shutdown; `ExpirationTimer` only schedules and drains exact registrations
 
 ### Worker Status Synchronization
 - `GrpcWorkerStatusRunner`: Periodically fetches worker status via gRPC
-- `EndpointRegistry`: Publishes generation-fenced Prefill/Decode runtimes
-- `WorkerDirectory`: Exposes immutable full-fleet routing snapshots
+- `EndpointRegistry`: Owns discovered generations, endpoint publication/retirement and immutable routing snapshots
 - `GrpcCacheStatusCheckRunner`: Syncs KV cache status with flexlb-cache module
 
 ### Master Election
@@ -85,8 +91,12 @@ flexlb-sync/
 │   ├── projection/                # frozen queue/TTFT projections
 │   ├── scheduler/
 │   │   ├── DefaultRouter.java       # one-pass multi-role routing
-│   │   ├── GlobalQueueCoordinator.java # model-wide ordering/commit
-│   │   ├── RequestRegistry.java     # canonical request lifecycle
+│   │   ├── DirectRequestScheduler.java # immediate selection/commit
+│   │   ├── QueuedRequestScheduler.java # model-wide ordering/commit
+│   │   ├── BalanceContext.java      # request lifecycle protocol
+│   │   ├── RequestScheduler.java    # public scheduling and drain contract
+│   │   ├── RequestRepository.java   # exact shared registration and archival
+│   │   ├── SchedulerRuntime.java    # maintenance and shutdown
 │   │   └── WorkerBatcher.java       # endpoint decision/delivery runtime
 │   └── strategy/
 │       ├── RandomStrategy.java             # VIT selection
@@ -99,10 +109,7 @@ flexlb-sync/
 │   ├── runner/
 │   │   ├── GrpcWorkerStatusRunner.java    # Worker status sync
 │   │   └── GrpcCacheStatusCheckRunner.java # Cache status sync
-│   └── status/
-│       └── WorkerDirectory.java        # Immutable routing views and exact capture
 └── service/
-    ├── RouteService.java            # High-level routing service
     └── grpc/
         └── EngineGrpcService.java   # gRPC client for workers
 ```
@@ -110,7 +117,7 @@ flexlb-sync/
 ## Key Dependencies
 
 This module depends on:
-- **flexlb-common**: Shared data models (`BalanceContext`, `ServerStatus`, `RoleType`, `WorkerStatus`)
+- **flexlb-common**: Shared data models (`ServerStatus`, `RoleType`, `WorkerStatus`); `BalanceContext` belongs to flexlb-sync
 - **flexlb-cache**: KV cache management (`CacheAwareService`, `KvCacheManager`)
 - **flexlb-grpc**: gRPC protocol definitions and clients
 
@@ -136,8 +143,8 @@ winner rather than invoke another selector.
 
 ### Worker Status Updates
 Worker status is updated asynchronously by scheduled runners. `EndpointRegistry`
-owns generation-fenced endpoint publication, while `WorkerDirectory` exposes
-immutable routing snapshots and exact captures to strategies.
+owns discovered worker identities and generation-fenced endpoint publication,
+and exposes immutable routing snapshots and exact captures to strategies.
 
 ### Cache Integration
 The module calls `CacheAwareService` from flexlb-cache to update cache information
@@ -163,3 +170,5 @@ Configuration is injected via `ConfigService` interface (implementation in flexl
 Do what is asked; no more, no less.
 Always prefer editing existing files over creating new ones.
 Do not proactively create documentation files (*.md) or README files unless explicitly requested.
+
+Spring creates one scheduler at startup. The scheduler and request contexts use the ConfigService startup configuration directly; changes to scheduling and shared WorkerBatcher settings require restart. BATCH abandonment requires sender exit and exact remote cleanup proof before archival; response completion does not release these obligations. Ordinary cancellation capability is checked before using the Engine cleanup protocol.

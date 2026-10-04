@@ -34,7 +34,6 @@ import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.flexlb.consistency.LBStatusConsistencyService.MASTER_CHANGE_NOTIFY_PATH;
@@ -66,7 +65,6 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     @Getter
     private volatile boolean isMaster;
     private volatile boolean markOffline;
-    private volatile boolean autoRejoin = true;
     private volatile String cachedMasterHostIp;
 
     private final AtomicReference<CountDownLatch> leaderCloseLatchRef = new AtomicReference<>();
@@ -169,28 +167,19 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         log.warn("ZKMasterElector roleId:{} currentHost:{} offline start.", roleId, localIp);
 
         markOffline = true;
-        autoRejoin = false;
+        trySignalCloseLatch();
         reportMasterEvent(ZkMasterEvent.LB_SERVICE_OFFLINE);
 
         if (!isMaster) {
             closeLeaderSelector();
+        } else if (isSingleNodeCluster()) {
+            LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} single node cluster, skip leadership transfer wait.",
+                    roleId, localIp);
         } else {
-            handleMasterOffline();
+            waitForLeadershipTransfer();
         }
 
         log.warn("ZKMasterElector roleId:{} currentHost:{} offline finished.", roleId, localIp);
-    }
-
-    private void handleMasterOffline() {
-        trySignalCloseLatch();
-
-        if (isSingleNodeCluster()) {
-            LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} single node cluster, skip leadership transfer wait.",
-                    roleId, localIp);
-            return;
-        }
-
-        waitForLeadershipTransfer();
     }
 
     private boolean isSingleNodeCluster() {
@@ -253,10 +242,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         if (isMaster) {
             return localIp;
         }
-        if (cachedMasterHostIp != null) {
-            return cachedMasterHostIp;
-        }
-        return null;
+        return cachedMasterHostIp;
     }
 
     /**
@@ -268,27 +254,23 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     @Override
     public void takeLeadership(CuratorFramework curatorFramework) {
         LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} takeLeadership", roleId, localIp);
-        if (markOffline) {
-            LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} markOffline, return.", roleId, localIp);
-            return;
-        }
-
-        // Become master
-        isMaster = true;
-        reportMasterEvent(ZkMasterEvent.MASTER_TAKE_LEADERSHIP);
-
+        CountDownLatch countDownLatch = new CountDownLatch(1);
+        // Publish the stop signal before exposing leadership or calling observers.
+        leaderCloseLatchRef.set(countDownLatch);
         try {
-            CountDownLatch countDownLatch = new CountDownLatch(1);
-            leaderCloseLatchRef.set(countDownLatch);
+            if (markOffline) {
+                LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} markOffline, return.", roleId, localIp);
+                return;
+            }
+            isMaster = true;
+            reportMasterEvent(ZkMasterEvent.MASTER_TAKE_LEADERSHIP);
 
             // Actively notify other participants that current node has become master
             activelyNotifyParticipants();
 
             // Current thread blocks, waiting for master shutdown before releasing master
-            while (!Thread.currentThread().isInterrupted()) {
-                if (countDownLatch.await(1000, TimeUnit.MILLISECONDS)) {
-                    break;
-                }
+            if (!Thread.currentThread().isInterrupted()) {
+                countDownLatch.await();
             }
             reportMasterEvent(ZkMasterEvent.MASTER_RELEASE_LEADERSHIP);
 
@@ -300,7 +282,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             // Release leadership
             leaderCloseLatchRef.set(null);
             isMaster = false;
-            if (!autoRejoin) {
+            if (markOffline) {
                 closeLeaderSelector();
             }
             LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} released LeaderShip.", roleId, localIp);

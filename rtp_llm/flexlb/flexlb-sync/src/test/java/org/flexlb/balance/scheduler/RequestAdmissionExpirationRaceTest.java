@@ -7,14 +7,16 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.concurrent.TimeUnit;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.freezeInputs;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -22,8 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -37,41 +39,43 @@ class RequestAdmissionExpirationRaceTest {
         config.getRequestLifecycle().getRequest().setTimeoutMs(300L);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        var registry = new RequestRegistry(service, mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class));
+        var registry = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, mock(BatchSchedulerReporter.class),
+                mock(RequestSchedulerReporter.class),
+                mock(RecentCacheKeyTraceReporter.class));
         try {
-            var context = RequestLifecycleTestSupport.context(config, 302L);
-            var future = registry.register(context);
+            var context = RequestProtocolTestSupport.context(config, 302L);
+            var future = RequestProtocolTestSupport.register(registry, context);
             var slot = registry.requestSlot(302L);
             var prefill = mock(PrefillEndpoint.class);
-            var item = new ScheduledRequest(context, future, new Response(), null, null,
+            context.setFuture(future);
+            var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null,
                     prefill, null, null, slot.createdAtMs());
             var cleanupFailure = new IllegalStateException("Prefill cleanup failed");
             doThrow(cleanupFailure).when(prefill).settleFailedRequest(item);
-            try (var admission = registry.claimAdmissionHandle(302L, future)) {
+            try (var admission = registry.claimAdmissionHandle(302L, future); var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
-                assertTrue(registry.commitItemForPublication(item, () -> true));
+                assertTrue((registry.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
                 registry.failDeliveryPreparation(item, new IllegalStateException("preparation failed"));
                 assertSame(cleanupFailure, assertThrows(IllegalStateException.class, () -> {
                     if (abort) {
                         admission.terminate(Response.error(StrategyErrorType.DISPATCH_FAILED));
                     } else {
-                        admission.close();
+                        admission.finish();
                     }
                 }));
             }
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
-            RequestLifecycleTestSupport.awaitCondition(() -> registry.liveRequestCount() == 0);
-            verify(prefill).expireCommittedItem(item);
+            RequestProtocolTestSupport.awaitCondition(() -> org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).liveRequestCount() == 0);
+            verify(prefill).releaseCommittedItem(item);
             assertEquals(RequestState.Phase.FAILED, slot.snapshot().state());
             assertTimeoutPreemptively(Duration.ofSeconds(2),
-                    () -> assertTrue(registry.closeAdmissionAndAwaitMutations()));
+                    () -> assertTrue(RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)));
         } finally {
-            if (registry.closeAdmissionAndAwaitMutations()) {
+            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
                 registry.closeOutstandingAndTerminalize();
             }
-            registry.closeExpiration();
-            registry.closePublisher();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).timer().close();
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).closeRequestExecutors();
         }
     }
 
@@ -84,10 +88,11 @@ class RequestAdmissionExpirationRaceTest {
         config.getRequestLifecycle().getRequest().setTimeoutMs(300L);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        var registry = new RequestRegistry(service, mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class));
+        var registry = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, mock(BatchSchedulerReporter.class),
+                mock(RequestSchedulerReporter.class),
+                mock(RecentCacheKeyTraceReporter.class));
         try {
-            var context = RequestLifecycleTestSupport.context(config, requestId);
+            var context = RequestProtocolTestSupport.context(config, requestId);
             var prefill = mock(PrefillEndpoint.class);
             var decode = mock(DecodeEndpoint.class);
             var reservation = new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
@@ -95,14 +100,15 @@ class RequestAdmissionExpirationRaceTest {
             prefillStatus.setRole(RoleType.PREFILL);
             prefillStatus.setServerIp("127.0.0.1");
             prefillStatus.setGrpcPort(8081);
-            var future = registry.register(context);
-            RequestSlot slot = registry.requestSlot(requestId);
-            var item = new ScheduledRequest(context, future, new Response(), prefillStatus, null,
+            var future = RequestProtocolTestSupport.register(registry, context);
+            BalanceContext slot = registry.requestSlot(requestId);
+            context.setFuture(future);
+            var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), prefillStatus, null,
                     prefill, decode, reservation, slot.createdAtMs());
 
-            try (var admission = registry.claimAdmissionHandle(requestId, future)) {
+            try (var admission = registry.claimAdmissionHandle(requestId, future); var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
-                assertTrue(registry.commitItemForPublication(item, () -> true));
+                assertTrue((registry.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
                 if (clientCancellation) {
                     registry.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
                 }
@@ -112,18 +118,18 @@ class RequestAdmissionExpirationRaceTest {
                 } else {
                     assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess(),
                             "failure publication must not wait for admission cleanup");
-                    assertEquals(RequestState.Phase.FAILED, registry.getRequestState(requestId, 0L).state());
+                    assertEquals(RequestState.Phase.FAILED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(requestId, 0L).state());
                 }
-                assertFalse(registry.removeExactTerminalRecord(slot, Long.MAX_VALUE));
-                registry.expireInactiveRequest(slot, slot.createdAtMs() + 300L);
+                assertFalse(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).removeExactTerminal(org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(registry, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(slot.getRequestId(), 0L)), Long.MAX_VALUE));
+                RequestProtocolTestSupport.expireInactiveRequest(registry, slot, slot.createdAtMs() + 300L);
                 synchronized (slot) {
                     assertTrue(slot.inactivityDeadlineAtMs().isEmpty(),
                             "the fired deadline stays disarmed until the admission is completed");
                 }
-                registry.processDecodeStatus(decode,
-                        DecodeEndpoint.WorkerStatusFact.accepted(reservation));
+                RequestProtocolTestSupport.observeDecode(registry, decode,
+                        DecodeEndpoint.WorkerStatusFact.active(reservation));
                 synchronized (slot) {
-                    org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, DecodeEndpoint.WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
+                    slot.acceptDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
                 }
             }
 
@@ -131,15 +137,15 @@ class RequestAdmissionExpirationRaceTest {
             // later Decode activity cannot undo it before the admission owner exits.
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(clientCancellation ? RequestState.Phase.CANCELLED : RequestState.Phase.FAILED,
-                    registry.getRequestState(requestId, 0L).state());
-            assertEquals(0, registry.liveRequestCount());
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(requestId, 0L).state());
+            assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).liveRequestCount());
             verify(decode, times(1)).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
-            verify(prefill, times(1)).expireCommittedItem(item);
+            verify(prefill, times(1)).releaseCommittedItem(item);
         } finally {
-            if (registry.closeAdmissionAndAwaitMutations()) {
+            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
                 registry.closeOutstandingAndTerminalize();
-                registry.closeExpiration();
-                registry.closePublisher();
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).timer().close();
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).closeRequestExecutors();
             }
         }
     }

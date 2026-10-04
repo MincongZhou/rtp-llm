@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
@@ -36,7 +36,7 @@ public final class EndpointCleanupTestSupport {
         private final AtomicLong clock = new AtomicLong(100);
         private final ReentrantLock lock = new ReentrantLock();
         private final PrefillState state = new PrefillState(lock,
-                PrefillActiveIndex.ordered(4, Comparator.comparingLong(ScheduledRequest::requestId)),
+                PrefillActiveIndex.ordered(4, Comparator.comparingLong(RequestRoute::requestId)),
                 clock::get, () -> { });
         private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
@@ -44,10 +44,10 @@ public final class EndpointCleanupTestSupport {
             this.batch = batch;
         }
 
-        public record Owner(ScheduledRequest item, PrefillState.Reservation reservation) { }
+        public record Owner(RequestRoute item, PrefillState.Reservation reservation) { }
 
         public Owner commit(long requestId, long batchId, long predictedMs) {
-            ScheduledRequest item = mock(ScheduledRequest.class);
+            RequestRoute item = mock(RequestRoute.class);
             when(item.requestId()).thenReturn(requestId);
             when(item.seqLen()).thenReturn(100L);
             if (batch) {
@@ -81,8 +81,7 @@ public final class EndpointCleanupTestSupport {
         }
 
         public int sweep(LongPredicate retain) {
-            return batch ? state.evictExpiredBatches(10L, retain)
-                    : state.evictExpiredIndividuals(10L, retain);
+            return state.evictExpiredInflight(10L, retain);
         }
 
         public void assertOwned(Owner owner, long predictedMs) {

@@ -7,7 +7,7 @@ import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.Endpoint;
@@ -25,7 +25,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -45,7 +44,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BooleanSupplier;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -199,20 +197,25 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
 
     @AfterEach
     void tearDownFileDiscoveryPipeline() {
-        if (syncScheduler != null) {
-            syncScheduler.shutdownNow();
-            syncScheduler = null;
-        }
-        if (statusCheckExecutor != null) {
-            statusCheckExecutor.shutdownNow();
-            statusCheckExecutor = null;
-        }
-        if (workerC != null) {
-            workerC.stop();
-            workerC = null;
-        }
-        if (workerAddressService != null) {
-            workerAddressService.destroy();
+        // Cleanup needs the original workers and status pipeline to stay available.
+        try {
+            if (schedulerRuntime != null) { schedulerRuntime.close(); }
+        } finally {
+            if (syncScheduler != null) {
+                syncScheduler.shutdownNow();
+                syncScheduler = null;
+            }
+            if (statusCheckExecutor != null) {
+                statusCheckExecutor.shutdownNow();
+                statusCheckExecutor = null;
+            }
+            if (workerC != null) {
+                workerC.stop();
+                workerC = null;
+            }
+            if (workerAddressService != null) {
+                workerAddressService.destroy();
+            }
         }
     }
 
@@ -351,7 +354,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
             int httpPort = Integer.parseInt(parts[1]);
             // admittedRoute() converts this response into the exact pinned
             // queue admission the scheduler consumes — including the Decode KV
-            // reservation (RouteAdmission.reserveQueuedPinned) the batcher
+            // reservation (ProvisionalRoute.reserveQueuedPinned) the batcher
             // later marks queued; without it admission would hit NOT_QUEUED ->
             // OwnershipLost and the request would never complete.
             return admittedRoute(ctx,

@@ -56,10 +56,10 @@ public class FormulaPredictor
 
     @Override
     public long estimateMs(long totalTokens, long hitTokens) {
-        PrefillTimeVariableBindings.EvaluationVariables vars =
+        PrefillTimeVariableBindings.BindingContext vars =
                 PrefillTimeVariableBindings.singleRequestVariables(
                         totalTokens, hitTokens);
-        return formula.evaluate(vars.topLevelVars(), vars.itemVars());
+        return formula.evaluate(vars.topLevelVars, vars.itemVars);
     }
 
     @Override
@@ -67,10 +67,9 @@ public class FormulaPredictor
         if (features.items().isEmpty()) {
             return 0.0;
         }
-        PrefillTimeVariableBindings.EvaluationVariables vars =
-                PrefillTimeVariableBindings.batchVariables(features);
-        return formula.evaluateAsDouble(
-                vars.topLevelVars(), vars.itemVars());
+        double[] vars = PrefillTimeVariableBindings.batchVariables(
+                features, formula.requiresBatchStatistics());
+        return formula.evaluateBatch(vars, features.items());
     }
 
     @Override

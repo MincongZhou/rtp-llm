@@ -1,17 +1,13 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.junit.jupiter.api.Test;
-
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -58,7 +54,7 @@ class OrderedRequestQueueTest {
         assertTrue(queue.remove(middle));
 
         assertEquals(2, queue.size());
-        assertFalse(middle.linked);
+        assertTrue(middle.removed);
         assertEquals(List.of(first, last), queue.scanForPlanningCandidates(
                 10, 20, candidate -> true));
     }
@@ -92,8 +88,8 @@ class OrderedRequestQueueTest {
         assertEquals(0, queue.size());
         assertTrue(first.removed);
         assertTrue(second.removed);
-        assertFalse(first.linked);
-        assertFalse(second.linked);
+        assertEquals(null, first.next);
+        assertEquals(null, second.previous);
     }
 
     @Test
@@ -130,10 +126,10 @@ class OrderedRequestQueueTest {
     void readyRetryBypassesTheBlockedBacklogWithinOneScanBudget() {
         for (boolean priority : new boolean[]{false, true}) {
             var queue = new OrderedRequestQueue(priority);
-            var first = new GlobalQueueEntry(null, new CompletableFuture<>(), 50);
+            var first = new GlobalQueueEntry(null, 50);
             queue.add(first);
             for (int i = 1; i < 250_000; i++) {
-                queue.add(new GlobalQueueEntry(null, new CompletableFuture<>(), 50));
+                queue.add(new GlobalQueueEntry(null, 50));
             }
             queue.scanForPlanningCandidates(15, 30, candidate -> false);
             queue.markRequestReadyForRetry(first);
@@ -242,6 +238,25 @@ class OrderedRequestQueueTest {
     }
 
     @Test
+    void retryAndForwardCompeteByPriorityWithinOneCheckBudget() {
+        for (boolean retryIsHigher : new boolean[]{false, true}) {
+            var queue = new OrderedRequestQueue(true);
+            var retry = entry(retryIsHigher ? 90 : 10);
+            var forward = entry(retryIsHigher ? 10 : 90);
+            queue.add(retry);
+            assertTrue(queue.scanForPlanningCandidates(1, 1, candidate -> false).isEmpty());
+            queue.add(forward);
+            queue.markRequestReadyForRetry(retry);
+
+            assertEquals(List.of(retryIsHigher ? retry : forward),
+                    queue.scanForPlanningCandidates(1, 1, candidate -> true));
+            assertEquals(List.of(retryIsHigher ? forward : retry),
+                    queue.scanForPlanningCandidates(1, 1, candidate -> true));
+            assertFalse(queue.hasUnscannedRequests());
+        }
+    }
+
+    @Test
     void cancellationRepairsBothForwardAndRetryPositions() {
         var queue = new OrderedRequestQueue(true);
         var first = entry(50);
@@ -344,7 +359,6 @@ class OrderedRequestQueueTest {
     private static GlobalQueueEntry entry(int priority) {
         return new GlobalQueueEntry(
                 mock(BalanceContext.class),
-                new CompletableFuture<Response>(),
                 priority);
     }
 }

@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -10,6 +10,8 @@ import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
@@ -56,8 +58,7 @@ class DecodeEndpointAdmissionTest {
     void setUp() {
         status = EndpointTestSupport.workerStatus(
                 RoleType.DECODE, "10.0.0.1", 8080, 8081);
-        endpoint = new DecodeEndpoint(
-                status, EndpointTestSupport.noopEventSink());
+        endpoint = new DecodeEndpoint(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
     }
 
     // ==================== realKvAvailable = reported - hard reservations ====================
@@ -68,7 +69,7 @@ class DecodeEndpointAdmissionTest {
         reserve(1L, 500, 600, 70);
 
         // Hard (500), not expected (600), is subtracted from the report.
-        assertEquals(9_500, endpoint.realKvAvailable());
+        assertEquals(9_500, endpoint.routingView().realKvAvailable());
         assertEquals(500, endpoint.routingView().inflightHardKv());
         assertEquals(600, endpoint.routingView().inflightExpectedKv());
 
@@ -98,8 +99,7 @@ class DecodeEndpointAdmissionTest {
     void everyExactReservationReleaseSignalsPlacementCapacity() {
         PlacementAvailability availability =
                 mock(PlacementAvailability.class);
-        DecodeEndpoint exactEndpoint = new DecodeEndpoint(
-                status, mock(EndpointEventProjector.class), availability);
+        DecodeEndpoint exactEndpoint = new DecodeEndpoint(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(mock(AbstractRequestScheduler.class)), availability);
 
         DecodeEndpoint.ReservationHandle speculative;
         try (WorkerEndpoint.GenerationPin pin =
@@ -108,7 +108,7 @@ class DecodeEndpointAdmissionTest {
             speculative = exactEndpoint.reserve(pin, 11L, 100L, 110L, 10);
         }
         exactEndpoint.release(speculative, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-        verify(availability).capacityChanged(
+        verify(availability).changed(
                 RoleType.DECODE, null, "10.0.0.1:8080");
 
         DecodeEndpoint.ReservationHandle published;
@@ -118,7 +118,7 @@ class DecodeEndpointAdmissionTest {
             published = exactEndpoint.reserve(pin, 12L, 100L, 110L, 10);
         }
         exactEndpoint.release(published, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-        verify(availability, times(2)).capacityChanged(
+        verify(availability, times(2)).changed(
                 RoleType.DECODE, null, "10.0.0.1:8080");
     }
 
@@ -135,12 +135,14 @@ class DecodeEndpointAdmissionTest {
         DecodeEndpoint.DecodeRequestView replacement = reserved().get(requestId);
         assertNotEquals(staleSnapshot.reservationToken(), replacement.reservationToken());
 
-        assertFalse(endpoint.release(stale, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
+        assertEquals(DecodeEndpoint.ReservationReleaseResult.STALE,
+                endpoint.release(stale, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
         assertReservationIdentity(replacement, reserved().get(requestId));
         assertEquals(200, endpoint.routingView().inflightHardKv());
         assertEquals(220, endpoint.routingView().inflightExpectedKv());
 
-        assertTrue(endpoint.release(current, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
+        assertEquals(DecodeEndpoint.ReservationReleaseResult.RELEASED,
+                endpoint.release(current, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
         assertFalse(reserved().containsKey(requestId));
         assertEquals(0, endpoint.routingView().inflightHardKv());
         assertEquals(0, endpoint.routingView().inflightExpectedKv());
@@ -157,7 +159,10 @@ class DecodeEndpointAdmissionTest {
         markQueued(2L);
         long version = endpoint.routingView().admissionVersion();
 
-        assertTrue(endpoint.replaceQueuedRequests(handles(1L, 2L), 9L, 700, 708, 70, new DecodeEndpoint.AdmissionCapacity(2, 100)));
+        var incoming = endpoint.replaceQueuedRequests(handles(1L, 2L), 9L, 700, 708, 70,
+                new DecodeEndpoint.AdmissionCapacity(2, 100));
+        assertNotNull(incoming);
+        assertEquals(endpoint.reservationHandle(9L), incoming);
         assertFalse(reserved().containsKey(1L));
         assertFalse(reserved().containsKey(2L));
         assertEquals(70, reserved().get(9L).priority());
@@ -180,7 +185,7 @@ class DecodeEndpointAdmissionTest {
                         exact.reservationToken() + 1L);
         long version = endpoint.routingView().admissionVersion();
 
-        assertFalse(endpoint.replaceQueuedRequests(List.of(stale), 9L, 700, 708, 70, new DecodeEndpoint.AdmissionCapacity(1, 100)));
+        assertNull(endpoint.replaceQueuedRequests(List.of(stale), 9L, 700, 708, 70, new DecodeEndpoint.AdmissionCapacity(1, 100)));
         assertTrue(reserved().containsKey(1L));
         assertFalse(reserved().containsKey(9L));
         assertEquals(100, endpoint.routingView().inflightHardKv());
@@ -198,7 +203,7 @@ class DecodeEndpointAdmissionTest {
                         exact.endpointGenerationId(), 42L,
                         exact.reservationToken() + 1L);
 
-        assertFalse(endpoint.replaceQueuedRequests(List.of(exact, absent), 9L, 700, 708, 70, new DecodeEndpoint.AdmissionCapacity(1, 100)));
+        assertNull(endpoint.replaceQueuedRequests(List.of(exact, absent), 9L, 700, 708, 70, new DecodeEndpoint.AdmissionCapacity(1, 100)));
         assertTrue(reserved().containsKey(1L));
         assertFalse(reserved().containsKey(9L));
         assertEquals(100, endpoint.routingView().inflightHardKv());
@@ -296,8 +301,8 @@ class DecodeEndpointAdmissionTest {
                 "placement scoring must retain queued expected KV");
         assertEquals(0, endpoint.routingView().engineFacingKvUsed(),
                 "queued expected KV must not poison the dispatch gate");
-        assertEquals(600, endpoint.realKvAvailable());
-        assertEquals(1_000, endpoint.routingView().engineFacingKvAvailable());
+        assertEquals(600, endpoint.routingView().realKvAvailable());
+        assertEquals(1_000, endpoint.routingView().dispatchUsage().hardKvAvailable());
 
         DecodeEndpoint.EngineDispatchPermitAcquisition first =
                 endpoint.acquireDispatchPermit(reservations.get(1L), new DecodeEndpoint.AdmissionCapacity(256, 90));
@@ -322,7 +327,7 @@ class DecodeEndpointAdmissionTest {
 
         assertEquals(TRANSFERRED, first.permit().dispatch());
         assertEquals(900, endpoint.routingView().engineFacingKvUsed());
-        assertEquals(600, endpoint.routingView().engineFacingKvAvailable());
+        assertEquals(600, endpoint.routingView().dispatchUsage().hardKvAvailable());
     }
 
     @Test
@@ -430,7 +435,7 @@ class DecodeEndpointAdmissionTest {
         endpoint.close();
 
         assertNull(endpoint.tryPinGeneration());
-        assertFalse(endpoint.replaceQueuedRequests(List.of(stale), 3L, 100, 110, 50, new DecodeEndpoint.AdmissionCapacity(1, 100)));
+        assertNull(endpoint.replaceQueuedRequests(List.of(stale), 3L, 100, 110, 50, new DecodeEndpoint.AdmissionCapacity(1, 100)));
         assertEquals(DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
                 endpoint.beginPreemption(101L, List.of(stale), 5L, 100, 110, 50, new DecodeEndpoint.AdmissionCapacity(1, 100)));
 
@@ -479,6 +484,9 @@ class DecodeEndpointAdmissionTest {
         assertEquals(ENDPOINT_RETIRED, permit.dispatch());
         assertEquals(ENDPOINT_RETIRED, permit.dispatch(),
                 "the exact retired permit keeps its typed terminal result");
+        assertFalse(permit.release(), "dispatch already consumed the retired result");
+        assertEquals(ENDPOINT_RETIRED, permit.dispatch(),
+                "a failed release cannot replace the cached dispatch result");
         assertTrue(endpoint.shouldRetryDispatch(2L, new DecodeEndpoint.AdmissionCapacity(1L, 100L)),
                 "close must remove the outstanding permit from hard-gate usage");
         assertEquals(0, endpoint.routingView().engineLoad());
@@ -497,6 +505,8 @@ class DecodeEndpointAdmissionTest {
         assertTrue(retired.release());
         assertFalse(retired.release(),
                 "retirement acknowledgement remains one-shot");
+        assertEquals(OWNERSHIP_LOST, retired.dispatch(),
+                "a returned permit cannot regain sending ownership, even after retirement");
     }
 
     @Test
@@ -720,14 +730,15 @@ class DecodeEndpointAdmissionTest {
         assertTrue(current.release());
     }
 
-    @Test
-    void ttlEvictionInvalidatesPermitWithoutLeakingHardGateCapacity() {
+    @ParameterizedTest
+    @ValueSource(longs = {-1L, Long.MIN_VALUE})
+    void ttlEvictionInvalidatesPermitWithoutLeakingHardGateCapacity(long ttlMs) {
         reserve(1L, 100, 110, 50);
         markQueued(1L);
         DecodeEndpoint.EngineDispatchPermit stale = acquirePermit(1L, 1);
 
         assertEquals(1, endpoint.evictExpiredRequests(
-                -1, requestId -> false));
+                ttlMs, requestId -> false));
         reserve(2L, 100, 110, 50);
         markQueued(2L);
 
@@ -757,8 +768,8 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void versionedReceivedTaskEmitsActivityWithoutAdvancingAcceptance() {
-        EndpointEventProjector events = mock(EndpointEventProjector.class);
-        endpoint = new DecodeEndpoint(status, events);
+        AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
+        endpoint = new DecodeEndpoint(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(events));
         DecodeEndpoint.ReservationHandle reservation =
                 reserve(1L, 500, 508, 30);
         TaskInfo received = new TaskInfo();
@@ -789,8 +800,7 @@ class DecodeEndpointAdmissionTest {
             throws Exception {
         WorkerStatus blockingStatus = EndpointTestSupport.workerStatus(
                 RoleType.DECODE, "10.0.0.2", 8080, 8081);
-        DecodeEndpoint blockingEndpoint = new DecodeEndpoint(
-                blockingStatus, EndpointTestSupport.noopEventSink());
+        DecodeEndpoint blockingEndpoint = new DecodeEndpoint(blockingStatus, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setAlive(true);
         response.setAvailableKvCacheTokens(10_000L);
@@ -828,7 +838,7 @@ class DecodeEndpointAdmissionTest {
             assertEquals(500L, blockingEndpoint.routingView().inflightHardKv());
             assertEquals(600L,
                     blockingEndpoint.routingView().inflightExpectedKv());
-            assertEquals(9_500L, blockingEndpoint.realKvAvailable(),
+            assertEquals(9_500L, blockingEndpoint.routingView().realKvAvailable(),
                     "the post-calibration reservation must be retained");
         } finally {
             if (admissionLock.isHeldByCurrentThread()) {
@@ -1067,7 +1077,9 @@ class DecodeEndpointAdmissionTest {
     }
 
     private Map<Long, DecodeEndpoint.DecodeRequestView> reserved() {
-        return endpoint.resourceSnapshot().reserved();
+        return endpoint.resourceSnapshot().requests().entrySet().stream()
+                .filter(entry -> !entry.getValue().phase().isEngineConfirmed())
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
     private static void assertReservationIdentity(

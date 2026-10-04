@@ -3,6 +3,8 @@ package org.flexlb.cache.core;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ConfigService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.function.LongSupplier;
@@ -11,6 +13,7 @@ import java.util.function.LongSupplier;
  * Fixed-size recent cache-key pool for request-level cache hit metrics.
  */
 @Slf4j
+@Component
 public class RecentCacheKeyWindow {
 
     public static final long DEFAULT_TIME_WINDOW_MS = 30L * 60L * 1000L;
@@ -39,6 +42,11 @@ public class RecentCacheKeyWindow {
     private int keyTail;
     private int keySize;
     private int uniqueSize;
+
+    @Autowired
+    public RecentCacheKeyWindow(ConfigService configService) {
+        this(resolveTimeWindowMs(configService), resolveMaxCacheKeys(configService), System::currentTimeMillis);
+    }
 
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
         this.timeWindowMs = normalizeTimeWindowMs(timeWindowMs);

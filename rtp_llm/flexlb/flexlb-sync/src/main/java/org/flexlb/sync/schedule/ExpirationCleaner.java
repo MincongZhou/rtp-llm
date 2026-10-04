@@ -1,12 +1,10 @@
 package org.flexlb.sync.schedule;
 
-import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,7 +13,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -39,111 +36,48 @@ public class ExpirationCleaner {
 
     private final long workerTimeoutUs;
     private final CacheAwareService cacheAwareService;
-    private final WorkerDirectory workerDirectory;
+    private final EndpointRegistry endpointRegistry;
 
     @Autowired
     public ExpirationCleaner(
             ConfigService configService,
             CacheAwareService cacheAwareService,
-            WorkerDirectory workerDirectory) {
+            EndpointRegistry endpointRegistry) {
         this.cacheAwareService = Objects.requireNonNull(
                 cacheAwareService, "cacheAwareService");
-        this.workerDirectory = Objects.requireNonNull(
-                workerDirectory, "workerDirectory");
-        this.workerTimeoutUs = resolveWorkerTimeoutUs(configService);
-    }
-
-    /**
-     * Resolve the worker expiration timeout in microseconds.
-     *
-     * <p>The worker registry owns this timeout. It is configured in milliseconds
-     * and converted to the monotonic microsecond clock used by WorkerStatus.
-     * The default 10 s is twice the default status RPC timeout, avoiding
-     * retirement on one transiently delayed poll.
-     */
-    private static long resolveWorkerTimeoutUs(ConfigService configService) {
-        long configMs = configService.loadBalanceConfig().getWorkerRegistry()
-                .getHealth().getStatusStaleAfterMs();
-        return configMs * 1000L;
+        this.endpointRegistry = Objects.requireNonNull(
+                endpointRegistry, "endpointRegistry");
+        this.workerTimeoutUs = configService.loadBalanceConfig().getWorkerRegistry()
+                .getHealth().getStatusStaleAfterMs() * 1000L;
     }
 
     @Scheduled(fixedRateString = "#{@configService.loadBalanceConfig().workerRegistry.health.cleanupIntervalMs}")
     public void cleanExpiredWorkers() {
-        List<PendingRetirement> retirements = new ArrayList<>();
-        for (RoleType role : RoleType.values()) {
-            retirements.addAll(beginExpiredRetirements(
-                    workerDirectory.statusSnapshot(role), role));
-        }
-        completeRetirements(retirements);
-    }
-
-    /** Phase one: close every expired routing gate without waiting on drains. */
-    private List<PendingRetirement> beginExpiredRetirements(
-            Map<String, WorkerStatus> workerStatusMap,
-            RoleType role) {
-        if (MapUtils.isEmpty(workerStatusMap)) {
-            return List.of();
-        }
-
-        List<PendingRetirement> retirements = new ArrayList<>();
-        for (Map.Entry<String, WorkerStatus> item
-                : workerStatusMap.entrySet()) {
-            WorkerStatus workerStatus = item.getValue();
-
-            EndpointRegistry.DetachedGeneration endpointToRetire = null;
-            boolean retirementStarted = false;
-            workerStatus.lock.lock();
-            try {
-                if (workerStatusMap.get(item.getKey()) != workerStatus) {
-                    continue;
+        List<EndpointRegistry.Retirement> retirements = new ArrayList<>();
+        try {
+            // Close every expired routing gate before waiting for any endpoint drain.
+            for (RoleType role : RoleType.values()) {
+                for (var item : endpointRegistry.statusSnapshot(role).entrySet()) {
+                    WorkerStatus status = item.getValue();
+                    status.lock.lock();
+                    try {
+                        if (endpointRegistry.isCurrentStatus(role, item.getKey(), status)
+                                && status.isActiveGeneration()
+                                && System.nanoTime() / 1000 > status.pollHealth().lastSuccessfulPollUs() + workerTimeoutUs) {
+                            retirements.add(endpointRegistry.beginRetirement(role, item.getKey(), status));
+                        }
+                    } finally {
+                        status.lock.unlock();
+                    }
                 }
-                if (!workerStatus.isActiveGeneration()) {
-                    continue;
-                }
-                WorkerStatus.PollHealth health = workerStatus.pollHealth();
-                long expirationTime = health.lastSuccessfulPollUs()
-                        + workerTimeoutUs;
-                long currentTime = System.nanoTime() / 1000;
-                if (currentTime > expirationTime) {
-                    endpointToRetire = workerDirectory.beginRetirement(
-                            role, item.getKey(), workerStatus);
-                    retirementStarted = true;
-                }
-            } finally {
-                workerStatus.lock.unlock();
             }
-            if (retirementStarted) {
-                retirements.add(new PendingRetirement(
-                        workerStatus,
-                        role,
-                        item.getKey(),
-                        endpointToRetire));
+        } finally {
+            for (EndpointRegistry.Retirement retirement : retirements) {
+                retirement.complete(cacheAwareService, logger);
+                WorkerStatus status = retirement.status();
+                logger.warn("Retiring expired worker: {}, role: {}, generation={}",
+                        status.getIpPort(), status.getRole(), status.getGenerationId());
             }
         }
-        return retirements;
-    }
-
-    /** Phase two: await already-detached generations and finalize identities. */
-    private void completeRetirements(List<PendingRetirement> retirements) {
-        for (PendingRetirement retirement : retirements) {
-            workerDirectory.completeRetirement(
-                    retirement.role(),
-                    retirement.ipPort(),
-                    retirement.workerStatus(),
-                    retirement.endpointToRetire(),
-                    cacheAwareService,
-                    logger);
-            logger.warn(
-                    "Retiring expired worker: {}, role: {}, generation={}",
-                    retirement.ipPort(), retirement.role(),
-                    retirement.workerStatus().getGenerationId());
-        }
-    }
-
-    private record PendingRetirement(
-            WorkerStatus workerStatus,
-            RoleType role,
-            String ipPort,
-            EndpointRegistry.DetachedGeneration endpointToRetire) {
     }
 }

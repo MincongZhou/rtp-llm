@@ -4,12 +4,13 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
-import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.util.Failures;
 import org.flexlb.util.PriorityNormalizer;
 
 import java.util.ArrayList;
@@ -24,6 +25,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 import java.util.function.ToLongFunction;
 
 /**
@@ -60,7 +62,7 @@ public final class PrefillState {
     }
 
     public record WorkerStatusFact(
-            ScheduledRequest item,
+            RequestRoute item,
             Kind kind,
             long errorCode) {
         public WorkerStatusFact {
@@ -72,12 +74,12 @@ public final class PrefillState {
             }
         }
 
-        public static WorkerStatusFact active(ScheduledRequest item) {
+        public static WorkerStatusFact active(RequestRoute item) {
             return new WorkerStatusFact(item, Kind.ACTIVE, 0L);
         }
 
         public static WorkerStatusFact terminal(
-                ScheduledRequest item, Kind kind, long errorCode) {
+                RequestRoute item, Kind kind, long errorCode) {
             if (kind == Kind.ACTIVE) {
                 throw new IllegalArgumentException(
                         "terminal Prefill fact requires a terminal kind");
@@ -116,7 +118,7 @@ public final class PrefillState {
     }
 
     public record Retirement(
-            List<ScheduledRequest> ownedItems,
+            List<RequestRoute> ownedItems,
             List<BatchCompletion> batchCompletions,
             Throwable invariantFailure) {
         public Retirement {
@@ -147,29 +149,24 @@ public final class PrefillState {
 
     /** One-shot capability returned when an OPEN admission commits. */
     public static final class CommittedHandoff implements AutoCloseable {
-        private EndpointGenerationLifecycle.HandoffPermit generationHandoff;
-        private final WorkSnapshot precedingWork;
+        private final EndpointGenerationLifecycle.HandoffPermit generationHandoff;
+        private final WorkCapture precedingWork;
 
         private CommittedHandoff(
                 EndpointGenerationLifecycle.HandoffPermit generationHandoff,
-                WorkSnapshot precedingWork) {
+                WorkCapture precedingWork) {
             this.generationHandoff = generationHandoff;
             this.precedingWork = Objects.requireNonNull(precedingWork, "precedingWork");
         }
 
         /** Other reserved work at the same ownership boundary that committed this admission. */
-        public WorkSnapshot precedingWork() {
+        public WorkCapture precedingWork() {
             return precedingWork;
         }
 
         @Override
         public synchronized void close() {
-            EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
-            if (exact == null) {
-                return;
-            }
-            generationHandoff = null;
-            exact.close();
+            generationHandoff.close();
         }
     }
 
@@ -177,7 +174,7 @@ public final class PrefillState {
     public abstract class Reservation implements AutoCloseable {
         /* guarded by PrefillState.lock */ LeaseState state =
                 LeaseState.OPEN;
-        private final RequestEntry originalOwner;
+        final RequestEntry originalOwner;
 
         private Reservation(RequestEntry originalOwner) {
             this.originalOwner = Objects.requireNonNull(
@@ -193,55 +190,24 @@ public final class PrefillState {
 
     public final class RouteReservation extends Reservation {
         private final PrefillState owner = PrefillState.this;
-        private final long requestId;
         /* guarded by PrefillState.lock until the reservation commits */
         private long predictedWorkMs;
 
-        private RouteReservation(RequestEntry originalOwner,
-                                 long requestId,
-                                 long predictedWorkMs) {
+        private RouteReservation(RequestEntry originalOwner, long predictedWorkMs) {
             super(originalOwner);
-            this.requestId = requestId;
             this.predictedWorkMs = boundedPrediction(predictedWorkMs);
         }
 
-        /** Bind the fresh delivery prediction to this exact OPEN reservation. */
-        public void updatePrediction(
-                ScheduledRequest exactItem,
-                long predictedMs) {
-            lock.lock();
-            try {
-                RequestEntry entry = requests.get(requestId);
-                if (state != LeaseState.OPEN
-                        || entry == null
-                        || !entry.activeIdentity(exactItem)
-                        || entry.reservation != this) {
-                    throw new IllegalStateException(
-                            "route prediction no longer owns ACTIVE request_id="
-                                    + requestId);
-                }
-                predictedWorkMs = boundedPrediction(predictedMs);
-                if (entry.queueMembership == QueueMembership.UNINDEXED) {
-                    committedWorkCapture = null;
-                }
-                recordMutationUnderLock();
-            } finally {
-                lock.unlock();
-            }
-        }
 
     }
 
     public final class BatchReservation extends Reservation {
-        private final long headRequestId;
         private final long batchId;
 
         private BatchReservation(RequestEntry originalOwner,
-                                 long headRequestId,
                                  long batchId,
                                  EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
             super(originalOwner);
-            this.headRequestId = headRequestId;
             this.batchId = batchId;
             this.generationHandoff = Objects.requireNonNull(
                     generationHandoff, "generationHandoff");
@@ -256,7 +222,7 @@ public final class PrefillState {
 
         /** Atomically commit this exact batch lease. */
         public CommittedHandoff commit(
-                List<ScheduledRequest> items,
+                List<RequestRoute> items,
                 long predictedMs) {
             lock.lock();
             try {
@@ -313,10 +279,7 @@ public final class PrefillState {
             touch(nowMs);
             executionStarted |= terminal.workerObserved
                     && (terminal.errorCode == 0L || terminal.executionTimeMs > 0L);
-            if (terminal.executionTimeMs >= 0L) {
-                maxExecutionTimeMs = Math.max(
-                        maxExecutionTimeMs, terminal.executionTimeMs);
-            }
+            maxExecutionTimeMs = Math.max(maxExecutionTimeMs, terminal.executionTimeMs);
             successfulCompletion |= terminal.workerObserved
                     && terminal.errorCode == 0L;
             learningEligible &= terminal.workerObserved
@@ -335,16 +298,6 @@ public final class PrefillState {
             servicePhase = phase;
         }
 
-        private BatchCompletion completion() {
-            return new BatchCompletion(
-                    lease.batchId,
-                    originalFeatures,
-                    originalPredictionMs,
-                    maxExecutionTimeMs,
-                    successfulCompletion,
-                    learningEligible);
-        }
-
         /** Retirement is external termination and must never train prediction. */
         private BatchCompletion retirementCompletion() {
             return new BatchCompletion(
@@ -357,59 +310,6 @@ public final class PrefillState {
         }
     }
 
-    /** One transaction-local view derived by a single scan of the request table. */
-    private static final class BatchReduction {
-        private final BatchWork batch;
-        private final Set<RequestEntry> members =
-                java.util.Collections.newSetFromMap(new IdentityHashMap<>());
-
-        private BatchReduction(BatchWork batch) {
-            this.batch = batch;
-        }
-
-        private void add(RequestEntry entry) {
-            boolean added = members.add(entry);
-            requireState(added,
-                    "duplicate batch reduction request_id=" + entry.requestId);
-        }
-
-        private void remove(RequestEntry entry) {
-            if (!members.remove(entry)) {
-                throw new IllegalStateException(
-                        "batch reduction lost request_id=" + entry.requestId);
-            }
-        }
-
-        /** Simulate terminal metrics without mutating canonical batch work. */
-        private BatchCompletion projectedCompletion(
-                Map<Long, TerminalObservation> terminals) {
-            long maxExecutionTimeMs = batch.maxExecutionTimeMs;
-            boolean successfulCompletion = batch.successfulCompletion;
-            boolean learningEligible = batch.learningEligible;
-            for (RequestEntry member : members) {
-                TerminalObservation terminal = terminals.get(member.requestId);
-                if (terminal == null) {
-                    return null;
-                }
-                if (terminal.executionTimeMs >= 0L) {
-                    maxExecutionTimeMs = Math.max(
-                            maxExecutionTimeMs, terminal.executionTimeMs);
-                }
-                successfulCompletion |= terminal.workerObserved
-                        && terminal.errorCode == 0L;
-                learningEligible &= terminal.workerObserved
-                        && terminal.errorCode == 0L;
-            }
-            return new BatchCompletion(
-                    batch.lease.batchId,
-                    batch.originalFeatures,
-                    batch.originalPredictionMs,
-                    maxExecutionTimeMs,
-                    successfulCompletion,
-                    learningEligible);
-        }
-    }
-
     /** Waiting-index membership is independent of admission and Engine ownership. */
     private enum QueueMembership { UNINDEXED, WAITING, STOP_DETACHED }
 
@@ -417,32 +317,28 @@ public final class PrefillState {
     private static final class RequestEntry {
         private final long requestId;
         private QueueMembership queueMembership;
-        private ScheduledRequest activeItem;
+        private RequestRoute item;
         private Phase individualPhase;
         private long remainingWorkMs;
         private long phaseBaseMs;
-        private long lastObservedAtMs;
         private BatchWork batchWork;
-        /** Canonical callback identity after admission commits. */
-        private ScheduledRequest committedItem;
         private Reservation reservation;
-        private RequestEntry(ScheduledRequest item) {
+        private RequestEntry(RequestRoute item) {
             this(item, QueueMembership.WAITING);
         }
 
-        private RequestEntry(ScheduledRequest item, QueueMembership queueMembership) {
+        private RequestEntry(RequestRoute item, QueueMembership queueMembership) {
             this.requestId = item.requestId();
             this.queueMembership = queueMembership;
-            this.activeItem = item;
+            this.item = item;
         }
 
         private boolean isActive() {
-            return activeItem != null;
+            return item != null && individualPhase == null && batchWork == null;
         }
 
-        private boolean activeIdentity(ScheduledRequest item) {
-            return activeItem != null
-                    && activeItem == item
+        private boolean activeIdentity(RequestRoute item) {
+            return isActive() && this.item == item
                     && queueMembership != QueueMembership.STOP_DETACHED;
         }
 
@@ -453,9 +349,6 @@ public final class PrefillState {
             }
             remainingWorkMs = lease.predictedWorkMs;
             phaseBaseMs = nowMs;
-            lastObservedAtMs = nowMs;
-            committedItem = activeItem;
-            activeItem = null;
             queueMembership = QueueMembership.UNINDEXED;
             individualPhase = Phase.COMMITTED;
         }
@@ -466,9 +359,7 @@ public final class PrefillState {
                         "request is not an ACTIVE batch member request_id=" + requestId);
             }
             batchWork = work;
-            committedItem = activeItem;
             reservation = null;
-            activeItem = null;
             queueMembership = QueueMembership.UNINDEXED;
         }
 
@@ -480,28 +371,26 @@ public final class PrefillState {
                 throw new IllegalStateException(
                         "request is not individual request_id=" + requestId);
             }
-            if (individualPhase == Phase.ENGINE_RUNNING) {
-                remainingWorkMs = Math.max(
-                        0L, remainingWorkMs - Math.max(0L, nowMs - phaseBaseMs));
-            }
+            remainingWorkMs = individualRemaining(this, nowMs);
             phaseBaseMs = Math.max(phaseBaseMs, nowMs);
-            lastObservedAtMs = Math.max(lastObservedAtMs, nowMs);
             individualPhase = next;
         }
     }
 
+    public record ProjectionVersion(
+            long queue,
+            long schedulingInputs,
+            long ownership) {
+    }
+
     /** Queue and committed work captured at one ownership linearization point. */
-    public record Snapshot(long capturedAtMs,
+    public record Snapshot(ProjectionVersion version, long capturedAtMs,
                            PrefillActiveIndex.Capture active,
                            WorkCapture work) {
         public Snapshot {
             Objects.requireNonNull(active, "missing active queue snapshot");
             Objects.requireNonNull(
                     work, "missing committed work snapshot");
-        }
-
-        public List<ScheduledRequest> activeItems() {
-            return active.items();
         }
     }
 
@@ -543,61 +432,43 @@ public final class PrefillState {
         }
     }
 
-    private record TerminalObservation(long requestId,
-                                       long batchId,
+    /** Terminal proof is bound to the canonical owner before any ledger mutation. */
+    private record TerminalObservation(RequestEntry owner,
                                        long executionTimeMs,
                                        long errorCode,
                                        PriorityPreemptionProgress preemptionProgress,
                                        boolean workerObserved) {
-        private static TerminalObservation from(
-                WorkerStatus.TaskObservation task,
-                boolean preserveBatchId) {
-            return new TerminalObservation(
-                    task.requestId(),
-                    preserveBatchId ? task.batchId() : -1L,
-                    task.executionTimeMs(),
-                    task.errorCode(),
-                    task.priorityPreemptionProgress(),
-                    true);
+        private static TerminalObservation from(RequestEntry owner, WorkerStatus.TaskObservation task) {
+            return new TerminalObservation(owner, task.executionTimeMs(), task.errorCode(),
+                    task.priorityPreemptionProgress(), true);
         }
 
-        private static TerminalObservation external(long requestId) {
-            return new TerminalObservation(
-                    requestId, -1L, -1L, 0L,
-                    PriorityPreemptionProgress.NONE, false);
+        private static TerminalObservation external(RequestEntry owner) {
+            return new TerminalObservation(owner, -1L, 0L, PriorityPreemptionProgress.NONE, false);
         }
 
         private TerminalObservation merge(TerminalObservation other) {
-            if (requestId != other.requestId) {
-                throw new IllegalArgumentException(
-                        "cannot merge different terminal requests");
+            if (owner != other.owner) {
+                throw new IllegalArgumentException("cannot merge different terminal owners");
             }
-            if (batchId >= 0L && other.batchId >= 0L
-                    && batchId != other.batchId) {
-                throw new IllegalArgumentException(
-                        "cannot merge different terminal batches");
-            }
-            long mergedError = errorCode != 0L ? errorCode : other.errorCode;
-            return new TerminalObservation(
-                    requestId,
-                    batchId >= 0L ? batchId : other.batchId,
+            return new TerminalObservation(owner,
                     Math.max(executionTimeMs, other.executionTimeMs),
-                    mergedError,
-                    PriorityPreemptionProgress.merge(
-                            preemptionProgress, other.preemptionProgress),
+                    errorCode != 0L ? errorCode : other.errorCode,
+                    PriorityPreemptionProgress.merge(preemptionProgress, other.preemptionProgress),
                     workerObserved || other.workerObserved);
         }
     }
 
     private final ReentrantLock lock;
-    /** Non-owning index containing only ACTIVE ScheduledRequest identities. */
-    private final PrefillActiveIndex activeIndex;
+    /** Non-owning index containing only ACTIVE RequestRoute identities. */
+    private PrefillActiveIndex activeIndex;
     /** Canonical request ownership, changed only under the endpoint lock. */
     private Map<Long, RequestEntry> requests = new HashMap<>();
     private final LongSupplier clock;
     private final Runnable capacityAvailable;
     /** Monotonic ownership/work revision used by projection snapshots. */
     private volatile long mutationVersion;
+    private volatile long schedulingInputVersion;
     /** Published at ownership mutation boundaries; admission still checks under the lock. */
     private volatile long outstandingRequestCount;
     private long requestCountsVersion = -1;
@@ -635,9 +506,76 @@ public final class PrefillState {
                 capacityAvailable, "capacityAvailable");
     }
 
-    private RequestEntry putRequestUnderLock(long requestId, RequestEntry entry) {
+    public ReentrantLock ownershipLock() { return lock; }
+
+    /** Enable waiting work without replacing the ledger of existing DIRECT reservations. */
+    void enableQueueUnderLock(Comparator<RequestRoute> ordering) {
         requireLock();
-        return requests.put(requestId, entry);
+        if (activeIndex == PrefillActiveIndex.disabled()) {
+            activeIndex = PrefillActiveIndex.ordered(16, ordering);
+            schedulingInputsChangedUnderLock();
+            recordMutationUnderLock();
+        }
+    }
+
+    /** One bounded, ordered queue view; all metadata belongs to the same ownership revision. */
+    public record QueueSnapshot(long queueVersion, long schedulingInputVersion, List<RequestRoute> items) {
+        public RequestRoute head() {
+            return items.isEmpty() ? null : items.get(0);
+        }
+    }
+
+    /** Diagnostic counters captured from one queue ownership revision. */
+    public record QueueCounters(long version, int[] byPriority, long observedRequests, int batchSlots) { }
+
+    public QueueCounters captureQueueCounters() {
+        lock.lock();
+        try {
+            int[] byPriority = new int[PriorityNormalizer.MAX_PRIORITY + 1];
+            for (int priority = 0; priority < byPriority.length; priority++) {
+                byPriority[priority] = activeIndex.size(priority);
+            }
+            return new QueueCounters(activeIndex.version(), byPriority,
+                    saturatedAdd(requests.size(), unknownEngineRequestCount), batchLeasesInUse);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Current queue depth for the endpoint's status view. */
+    public int queueDepth() {
+        lock.lock();
+        try {
+            return activeIndex.size();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public QueueSnapshot captureQueue(int limit) {
+        if (limit <= 0) {
+            throw new IllegalArgumentException("queue capture limit must be positive");
+        }
+        lock.lock();
+        try {
+            List<RequestRoute> items = new ArrayList<>(Math.min(limit, activeIndex.size()));
+            var ordered = activeIndex.iterator();
+            while (items.size() < limit && ordered.hasNext()) {
+                items.add(ordered.next());
+            }
+            return new QueueSnapshot(activeIndex.version(), schedulingInputVersion(), List.copyOf(items));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public Runnable capacityAvailableSignal() { return capacityAvailable; }
+
+    long schedulingInputVersion() { return schedulingInputVersion; }
+
+    public void schedulingInputsChangedUnderLock() {
+        requireLock();
+        schedulingInputVersion++;
     }
 
     private boolean removeRequestUnderLock(long requestId, RequestEntry entry) {
@@ -651,10 +589,11 @@ public final class PrefillState {
         return true;
     }
 
-    /** Caller must hold the ownership lock. */
-    public long mutationVersionUnderLock() {
-        requireLock();
-        return mutationVersion;
+    /** Advisory check; callers recheck under ownershipLock before replacing a projection. */
+    public boolean isCurrentProjection(ProjectionVersion version) {
+        return version.queue() == activeIndex.version()
+                && version.schedulingInputs() == schedulingInputVersion
+                && version.ownership() == mutationVersion;
     }
 
     /** Advisory revision read for the lock-free projection-cache fast path. */
@@ -662,14 +601,38 @@ public final class PrefillState {
         return mutationVersion;
     }
 
-    public boolean enqueueActiveUnderLock(ScheduledRequest item, long maxOutstandingRequests) {
+    /** Publish ACTIVE membership and its NON_BATCH lease in one ownership-lock transaction. */
+    public boolean enqueueForDeliveryUnderLock(RequestRoute item, long maxOutstandingRequests) {
+        requireLock();
+        if (!enqueueActiveUnderLock(item, maxOutstandingRequests)) {
+            return false;
+        }
+        boolean published = false;
+        try {
+            if (item.requiresRouteReservation()) {
+                if (item.prefillEp().isGenerationRetiringOrRetired()) {
+                    return false;
+                }
+                reserveRouteUnderLock(item, 0L);
+            }
+            published = true;
+            return true;
+        } finally {
+            if (!published) {
+                requireState(removeQueuedUnderLock(item),
+                        "fresh ACTIVE publication could not roll back: request_id=", item.requestId());
+            }
+        }
+    }
+
+    public boolean enqueueActiveUnderLock(RequestRoute item, long maxOutstandingRequests) {
         requireLock();
         if (requests.containsKey(item.requestId())
                 || (maxOutstandingRequests > 0L && !canAcceptRequestUnderLock(maxOutstandingRequests))) {
             return false;
         }
         RequestEntry entry = new RequestEntry(item);
-        putRequestUnderLock(item.requestId(), entry);
+        requests.put(item.requestId(), entry);
         try {
             activeIndex.add(item);
         } catch (RuntimeException | Error failure) {
@@ -680,7 +643,73 @@ public final class PrefillState {
         return true;
     }
 
-    public boolean terminalizeActiveUnderLock(ScheduledRequest item) {
+    public boolean ownsSelectionUnderLock(List<RequestRoute> items, long nowMs) {
+        requireLock();
+        for (RequestRoute item : items) {
+            if (!activeIndex.contains(item) || item.requestExpired(nowMs)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean removeSelectionBoundaryUnderLock(
+            RequestRoute item,
+            CapacityBoundary boundary,
+            long nowMs) {
+        requireLock();
+        if (item == null
+                || boundary.unavailable()
+                || boundary == CapacityBoundary.OWNERSHIP_LOST) {
+            return false;
+        }
+        return activeIndex.contains(item)
+                && !item.requestExpired(nowMs)
+                && removeQueuedUnderLock(item);
+    }
+
+    /** Finish the queue part of an already committed delivery under the same lock. */
+    public SelectionRemainder finishPreparedSelectionUnderLock(
+            RequestRoute blockedItem, CapacityBoundary blockedResult, long nowMs) {
+        requireLock();
+        boolean removed = removeSelectionBoundaryUnderLock(blockedItem, blockedResult, nowMs);
+        return new SelectionRemainder(activeIndex.size(), removed);
+    }
+
+    public record SelectionRemainder(int queueDepth, boolean removedBoundary) { }
+
+    /** Resolve an empty prepared selection against the current queue head. */
+    public QueueBoundary resolveEmptySelectionUnderLock(
+            RequestRoute item, CapacityBoundary boundary, long nowMs) {
+        requireLock();
+        if (boundary != null && boundary.unavailable()) {
+            return activeIndex.peek() == item && !item.requestExpired(nowMs)
+                    ? QueueBoundary.BLOCKED : QueueBoundary.UNCHANGED;
+        }
+        return removeSelectionBoundaryUnderLock(item, boundary, nowMs)
+                ? QueueBoundary.REMOVED : QueueBoundary.UNCHANGED;
+    }
+
+    public enum QueueBoundary { UNCHANGED, BLOCKED, REMOVED }
+
+    /** The queue part of a worker wait; the worker owns stop and control wakeups. */
+    public boolean queueWaitCurrentUnderLock(
+            RequestRoute head, long queueVersion, long inputVersion,
+            CapacityBoundary.Availability capacity, long nowMs) {
+        requireLock();
+        if (head == null) {
+            return activeIndex.isEmpty();
+        }
+        if (activeIndex.peek() != head) {
+            return false;
+        }
+        return capacity != null
+                ? !head.requestExpired(nowMs) && !capacity.isAvailable()
+                : activeIndex.version() == queueVersion && schedulingInputVersion == inputVersion;
+    }
+
+    /** Remove exact ACTIVE ownership; batch preparation retains its OPEN lease. */
+    public boolean removeQueuedUnderLock(RequestRoute item) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
         if (entry == null || !entry.activeIdentity(item)) {
@@ -688,12 +717,10 @@ public final class PrefillState {
         }
         Reservation lease = entry.reservation;
         requireState(lease == null || lease.state == LeaseState.OPEN,
-                "ACTIVE request owns a non-OPEN Prefill lease request_id="
-                        + item.requestId());
+                "ACTIVE request owns a non-OPEN Prefill lease request_id=", item.requestId());
         detachAdmissionIndexUnderLock(entry, item);
-        // BATCH preparation owns any OPEN batch lease together with a
-        // generation handoff. NON_BATCH item-owned route reservations use the
-        // atomic counterpart below so retirement can never observe an orphan.
+        // BATCH preparation still owns its OPEN lease and generation handoff.
+        if (lease instanceof RouteReservation) { closeOpenLeaseUnderLock(lease); }
         removeRequestUnderLock(item.requestId(), entry);
         recordMutationUnderLock();
         return true;
@@ -709,7 +736,7 @@ public final class PrefillState {
                 long[] updatedCounts = new long[PriorityNormalizer.MAX_PRIORITY + 1];
                 updatedCounts[0] = unknownEngineRequestCount;
                 for (RequestEntry entry : requests.values()) {
-                    ScheduledRequest item = entry.activeItem != null ? entry.activeItem : entry.committedItem;
+                    RequestRoute item = entry.item;
                     int occupant = item == null ? 0 : item.priority();
                     updatedCounts[occupant > 0 && occupant <= PriorityNormalizer.MAX_PRIORITY ? occupant : 0]++;
                 }
@@ -745,7 +772,7 @@ public final class PrefillState {
             if (!PriorityNormalizer.hasPriority(priority) || required == 0L || required > activeIndex.size()) {
                 return false;
             }
-            for (ScheduledRequest item : activeIndex) {
+            for (RequestRoute item : activeIndex) {
                 if (isQueuedPreemptionCandidate(item, priority) && --required == 0L) { return true; }
             }
             return false;
@@ -755,23 +782,23 @@ public final class PrefillState {
     }
 
     /** Select only uncommitted requests; Engine work cannot release a local queue seat. */
-    public List<ScheduledRequest> queuedPreemptionVictimsUnderLock(int priority, long requestLimit) {
+    private List<RequestRoute> queuedPreemptionVictimsUnderLock(int priority, long requestLimit) {
         requireLock();
         long required = requestSlotsToReleaseUnderLock(requestLimit);
         if (!PriorityNormalizer.hasPriority(priority) || required == 0L || required > activeIndex.size()) {
             return List.of();
         }
-        List<ScheduledRequest> candidates = new ArrayList<>();
-        for (ScheduledRequest item : activeIndex) {
+        List<RequestRoute> candidates = new ArrayList<>();
+        for (RequestRoute item : activeIndex) {
             if (isQueuedPreemptionCandidate(item, priority)) { candidates.add(item); }
         }
         if (candidates.size() < required) { return List.of(); }
-        candidates.sort(Comparator.comparingInt(ScheduledRequest::priority)
-                .thenComparing(Comparator.comparingLong(ScheduledRequest::enqueueSeq).reversed()));
+        candidates.sort(Comparator.comparingInt(RequestRoute::priority)
+                .thenComparing(Comparator.comparingLong(RequestRoute::enqueueSeq).reversed()));
         return candidates.subList(0, (int) required);
     }
 
-    private boolean isQueuedPreemptionCandidate(ScheduledRequest item, int priority) {
+    private boolean isQueuedPreemptionCandidate(RequestRoute item, int priority) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
         return PriorityNormalizer.hasPriority(item.priority()) && item.priority() < priority
@@ -785,78 +812,18 @@ public final class PrefillState {
                 : Math.max(0L, saturatedAdd(requests.size(), unknownEngineRequestCount) - requestLimit + 1L);
     }
 
-    /** Transfer exact queued request seats and OPEN route reservations in one ownership transaction. */
-    public RouteReservation replaceQueuedRoutesUnderLock(
-            List<ScheduledRequest> victims, List<RouteReservation> reservations,
-            ScheduledRequest incoming, long requestLimit) {
+    /** Replace lower-priority queued owners without exposing a partially transferred set. */
+    public List<RequestRoute> replaceQueuedRoutesUnderLock(RequestRoute incoming, long requestLimit) {
         requireLock();
-        if (victims.isEmpty() || victims.size() != reservations.size()
-                || victims.size() != requestSlotsToReleaseUnderLock(requestLimit)
-                || requests.containsKey(incoming.requestId())) {
-            return null;
+        if (requests.containsKey(incoming.requestId())) { return List.of(); }
+        List<RequestRoute> victims = queuedPreemptionVictimsUnderLock(incoming.priority(), requestLimit);
+        if (victims.isEmpty()) { return victims; }
+        // The selected victims fund this seat; the shared lock hides the temporary excess.
+        if (!enqueueForDeliveryUnderLock(incoming, 0L)) { return List.of(); }
+        for (RequestRoute victim : victims) {
+            requireState(removeQueuedUnderLock(victim), "queued preemption lost its exact victim");
         }
-        Set<Long> ids = new HashSet<>();
-        for (int index = 0; index < victims.size(); index++) {
-            ScheduledRequest victim = victims.get(index);
-            RequestEntry entry = requests.get(victim.requestId());
-            RouteReservation reservation = reservations.get(index);
-            if (!ids.add(victim.requestId()) || entry == null || !entry.activeIdentity(victim)
-                    || !activeIndex.contains(victim) || reservation == null || reservation.owner != this
-                    || entry.reservation != reservation || reservation.state != LeaseState.OPEN
-                    || !PriorityNormalizer.hasPriority(victim.priority()) || victim.priority() >= incoming.priority()) {
-                return null;
-            }
-        }
-        RequestEntry incomingEntry = new RequestEntry(incoming);
-        RouteReservation incomingReservation = new RouteReservation(incomingEntry, incoming.requestId(), 0L);
-        incomingEntry.reservation = incomingReservation;
-        activeIndex.add(incoming);
-        try {
-            putRequestUnderLock(incoming.requestId(), incomingEntry);
-        } catch (RuntimeException | Error failure) {
-            activeIndex.remove(incoming);
-            throw failure;
-        }
-        for (int index = 0; index < victims.size(); index++) {
-            ScheduledRequest victim = victims.get(index);
-            RequestEntry entry = requests.get(victim.requestId());
-            closeOpenLeaseUnderLock(reservations.get(index));
-            activeIndex.remove(victim);
-            removeRequestUnderLock(victim.requestId(), entry);
-        }
-        recordMutationUnderLock();
-        return incomingReservation;
-    }
-
-    /**
-     * Remove one NON_BATCH ACTIVE owner and its item-owned OPEN route reservation
-     * in the same ownership transaction.
-     */
-    public boolean terminalizeActiveRouteUnderLock(
-            ScheduledRequest item,
-            RouteReservation exactReservation) {
-        requireLock();
-        RequestEntry entry = requests.get(item.requestId());
-        if (entry == null || !entry.activeIdentity(item)) {
-            return false;
-        }
-        if (exactReservation == null
-                || exactReservation.owner != this
-                || entry.reservation != exactReservation
-                || exactReservation.state != LeaseState.OPEN) {
-            throw new IllegalStateException(
-                    "ACTIVE route request lost its exact Prefill reservation request_id="
-                            + item.requestId());
-        }
-        validateAdmissionIndexUnderLock(entry, item);
-
-        // Every operation below is allocation-free and runs under the same
-        // lock used by generation retirement.
-        detachAdmissionIndexUnderLock(entry, item);
-        closeOpenLeaseUnderLock(exactReservation);
-        removeRequestUnderLock(item.requestId(), entry);
-        recordMutationUnderLock();
-        return true;
+        return victims;
     }
 
     /**
@@ -865,37 +832,38 @@ public final class PrefillState {
      * generation retirement, while a successful callback must explicitly
      * acknowledge the exact pending identity below.
      */
-    public ScheduledRequest detachNextActiveForStopUnderLock() {
-        requireLock();
-        ScheduledRequest item = activeIndex.peek();
-        if (item == null) {
-            return null;
+    public RequestRoute detachNextActiveForStop() {
+        boolean releasedRoute = false;
+        lock.lock();
+        try {
+            RequestRoute item = activeIndex.peek();
+            if (item == null) { return null; }
+            RequestEntry entry = requests.get(item.requestId());
+            requireState(entry != null && entry.activeIdentity(item),
+                    "stopped queue head has no canonical ACTIVE owner request_id=", item.requestId());
+            Reservation lease = entry.reservation;
+            requireState(lease == null || lease.state == LeaseState.OPEN,
+                    "stopped ACTIVE request owns a non-OPEN Prefill lease request_id=", item.requestId());
+            removeValidatedActiveIndex(item);
+            entry.queueMembership = QueueMembership.STOP_DETACHED;
+            if (lease instanceof RouteReservation) {
+                closeOpenLeaseUnderLock(lease);
+                releasedRoute = true;
+            }
+            recordMutationUnderLock();
+            return item;
+        } finally {
+            lock.unlock();
+            notifyCapacityAvailable(releasedRoute);
         }
-        RequestEntry entry = requests.get(item.requestId());
-        requireState(entry != null && entry.activeIdentity(item),
-                "stopped queue head has no canonical ACTIVE owner request_id="
-                        + item.requestId());
-        Reservation lease = entry.reservation;
-        requireState(lease == null || lease.state == LeaseState.OPEN,
-                "stopped ACTIVE request owns a non-OPEN Prefill lease request_id="
-                        + item.requestId());
-        boolean removed = activeIndex.remove(item);
-        requireState(removed,
-                "stopped canonical ACTIVE request has no queue index request_id="
-                        + item.requestId());
-        // The queue-index removal is the PNR. Every fallible validation is
-        // complete; the sole remaining commit is this private field store.
-        entry.queueMembership = QueueMembership.STOP_DETACHED;
-        recordMutationUnderLock();
-        return item;
     }
 
     /** Remove only the exact stop-pending owner whose callback completed. */
-    public boolean acknowledgeStopTerminalUnderLock(ScheduledRequest item) {
+    public boolean acknowledgeStopTerminalUnderLock(RequestRoute item) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
         if (entry == null
-                || entry.activeItem != item
+                || !entry.isActive() || entry.item != item
                 || entry.queueMembership != QueueMembership.STOP_DETACHED
                 || activeIndex.contains(item)) {
             return false;
@@ -907,38 +875,46 @@ public final class PrefillState {
         return removed;
     }
 
-    ReservationResult<RouteReservation> reserveRoute(
-            ScheduledRequest exactItem,
-            long predictedMs) {
-        ScheduledRequest item = exactItem;
+    RouteReservation reserveRouteUnderLock(RequestRoute item, long predictedMs) {
+        requireLock();
+        RequestEntry entry = requests.get(item.requestId());
+        requireState(entry != null && entry.activeIdentity(item) && entry.reservation == null,
+                "route reservation requires an exact unreserved ACTIVE request");
+        RouteReservation lease = new RouteReservation(entry, predictedMs);
+        entry.reservation = lease;
+        recordMutationUnderLock();
+        return lease;
+    }
+
+    /** Borrow the canonical reservation for preparation; commit rechecks the exact lease. */
+    RouteReservation prepareRoute(RequestRoute item, long predictedMs) {
         lock.lock();
         try {
             RequestEntry entry = requests.get(item.requestId());
-            if (entry == null || !entry.activeIdentity(item)) {
-                return new ReservationResult<>(
-                        CapacityStatus.REQUEST_NOT_ACTIVE, null);
+            if (entry == null || !entry.activeIdentity(item)
+                    || !(entry.reservation instanceof RouteReservation lease)
+                    || lease.state != LeaseState.OPEN) {
+                throw new IllegalStateException(
+                        "route prediction no longer owns ACTIVE request_id=" + item.requestId());
             }
-            if (entry.reservation != null) {
-                return new ReservationResult<>(
-                        CapacityStatus.REQUEST_ALREADY_RESERVED, null);
+            lease.predictedWorkMs = boundedPrediction(predictedMs);
+            if (entry.queueMembership == QueueMembership.UNINDEXED) {
+                committedWorkCapture = null;
             }
-            RouteReservation lease = new RouteReservation(
-                    entry, item.requestId(), predictedMs);
-            entry.reservation = lease;
             recordMutationUnderLock();
-            return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
+            return lease;
         } finally {
             lock.unlock();
         }
     }
 
     ReservationResult<BatchReservation> reserveBatch(
-            ScheduledRequest exactHead,
+            RequestRoute exactHead,
             long batchId,
             int maximum,
             EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         requirePositiveBatchLimit(maximum);
-        ScheduledRequest head = exactHead;
+        RequestRoute head = exactHead;
         lock.lock();
         try {
             RequestEntry entry = requests.get(head.requestId());
@@ -959,7 +935,7 @@ public final class PrefillState {
                         CapacityStatus.CAPACITY_FULL, null);
             }
             BatchReservation lease = new BatchReservation(
-                    entry, head.requestId(), batchId, generationHandoff);
+                    entry, batchId, generationHandoff);
             entry.reservation = lease;
             batchLeasesInUse++;
             recordMutationUnderLock();
@@ -967,11 +943,6 @@ public final class PrefillState {
         } finally {
             lock.unlock();
         }
-    }
-
-    public int batchLeasesInUseUnderLock() {
-        requireLock();
-        return batchLeasesInUse;
     }
 
     private boolean batchCapacityAvailable(int maximum) {
@@ -998,7 +969,6 @@ public final class PrefillState {
     private final class CapacityAvailability
             implements CapacityBoundary.Availability {
         private final int maximum;
-        private Runnable subscribed;
 
         private CapacityAvailability(int maximum) {
             this.maximum = maximum;
@@ -1010,28 +980,21 @@ public final class PrefillState {
         }
 
         @Override
-        public synchronized void addListener(Runnable listener) {
+        public void addListener(Runnable listener) {
             if (listener != capacityAvailable) {
                 throw new IllegalArgumentException(
                         "Prefill availability requires its exact worker wake callback");
             }
-            if (subscribed != null && subscribed != listener) {
-                throw new IllegalStateException(
-                        "Prefill availability already has a listener");
-            }
-            subscribed = listener;
         }
 
         @Override
-        public synchronized void removeListener(Runnable listener) {
-            if (subscribed == listener) {
-                subscribed = null;
-            }
+        public void removeListener(Runnable listener) {
+            // The worker wake callback remains bound for the entire endpoint generation.
         }
     }
 
     CommittedHandoff commitRouteGroup(
-            List<ScheduledRequest> items,
+            List<RequestRoute> items,
             List<RouteReservation> exactReservations,
             EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         Objects.requireNonNull(generationHandoff, "generationHandoff");
@@ -1050,74 +1013,63 @@ public final class PrefillState {
         }
         lock.lock();
         try {
-            return commitRoutesUnderLock(items, leases, generationHandoff);
+            validateGroup(items, false);
+            if (items.size() != leases.size()) {
+                throw new IllegalArgumentException(
+                        "route commit requires one exact lease per member");
+            }
+            for (int index = 0; index < items.size(); index++) {
+                RequestEntry entry = requests.get(items.get(index).requestId());
+                RouteReservation lease = leases.get(index);
+                if (entry == null
+                        || entry.reservation != lease
+                        || lease.originalOwner != entry
+                        || lease.state != LeaseState.OPEN) {
+                    throw new IllegalStateException(
+                            "route commit does not own exact OPEN lease request_id="
+                                    + items.get(index).requestId());
+                }
+            }
+            long nowMs = clock.getAsLong();
+            CommittedHandoff committedHandoff = new CommittedHandoff(generationHandoff,
+                    capturePrecedingWorkUnderLock(items, nowMs));
+            for (RequestRoute item : items) {
+                detachAdmissionIndexUnderLock(requests.get(item.requestId()), item);
+            }
+            // All validation and handoff allocation precede ownership changes. Queue removal
+            // and stop detachment share this lock; DIRECT has no published item lease.
+            for (int index = 0; index < items.size(); index++) {
+                RequestRoute item = items.get(index);
+                RequestEntry entry = requests.get(item.requestId());
+                RouteReservation lease = leases.get(index);
+                lease.state = LeaseState.OWNED;
+                entry.commitIndividual(lease, nowMs);
+            }
+            committedWorkCapture = null;
+            recordMutationUnderLock();
+            return committedHandoff;
         } finally {
             lock.unlock();
         }
     }
 
-    private CommittedHandoff commitRoutesUnderLock(
-            List<ScheduledRequest> items,
-            List<RouteReservation> leases,
-            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
-        requireLock();
-        List<ScheduledRequest> members = validateRouteGroup(items);
-        if (members.size() != leases.size()) {
-            throw new IllegalArgumentException(
-                    "route commit requires one exact lease per member");
-        }
-        Set<RouteReservation> unique = java.util.Collections.newSetFromMap(
-                new IdentityHashMap<>());
-        for (int index = 0; index < members.size(); index++) {
-            RequestEntry entry = requests.get(members.get(index).requestId());
-            RouteReservation lease = leases.get(index);
-            if (entry == null || !unique.add(lease)
-                    || entry.reservation != lease
-                    || lease.requestId != entry.requestId
-                    || lease.state != LeaseState.OPEN) {
-                throw new IllegalStateException(
-                        "route commit does not own exact OPEN lease request_id="
-                                + members.get(index).requestId());
-            }
-        }
-        long nowMs = clock.getAsLong();
-        CommittedHandoff committedHandoff = new CommittedHandoff(generationHandoff,
-                capturePrecedingWorkUnderLock(members, nowMs));
-        for (ScheduledRequest item : members) {
-            detachAdmissionIndexUnderLock(requests.get(item.requestId()), item);
-        }
-        for (int index = 0; index < members.size(); index++) {
-            RouteReservation lease = leases.get(index);
-            lease.state = LeaseState.OWNED;
-            RequestEntry entry = requests.get(members.get(index).requestId());
-            entry.commitIndividual(lease, nowMs);
-        }
-        committedWorkCapture = null;
-        recordMutationUnderLock();
-        return committedHandoff;
-    }
-
     private CommittedHandoff commitBatchUnderLock(
             BatchReservation lease,
-            List<ScheduledRequest> items,
+            List<RequestRoute> items,
             long predictedMs) {
         requireLock();
-        List<ScheduledRequest> members = validateActiveGroup(items);
-        RequestEntry head = requests.get(lease.headRequestId);
-        ScheduledRequest headItem = head == null ? null : head.activeItem;
+        validateGroup(items, true);
+        RequestEntry head = requests.get(lease.originalOwner.requestId);
+        RequestRoute headItem = head == null || !head.isActive() ? null : head.item;
         if (lease.state != LeaseState.OPEN || head == null
                 || head.reservation != lease
-                || !members.contains(headItem)
-                || openGenerationHandoff(lease) == null) {
+                || !items.contains(headItem)
+                || lease.generationHandoff == null) {
             throw new IllegalStateException(
                     "batch commit does not own exact OPEN lease batch_id="
                             + lease.batchId);
         }
-        if (findBatchWorkUnderLock(lease.batchId) != null) {
-            throw new IllegalStateException(
-                    "batch id already committed batch_id=" + lease.batchId);
-        }
-        for (ScheduledRequest item : members) {
+        for (RequestRoute item : items) {
             RequestEntry member = requests.get(item.requestId());
             Reservation expected = item == headItem ? lease : null;
             if (member.reservation != expected) {
@@ -1131,17 +1083,17 @@ public final class PrefillState {
                 lease,
                 predictedMs,
                 PrefillBatchFeatures.from(
-                        members,
-                        ScheduledRequest::seqLen,
-                        ScheduledRequest::hitCache),
+                        items,
+                        RequestRoute::seqLen,
+                        RequestRoute::hitCache),
                 nowMs);
-        CommittedHandoff committedHandoff = new CommittedHandoff(openGenerationHandoff(lease),
-                capturePrecedingWorkUnderLock(members, nowMs));
-        for (ScheduledRequest item : members) {
+        CommittedHandoff committedHandoff = new CommittedHandoff(lease.generationHandoff,
+                captureWorkUnderLock(nowMs));
+        for (RequestRoute item : items) {
             removeValidatedActiveIndex(item);
         }
         moveGenerationHandoffToOwnedUnderLock(lease, committedHandoff);
-        for (ScheduledRequest item : members) {
+        for (RequestRoute item : items) {
             requests.get(item.requestId()).commitBatch(work);
         }
         committedWorkCapture = null;
@@ -1149,25 +1101,27 @@ public final class PrefillState {
         return committedHandoff;
     }
 
-    private List<ScheduledRequest> validateActiveGroup(List<ScheduledRequest> items) {
+    private void validateGroup(List<RequestRoute> items, boolean queuedOnly) {
         requireState(!items.isEmpty(), "committed group requires members");
-        for (ScheduledRequest item : items) {
+        Set<RequestRoute> unique = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        for (RequestRoute item : items) {
+            requireState(unique.add(item), "duplicate group member request_id=", item.requestId());
             RequestEntry entry = requests.get(item.requestId());
             requireState(entry != null && entry.activeIdentity(item),
-                    "group member is not canonical ACTIVE request_id="
-                            + item.requestId());
-            requireState(activeIndex.contains(item),
-                    "canonical ACTIVE request has no queue index request_id="
-                            + item.requestId());
+                    "group member is not canonical ACTIVE request_id=", item.requestId());
+            if (queuedOnly) {
+                requireState(activeIndex.contains(item),
+                        "canonical ACTIVE request has no queue index request_id=", item.requestId());
+            } else {
+                validateAdmissionIndexUnderLock(entry, item);
+            }
         }
-        return items;
     }
 
-    private void removeValidatedActiveIndex(ScheduledRequest item) {
+    private void removeValidatedActiveIndex(RequestRoute item) {
         boolean removed = activeIndex.remove(item);
         requireState(removed,
-                "validated ACTIVE queue index disappeared request_id="
-                        + item.requestId());
+                "validated ACTIVE queue index disappeared request_id=", item.requestId());
     }
 
     /**
@@ -1176,7 +1130,7 @@ public final class PrefillState {
      * decide admission. A zero request limit leaves count admission disabled.
      */
     public ReservationResult<RouteReservation> reserveUnqueuedRoute(
-            ScheduledRequest item, long predictedMs, long maxOutstandingRequests) {
+            RequestRoute item, long predictedMs, long maxOutstandingRequests) {
         Objects.requireNonNull(item, "item");
         if (maxOutstandingRequests < 0L) {
             throw new IllegalArgumentException("request limit must be non-negative");
@@ -1190,10 +1144,10 @@ public final class PrefillState {
                 return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
             }
             RequestEntry entry = new RequestEntry(item, QueueMembership.UNINDEXED);
-            RouteReservation reservation = new RouteReservation(entry, item.requestId(), predictedMs);
+            RouteReservation reservation = new RouteReservation(entry, predictedMs);
             ReservationResult<RouteReservation> result = new ReservationResult<>(CapacityStatus.ACQUIRED, reservation);
             entry.reservation = reservation;
-            putRequestUnderLock(item.requestId(), entry);
+            requests.put(item.requestId(), entry);
             committedWorkCapture = null;
             recordMutationUnderLock();
             return result;
@@ -1202,25 +1156,14 @@ public final class PrefillState {
         }
     }
 
-    private List<ScheduledRequest> validateRouteGroup(List<ScheduledRequest> items) {
-        requireState(!items.isEmpty(), "committed group requires members");
-        for (ScheduledRequest item : items) {
-            RequestEntry entry = requests.get(item.requestId());
-            requireState(entry != null && entry.activeIdentity(item),
-                    "route member is not canonical admission request_id=" + item.requestId());
-            validateAdmissionIndexUnderLock(entry, item);
-        }
-        return items;
-    }
-
-    private void validateAdmissionIndexUnderLock(RequestEntry entry, ScheduledRequest item) {
+    private void validateAdmissionIndexUnderLock(RequestEntry entry, RequestRoute item) {
         requireState(entry.queueMembership != QueueMembership.STOP_DETACHED,
-                "stopped admission cannot commit request_id=" + item.requestId());
+                "stopped admission cannot commit request_id=", item.requestId());
         requireState(activeIndex.contains(item) == (entry.queueMembership == QueueMembership.WAITING),
-                "canonical admission and waiting index disagree request_id=" + item.requestId());
+                "canonical admission and waiting index disagree request_id=", item.requestId());
     }
 
-    private void detachAdmissionIndexUnderLock(RequestEntry entry, ScheduledRequest item) {
+    private void detachAdmissionIndexUnderLock(RequestEntry entry, RequestRoute item) {
         validateAdmissionIndexUnderLock(entry, item);
         if (entry.queueMembership == QueueMembership.WAITING) {
             removeValidatedActiveIndex(item);
@@ -1231,46 +1174,28 @@ public final class PrefillState {
     }
 
     /**
-     * Total counterpart cleanup bound to one exact committed ScheduledRequest. A
+     * Total counterpart cleanup bound to one exact committed RequestRoute. A
      * reused request id or an ACTIVE item is a no-op.
      */
-    public boolean terminalizeCommittedItem(ScheduledRequest exactItem) {
+    public boolean terminalizeCommittedItem(RequestRoute exactItem) {
         boolean capacityReleased = false;
         lock.lock();
         try {
             RequestEntry entry = requests.get(exactItem.requestId());
             if (entry == null || entry.isActive()
-                    || entry.committedItem != exactItem) {
+                    || entry.item != exactItem) {
                 return false;
             }
-            BatchReduction reduction = entry.batchWork == null
-                    ? null : batchReductionUnderLock(entry.batchWork);
+            Set<RequestEntry> members = entry.batchWork == null
+                    ? null : batchMembersUnderLock(entry.batchWork);
             // Local cleanup does not prove that Engine omitted this member's work.
-            capacityReleased = settleUnderLock(entry, TerminalObservation.external(entry.requestId),
-                    reduction, null);
+            capacityReleased = settleUnderLock(entry, TerminalObservation.external(entry),
+                    members, clock.getAsLong());
             return true;
         } finally {
             lock.unlock();
             notifyCapacityAvailable(capacityReleased);
         }
-    }
-
-    /**
-     * Reconcile ownership and publish its matching WorkerStatus before the
-     * canonical queue lock is released. Projection readers therefore observe
-     * either the previous pair or the fully reduced new pair.
-     */
-    public StatusReconciliation reconcileWorkerStatus(
-            WorkerStatus.StatusObservation observation,
-            ToLongFunction<List<ScheduledRequest>> repredictor,
-            Runnable committedPublication,
-            Runnable failedReduction) {
-        return reconcileEngineStatus(
-                observation.engine(),
-                observation.finishedTasks(),
-                repredictor,
-                committedPublication,
-                failedReduction);
     }
 
     public record HeartbeatReconciliation(List<WorkerStatusFact> schedulerFacts,
@@ -1280,41 +1205,15 @@ public final class PrefillState {
         }
     }
 
-    public HeartbeatReconciliation reconcileHeartbeat(
-            WorkerStatus.StatusObservation observation) {
-        List<WorkerStatusFact> facts = new ArrayList<>(
-                observation.runningTasks().size());
+    public HeartbeatReconciliation reconcileHeartbeat(WorkerStatus.StatusObservation observation) {
+        List<WorkerStatusFact> facts = new ArrayList<>(observation.runningTasks().size());
         boolean capacityReleased = false;
-        boolean schedulingInputsChanged = false;
+        boolean schedulingInputsChanged;
         lock.lock();
         try {
-            long nowMs = clock.getAsLong();
-            WorkerStatus.EngineObservation engine = observation.engine();
-            IdentityHashMap<RequestEntry, Phase> individualPhases =
-                    new IdentityHashMap<>();
-            IdentityHashMap<BatchWork, Phase> batchPhases =
-                    new IdentityHashMap<>();
-            long nextUnknown =
-                    prepareActiveObservationsUnderLock(
-                            engine.runningTaskList(),
-                            Map.of(),
-                            saturatedAdd(
-                                    Math.max(0L, engine.waitingQueryLen()),
-                                    Math.max(0L, engine.runningQueryLen())),
-                            individualPhases,
-                            batchPhases,
-                            facts);
-            schedulingInputsChanged = nextUnknown != unknownEngineRequestCount;
-            for (var observed : individualPhases.entrySet()) {
-                schedulingInputsChanged |= observed.getKey().individualPhase != observed.getValue();
-                observed.getKey().observeIndividualPhase(observed.getValue(), nowMs);
-            }
-            for (var observed : batchPhases.entrySet()) {
-                schedulingInputsChanged |= observed.getKey().servicePhase != observed.getValue();
-                observed.getKey().observePhase(observed.getValue(), nowMs);
-            }
-            capacityReleased = nextUnknown < unknownEngineRequestCount;
-            unknownEngineRequestCount = nextUnknown;
+            ActiveObservation active = prepareActiveObservationsUnderLock(observation.engine(), Map.of(), facts);
+            capacityReleased = active.unknownRequests < unknownEngineRequestCount;
+            schedulingInputsChanged = applyActiveObservationsUnderLock(active, clock.getAsLong());
             if (schedulingInputsChanged) {
                 committedWorkCapture = null;
                 recordMutationUnderLock();
@@ -1326,108 +1225,90 @@ public final class PrefillState {
         return new HeartbeatReconciliation(facts, schedulingInputsChanged);
     }
 
-    /**
-     * Materialize every externally observable status fact before the first
-     * canonical entry is settled. The returned object is the exact outcome
-     * later published by the endpoint; reduction only binds a callback failure.
-     */
-    private StatusReconciliation prepareStatusReconciliationUnderLock(
-            Map<Long, TerminalObservation> terminals,
-            Map<String, WorkerStatus.TaskObservation> activeTasks,
-            IdentityHashMap<BatchWork, BatchReduction> reductions) {
-        requireLock();
-        List<WorkerStatusFact> schedulerFacts = new ArrayList<>(
-                terminals.size() + activeTasks.size());
-        for (TerminalObservation terminal : terminals.values()) {
-            WorkerStatusFact fact = terminalFact(
-                    requests.get(terminal.requestId), terminal);
-            if (fact != null) {
-                schedulerFacts.add(fact);
-            }
-        }
-        for (WorkerStatus.TaskObservation task : activeTasks.values()) {
-            if (terminals.containsKey(task.requestId())) {
-                continue;
-            }
-            WorkerStatusFact fact = activeStatusFactUnderLock(task);
-            if (fact != null) {
-                schedulerFacts.add(fact);
-            }
-        }
+    private record ActiveObservation(long unknownRequests,
+                                     IdentityHashMap<RequestEntry, Phase> individuals,
+                                     IdentityHashMap<BatchWork, Phase> batches) { }
 
-        List<BatchCompletion> completions = new ArrayList<>(
-                Math.min(terminals.size(), reductions.size()));
-        for (BatchReduction reduction : reductions.values()) {
-            BatchCompletion completion = reduction.projectedCompletion(terminals);
-            if (completion != null) {
-                completions.add(completion);
-            }
+    /** Both heartbeat and full status apply the same exact activity observations. */
+    private boolean applyActiveObservationsUnderLock(ActiveObservation active, long nowMs) {
+        boolean changed = active.unknownRequests != unknownEngineRequestCount;
+        for (var observed : active.individuals.entrySet()) {
+            changed |= observed.getKey().individualPhase != observed.getValue();
+            observed.getKey().observeIndividualPhase(observed.getValue(), nowMs);
         }
-        return new StatusReconciliation(
-                schedulerFacts, completions, null);
+        for (var observed : active.batches.entrySet()) {
+            changed |= observed.getKey().servicePhase != observed.getValue();
+            observed.getKey().observePhase(observed.getValue(), nowMs);
+        }
+        unknownEngineRequestCount = active.unknownRequests;
+        return changed;
     }
 
-    /** Resolve activity only through the exact committed ledger identity. */
-    private WorkerStatusFact activeStatusFactUnderLock(
-            WorkerStatus.TaskObservation task) {
-        requireLock();
-        RequestEntry entry = requests.get(task.requestId());
-        if (entry == null
-                || entry.isActive()
-                || !matchesObservedBatch(entry, task.batchId())
-                || entry.committedItem == null
-                || task.isPriorityCancelOverlayOnly()) {
-            return null;
-        }
-        return WorkerStatusFact.active(entry.committedItem);
-    }
-
-    private void prepareBatchPredictionsUnderLock(
-            Set<BatchReduction> changedBatches,
+    /** Prepare predictions and completed-batch facts before mutating any owner. */
+    private List<BatchCompletion> prepareBatchOutcomesUnderLock(
+            Map<BatchWork, Set<RequestEntry>> changedBatches,
             Map<Long, TerminalObservation> terminals,
             IdentityHashMap<BatchWork, Phase> batchPhases,
-            ToLongFunction<List<ScheduledRequest>> repredictor,
+            ToLongFunction<List<RequestRoute>> repredictor,
             IdentityHashMap<BatchWork, Long> predictions) {
         requireLock();
-        for (BatchReduction reduction : changedBatches) {
-            BatchWork batch = reduction.batch;
-            if (batch.executionStarted
-                    || batchPhases.get(batch) == Phase.ENGINE_RUNNING) {
-                continue;
-            }
-            List<ScheduledRequest> survivors = new ArrayList<>(
-                    reduction.members.size());
-            boolean executionObserved = false;
-            for (RequestEntry member : reduction.members) {
+        List<BatchCompletion> completions = new ArrayList<>(Math.min(terminals.size(), changedBatches.size()));
+        for (var changed : changedBatches.entrySet()) {
+            BatchWork batch = changed.getKey();
+            Set<RequestEntry> members = changed.getValue();
+            boolean repack = !batch.executionStarted
+                    && batchPhases.get(batch) != Phase.ENGINE_RUNNING;
+            List<RequestRoute> survivors = repack
+                    ? new ArrayList<>(members.size()) : List.of();
+            boolean allTerminal = true;
+            long maxExecutionTimeMs = batch.maxExecutionTimeMs;
+            boolean successfulCompletion = batch.successfulCompletion;
+            boolean learningEligible = batch.learningEligible;
+            for (RequestEntry member : members) {
                 TerminalObservation terminal = terminals.get(member.requestId);
                 if (terminal == null) {
-                    survivors.add(member.committedItem);
+                    allTerminal = false;
+                    if (repack) {
+                        survivors.add(member.item);
+                    }
                 } else {
                     // Completion can arrive before the first RUNNING observation.
-                    executionObserved |= terminal.errorCode == 0L || terminal.executionTimeMs > 0L;
+                    repack &= terminal.errorCode != 0L && terminal.executionTimeMs <= 0L;
+                    maxExecutionTimeMs = Math.max(maxExecutionTimeMs, terminal.executionTimeMs);
+                    successfulCompletion |= terminal.workerObserved && terminal.errorCode == 0L;
+                    learningEligible &= terminal.workerObserved && terminal.errorCode == 0L;
+                }
+                if (!allTerminal && !repack) {
+                    break;
                 }
             }
-            if (executionObserved || survivors.isEmpty()) {
-                continue;
+            if (allTerminal) {
+                completions.add(new BatchCompletion(
+                        batch.lease.batchId,
+                        batch.originalFeatures,
+                        batch.originalPredictionMs,
+                        maxExecutionTimeMs,
+                        successfulCompletion,
+                        learningEligible));
+            } else if (repack) {
+                survivors.sort(Comparator.comparingLong(RequestRoute::enqueueSeq)
+                        .thenComparingLong(RequestRoute::requestId));
+                predictions.put(batch, repredictor.applyAsLong(survivors));
             }
-            survivors.sort(Comparator.comparingLong(ScheduledRequest::enqueueSeq)
-                    .thenComparingLong(ScheduledRequest::requestId));
-            long prediction = repredictor.applyAsLong(survivors);
-            predictions.put(batch, prediction);
         }
+        return completions;
     }
 
-    private long prepareActiveObservationsUnderLock(
-            Map<String, WorkerStatus.TaskObservation> activeTasks,
+    private ActiveObservation prepareActiveObservationsUnderLock(
+            WorkerStatus.EngineObservation engine,
             Map<Long, TerminalObservation> terminals,
-            long reportedActive,
-            IdentityHashMap<RequestEntry, Phase> individualPhases,
-            IdentityHashMap<BatchWork, Phase> batchPhases,
             List<WorkerStatusFact> activeFacts) {
         requireLock();
+        IdentityHashMap<RequestEntry, Phase> individualPhases = new IdentityHashMap<>();
+        IdentityHashMap<BatchWork, Phase> batchPhases = new IdentityHashMap<>();
         Set<Long> unknownDetailed = new HashSet<>();
         Set<Long> knownObserved = new HashSet<>();
-        for (WorkerStatus.TaskObservation task : activeTasks.values()) {
+        for (WorkerStatus.TaskObservation task : engine.runningTaskList().values()) {
             if (terminals.containsKey(task.requestId())) {
                 continue;
             }
@@ -1440,8 +1321,8 @@ public final class PrefillState {
             }
             if (!task.isPriorityCancelOverlayOnly()) {
                 knownObserved.add(task.requestId());
-                if (activeFacts != null && !entry.isActive()) {
-                    activeFacts.add(WorkerStatusFact.active(entry.committedItem));
+                if (!entry.isActive() && entry.item != null) {
+                    activeFacts.add(WorkerStatusFact.active(entry.item));
                 }
             }
             if (entry.isActive()) {
@@ -1458,136 +1339,85 @@ public final class PrefillState {
                         PrefillState::strongerEnginePhase);
             }
         }
-        long scalarUnknown = Math.max(
-                0L, reportedActive - knownObserved.size());
-        return Math.max(unknownDetailed.size(), scalarUnknown);
+        long reportedActive = saturatedAdd(Math.max(0L, engine.waitingQueryLen()),
+                Math.max(0L, engine.runningQueryLen()));
+        long scalarUnknown = Math.max(0L, reportedActive - knownObserved.size());
+        return new ActiveObservation(Math.max(unknownDetailed.size(), scalarUnknown),
+                individualPhases, batchPhases);
     }
 
-    private StatusReconciliation reconcileEngineStatus(
-            WorkerStatus.EngineObservation engine,
-            Map<String, WorkerStatus.TaskObservation> finishedTasks,
-            ToLongFunction<List<ScheduledRequest>> repredictor,
+    /**
+     * Reconcile ownership and publish its matching WorkerStatus before the
+     * canonical queue lock is released. Projection readers therefore observe
+     * either the previous pair or the fully reduced new pair.
+     */
+    public StatusReconciliation reconcileWorkerStatus(
+            WorkerStatus.StatusObservation observation,
+            ToLongFunction<List<RequestRoute>> repredictor,
             Runnable committedPublication,
             Runnable failedReduction) {
         boolean capacityReleased = false;
-        boolean canonicalMutationStarted = false;
+        WorkerStatus.EngineObservation engine = observation.engine();
         StatusReconciliation outcome = null;
         lock.lock();
         try {
             long nowMs = clock.getAsLong();
-            IdentityHashMap<BatchWork, BatchReduction> reductions =
-                    batchReductionsUnderLock();
-            Map<Long, TerminalObservation> terminals = terminalObservationsUnderLock(
-                    finishedTasks);
-            Map<String, WorkerStatus.TaskObservation> activeTasks =
-                    engine.runningTaskList();
-            IdentityHashMap<RequestEntry, TerminalObservation> settlements =
-                    new IdentityHashMap<>(terminals.size());
-            Set<BatchReduction> changedBatches = java.util.Collections.newSetFromMap(
-                    new IdentityHashMap<>());
-            IdentityHashMap<BatchWork, Phase> batchPhases = new IdentityHashMap<>();
+            Map<Long, TerminalObservation> terminals = terminalObservationsUnderLock(observation.finishedTasks());
+            List<WorkerStatusFact> facts = new ArrayList<>(terminals.size() + engine.runningTaskList().size());
+            Set<BatchWork> changedBatches = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
             for (TerminalObservation terminal : terminals.values()) {
-                RequestEntry entry = requests.get(terminal.requestId);
-                if (entry == null
-                        || settlements.put(entry, terminal) != null) {
-                    throw new IllegalStateException(
-                            "status terminal lost its exact owner request_id="
-                                    + terminal.requestId);
-                }
-                BatchReduction reduction = entry.batchWork == null
-                        ? null : reductions.get(entry.batchWork);
-                if (reduction != null) {
-                    changedBatches.add(reduction);
+                WorkerStatusFact fact = terminalFact(terminal.owner, terminal);
+                if (fact != null) { facts.add(fact); }
+                if (terminal.owner.batchWork != null) {
+                    changedBatches.add(terminal.owner.batchWork);
                 }
             }
-            long reportedActive = saturatedAdd(
-                    Math.max(0L, engine.waitingQueryLen()),
-                    Math.max(0L, engine.runningQueryLen()));
-            IdentityHashMap<RequestEntry, Phase> individualPhases =
-                    new IdentityHashMap<>();
-            long nextUnknown =
-                    prepareActiveObservationsUnderLock(
-                            activeTasks, terminals, reportedActive,
-                            individualPhases, batchPhases, null);
+            IdentityHashMap<BatchWork, Set<RequestEntry>> reductions = changedBatches.isEmpty()
+                    ? new IdentityHashMap<>(0) : batchReductionsUnderLock(changedBatches::contains);
+            ActiveObservation active = prepareActiveObservationsUnderLock(engine, terminals, facts);
             IdentityHashMap<BatchWork, Long> predictions = new IdentityHashMap<>();
-            prepareBatchPredictionsUnderLock(
-                    changedBatches, terminals, batchPhases, repredictor, predictions);
-            outcome = prepareStatusReconciliationUnderLock(
-                    terminals, activeTasks, reductions);
+            List<BatchCompletion> completions = prepareBatchOutcomesUnderLock(
+                    reductions, terminals, active.batches, repredictor, predictions);
+            // Freeze all externally observable facts before settling the first owner.
+            outcome = new StatusReconciliation(facts, completions, null);
 
             // Everything below this boundary is assignment/removal against
             // exact prevalidated identities. Any invariant failure is captured
             // into the already materialized outcome and forces retirement.
-            canonicalMutationStarted = true;
             committedWorkCapture = null;
             recordMutationUnderLock();
-            for (Map.Entry<RequestEntry, TerminalObservation> settlement
-                    : settlements.entrySet()) {
-                RequestEntry entry = settlement.getKey();
-                capacityReleased |= settleUnderLock(
-                        entry,
-                        settlement.getValue(),
-                        entry.batchWork == null
-                                ? null : reductions.get(entry.batchWork),
-                        null,
-                        nowMs);
+            for (TerminalObservation terminal : terminals.values()) {
+                RequestEntry entry = terminal.owner;
+                capacityReleased |= settleUnderLock(entry, terminal,
+                        entry.batchWork == null ? null : reductions.get(entry.batchWork), nowMs);
             }
-            individualPhases.forEach(
-                    (entry, phase) -> entry.observeIndividualPhase(
-                            phase, nowMs));
-            batchPhases.forEach(
-                    (batch, phase) -> batch.observePhase(phase, nowMs));
+            capacityReleased |= active.unknownRequests < unknownEngineRequestCount;
+            applyActiveObservationsUnderLock(active, nowMs);
             predictions.forEach((batch, prediction) -> {
                 batch.remainingWorkMs = prediction;
                 batch.phaseBaseMs = nowMs;
                 batch.touch(nowMs);
             });
-            capacityReleased |= nextUnknown < unknownEngineRequestCount;
-            unknownEngineRequestCount = nextUnknown;
             // Status reduction changes counts after invalidating the old work revision.
             publishRequestCountUnderLock();
+            committedPublication.run();
+        } catch (Throwable failure) {
+            // A materialized outcome marks the mutation boundary. Preserve its exact facts
+            // even if reduction/publication fails, so retirement can still settle owners.
+            if (outcome != null) {
+                outcome = new StatusReconciliation(outcome.schedulerFacts(), outcome.batchCompletions(), failure);
+            }
             try {
-                committedPublication.run();
-            } catch (Throwable failure) {
-                outcome = withPublicationFailure(outcome, failure);
-                try {
-                    failedReduction.run();
-                } catch (Throwable failClosedFailure) {
-                    // The first publication failure is the canonical outcome.
-                }
+                failedReduction.run();
+            } catch (Throwable failClosedFailure) {
+                if (outcome == null) { Failures.append(failure, failClosedFailure); }
             }
-        } catch (RuntimeException | Error failure) {
-            if (canonicalMutationStarted && outcome != null) {
-                outcome = withPublicationFailure(outcome, failure);
-                try {
-                    failedReduction.run();
-                } catch (Throwable failClosedFailure) {
-                    // The first reduction failure is the canonical outcome.
-                }
-            } else {
-                try {
-                    failedReduction.run();
-                } catch (Throwable failClosedFailure) {
-                    failure.addSuppressed(failClosedFailure);
-                }
-                throw failure;
-            }
+            if (outcome == null) { throw Failures.propagate(failure, "Prefill status reduction failed"); }
         } finally {
             lock.unlock();
             notifyCapacityAvailable(capacityReleased);
         }
         return outcome;
-    }
-
-    private static StatusReconciliation withPublicationFailure(
-            StatusReconciliation outcome,
-            Throwable failure) {
-        return outcome.publicationFailure() != null
-                ? outcome
-                : new StatusReconciliation(
-                        outcome.schedulerFacts(),
-                        outcome.batchCompletions(),
-                        failure);
     }
 
     /**
@@ -1602,7 +1432,7 @@ public final class PrefillState {
      * endpoint close total if that earlier invariant check failed.</p>
      */
     public Retirement retireGenerationOwnership() {
-        List<ScheduledRequest> ownedItems = new ArrayList<>();
+        List<RequestRoute> ownedItems = new ArrayList<>();
         List<BatchCompletion> completions = new ArrayList<>();
         List<EndpointGenerationLifecycle.HandoffPermit> orphanedHandoffs =
                 new ArrayList<>();
@@ -1614,29 +1444,8 @@ public final class PrefillState {
         Retirement plannedRetirement;
         lock.lock();
         try {
-            Set<ScheduledRequest> canonicalActive = java.util.Collections.newSetFromMap(
-                    new IdentityHashMap<>());
-            for (Map.Entry<Long, RequestEntry> canonical : requests.entrySet()) {
-                RequestEntry entry = canonical.getValue();
-                if (canonical.getKey() != entry.requestId) {
-                    invariantFailure = appendRetirementInvariant(
-                            invariantFailure,
-                            "request table key does not match request entry");
-                }
-                ScheduledRequest item = entry.isActive() ? entry.activeItem : entry.committedItem;
-                if (item == null) {
-                    invariantFailure = appendRetirementInvariant(invariantFailure,
-                            "retirement owner has no ScheduledRequest request_id=" + entry.requestId);
-                } else {
-                    ownedItems.add(item);
-                    if (entry.isActive() && entry.queueMembership == QueueMembership.WAITING) {
-                        canonicalActive.add(item);
-                    } else if (activeIndex.contains(item)) {
-                        invariantFailure = appendRetirementInvariant(invariantFailure,
-                                "unindexed owner remains in waiting index request_id=" + entry.requestId);
-                    }
-                }
-
+            for (RequestEntry entry : requests.values()) {
+                ownedItems.add(entry.item);
                 if (entry.reservation != null) {
                     leases.add(entry.reservation);
                 }
@@ -1646,66 +1455,33 @@ public final class PrefillState {
                 }
             }
 
-            if (activeIndex.size() != canonicalActive.size()) {
-                invariantFailure = appendRetirementInvariant(
-                        invariantFailure,
-                        "ACTIVE index size does not match canonical ACTIVE owners");
-            }
-            for (ScheduledRequest indexed : activeIndex) {
-                if (!canonicalActive.contains(indexed)) {
-                    invariantFailure = appendRetirementInvariant(
-                            invariantFailure,
-                            "ACTIVE index contains a non-canonical item request_id="
-                                    + indexed.requestId());
-                }
-            }
-
-            int observedBatchLeases = 0;
             for (Reservation lease : leases) {
-                if (lease instanceof RouteReservation) {
-                    if (lease.state != LeaseState.OPEN
-                            && lease.state != LeaseState.OWNED) {
-                        invariantFailure = appendRetirementInvariant(
-                                invariantFailure,
-                                "canonical retirement owner has an invalid route-reservation state");
-                    }
-                } else if (lease instanceof BatchReservation) {
-                    observedBatchLeases++;
-                    BatchReservation batch = (BatchReservation) lease;
+                if (lease instanceof BatchReservation batch) {
                     if (batch.state == LeaseState.OPEN) {
                         if (batch.generationHandoff == null) {
-                            invariantFailure = appendRetirementInvariant(
-                                    invariantFailure,
-                                    "OPEN Prefill batch lease lost its generation handoff");
+                            invariantFailure = Failures.append(invariantFailure,
+                                    new IllegalStateException(
+                                            "OPEN Prefill batch lease lost its generation handoff"));
                         } else {
                             orphanedHandoffs.add(batch.generationHandoff);
-                            invariantFailure = appendRetirementInvariant(
-                                    invariantFailure,
-                                    "retirement reached an OPEN Prefill batch lease");
+                            invariantFailure = Failures.append(invariantFailure,
+                                    new IllegalStateException(
+                                            "retirement reached an OPEN Prefill batch lease"));
                         }
                     } else if (batch.state != LeaseState.OWNED
                             || batch.generationHandoff != null) {
-                        invariantFailure = appendRetirementInvariant(
-                                invariantFailure,
-                                "canonical retirement owner has an invalid batch lease state");
+                        invariantFailure = Failures.append(invariantFailure,
+                                new IllegalStateException(
+                                        "canonical retirement owner has an invalid batch lease state"));
                     }
-                } else {
-                    invariantFailure = appendRetirementInvariant(
-                            invariantFailure,
-                            "retirement found an unknown Prefill lease type");
                 }
-            }
-            if (batchLeasesInUse != observedBatchLeases) {
-                invariantFailure = appendRetirementInvariant(
-                        invariantFailure,
-                        "batch capacity does not match canonical retirement leases");
             }
 
             for (BatchWork batch : batches) {
                 completions.add(batch.retirementCompletion());
             }
-            ownedItems.sort(Comparator.comparingLong(ScheduledRequest::enqueueSeq)
-                    .thenComparingLong(ScheduledRequest::requestId));
+            ownedItems.sort(Comparator.comparingLong(RequestRoute::enqueueSeq)
+                    .thenComparingLong(RequestRoute::requestId));
             completions.sort(Comparator.comparingLong(BatchCompletion::batchId));
             plannedRetirement = new Retirement(
                     ownedItems,
@@ -1715,8 +1491,7 @@ public final class PrefillState {
             // Canonical retirement commit. Everything which may allocate or
             // validate has completed above this line.
             for (RequestEntry entry : requests.values()) {
-                entry.activeItem = null;
-                entry.committedItem = null;
+                entry.item = null;
                 entry.reservation = null;
                 entry.batchWork = null;
                 entry.individualPhase = null;
@@ -1752,74 +1527,40 @@ public final class PrefillState {
         return plannedRetirement;
     }
 
-    private static Throwable appendRetirementInvariant(
-            Throwable first,
-            String message) {
-        IllegalStateException next = new IllegalStateException(message);
-        if (first == null) {
-            return next;
-        }
-        first.addSuppressed(next);
-        return first;
-    }
-
-    public int evictExpiredIndividuals(
-            long ttlMs, java.util.function.LongPredicate retainForSchedulerCleanup) {
+    /** One orphan pass: a retained member protects its whole batch. Counts batches and individuals. */
+    public int evictExpiredInflight(long ttlMs, java.util.function.LongPredicate retainForSchedulerCleanup) {
         int evicted = 0;
         boolean capacityReleased = false;
         lock.lock();
         try {
             long nowMs = clock.getAsLong();
-            List<RequestEntry> candidates = new ArrayList<>();
-            for (RequestEntry entry : requests.values()) {
-                if (entry.batchWork == null
-                        && !entry.isActive()
-                        && nowMs - entry.lastObservedAtMs >= Math.max(0L, ttlMs)
-                        && !retainForSchedulerCleanup.test(entry.requestId)) {
-                    candidates.add(entry);
-                }
-            }
-            for (RequestEntry entry : candidates) {
-                capacityReleased |= settleUnderLock(
-                        entry,
-                        TerminalObservation.external(entry.requestId),
-                        null,
-                        new ArrayList<>(0));
-            }
-            evicted = candidates.size();
-        } finally {
-            lock.unlock();
-            notifyCapacityAvailable(capacityReleased);
-        }
-        return evicted;
-    }
-
-    public int evictExpiredBatches(
-            long ttlMs, java.util.function.LongPredicate retainForSchedulerCleanup) {
-        int evicted = 0;
-        boolean capacityReleased = false;
-        lock.lock();
-        try {
-            long nowMs = clock.getAsLong();
-            for (BatchReduction reduction
-                    : batchReductionsUnderLock().values()) {
-                boolean retained = nowMs - reduction.batch.lastObservedAtMs
-                        < Math.max(0L, ttlMs);
-                for (RequestEntry entry : reduction.members) {
+            long ttl = Math.max(0L, ttlMs);
+            for (var reduced : batchReductionsUnderLock(batch -> true).entrySet()) {
+                Set<RequestEntry> members = reduced.getValue();
+                boolean retained = nowMs - reduced.getKey().lastObservedAtMs < ttl;
+                for (RequestEntry entry : members) {
                     retained |= retainForSchedulerCleanup.test(entry.requestId);
                 }
-                if (retained) {
-                    continue;
-                }
-                for (RequestEntry entry : List.copyOf(reduction.members)) {
-                    capacityReleased |= settleUnderLock(
-                            entry,
-                            TerminalObservation.external(entry.requestId),
-                            reduction,
-                            new ArrayList<>(0));
+                if (retained) { continue; }
+                for (RequestEntry entry : List.copyOf(members)) {
+                    capacityReleased |= settleUnderLock(entry,
+                            TerminalObservation.external(entry), members, nowMs);
                 }
                 evicted++;
             }
+            List<RequestEntry> individuals = new ArrayList<>();
+            for (RequestEntry entry : requests.values()) {
+                if (entry.batchWork == null && !entry.isActive()
+                        && nowMs - entry.phaseBaseMs >= ttl
+                        && !retainForSchedulerCleanup.test(entry.requestId)) {
+                    individuals.add(entry);
+                }
+            }
+            for (RequestEntry entry : individuals) {
+                capacityReleased |= settleUnderLock(entry,
+                        TerminalObservation.external(entry), null, nowMs);
+            }
+            evicted += individuals.size();
         } finally {
             lock.unlock();
             notifyCapacityAvailable(capacityReleased);
@@ -1845,7 +1586,7 @@ public final class PrefillState {
                     individual++;
                     maxAgeMs = Math.max(
                             maxAgeMs,
-                            Math.max(0L, nowMs - entry.lastObservedAtMs));
+                            Math.max(0L, nowMs - entry.phaseBaseMs));
                 } else {
                     batches.add(entry.batchWork);
                 }
@@ -1889,9 +1630,11 @@ public final class PrefillState {
 
     public Snapshot snapshotUnderLock() {
         requireLock();
+        ProjectionVersion version = new ProjectionVersion(
+                activeIndex.version(), schedulingInputVersion, mutationVersion);
         long nowMs = clock.getAsLong();
         return new Snapshot(
-                nowMs,
+                version, nowMs,
                 activeIndex.capture(),
                 captureWorkUnderLock(nowMs));
     }
@@ -1915,13 +1658,13 @@ public final class PrefillState {
         return committedWorkCapture;
     }
 
-    private WorkSnapshot capturePrecedingWorkUnderLock(List<ScheduledRequest> members, long nowMs) {
+    private WorkCapture capturePrecedingWorkUnderLock(List<RequestRoute> members, long nowMs) {
         requireLock();
         Set<RequestEntry> excluded = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
-        for (ScheduledRequest member : members) {
+        for (RequestRoute member : members) {
             excluded.add(requests.get(member.requestId()));
         }
-        return captureCurrentWorkUnderLock(nowMs, excluded).materialize();
+        return captureCurrentWorkUnderLock(nowMs, excluded);
     }
 
     private WorkCapture captureCurrentWorkUnderLock(long nowMs) {
@@ -1978,35 +1721,18 @@ public final class PrefillState {
     private boolean settleUnderLock(
             RequestEntry entry,
             TerminalObservation terminal,
-            BatchReduction reduction,
-            List<BatchCompletion> completions) {
-        return settleUnderLock(
-                entry,
-                terminal,
-                reduction,
-                completions,
-                clock.getAsLong());
-    }
-
-    private boolean settleUnderLock(
-            RequestEntry entry,
-            TerminalObservation terminal,
-            BatchReduction reduction,
-            List<BatchCompletion> completions,
+            Set<RequestEntry> members,
             long nowMs) {
         requireLock();
         BatchWork batch = entry.batchWork;
-        boolean lastBatchMember = false;
         Reservation lease;
         if (batch != null) {
-            if (reduction == null || reduction.batch != batch
-                    || !reduction.members.contains(entry)) {
+            if (members == null || !members.contains(entry)) {
                 throw new IllegalStateException(
                         "missing batch reduction for live request_id="
                                 + entry.requestId);
             }
-            lastBatchMember = reduction.members.size() == 1;
-            lease = lastBatchMember ? batch.lease : null;
+            lease = members.size() == 1 ? batch.lease : null;
         } else {
             lease = entry.reservation;
         }
@@ -2017,7 +1743,7 @@ public final class PrefillState {
         }
         if (batch != null) {
             batch.observeTerminal(terminal, nowMs);
-            reduction.remove(entry);
+            members.remove(entry);
         }
         if (!removeRequestUnderLock(entry.requestId, entry)) {
             throw new IllegalStateException(
@@ -2028,9 +1754,6 @@ public final class PrefillState {
         recordMutationUnderLock();
         if (lease != null) {
             closeOwnedLeaseUnderLock(lease);
-        }
-        if (lastBatchMember && completions != null) {
-            completions.add(batch.completion());
         }
         return true;
     }
@@ -2044,8 +1767,7 @@ public final class PrefillState {
             if (entry == null || !matchesObservedBatch(entry, task.batchId())) {
                 continue;
             }
-            TerminalObservation terminal = TerminalObservation.from(
-                    task, entry.batchWork != null);
+            TerminalObservation terminal = TerminalObservation.from(entry, task);
             terminals.merge(
                     task.requestId(), terminal, TerminalObservation::merge);
         }
@@ -2055,7 +1777,7 @@ public final class PrefillState {
     private static WorkerStatusFact terminalFact(
             RequestEntry entry,
             TerminalObservation terminal) {
-        if (entry == null || entry.committedItem == null
+        if (entry == null || entry.isActive() || entry.item == null
                 || !terminal.workerObserved) {
             return null;
         }
@@ -2068,7 +1790,7 @@ public final class PrefillState {
                 ? WorkerStatusFact.Kind.PRIORITY_CANCELED
                 : WorkerStatusFact.Kind.FAILED;
         return WorkerStatusFact.terminal(
-                entry.committedItem, kind, terminal.errorCode);
+                entry.item, kind, terminal.errorCode);
     }
 
     private static boolean matchesObservedBatch(
@@ -2085,15 +1807,15 @@ public final class PrefillState {
                 ? Phase.ENGINE_RUNNING : Phase.ENGINE_QUEUED;
     }
 
-    private IdentityHashMap<BatchWork, BatchReduction>
-            batchReductionsUnderLock() {
+    private IdentityHashMap<BatchWork, Set<RequestEntry>>
+            batchReductionsUnderLock(Predicate<BatchWork> included) {
         requireLock();
-        IdentityHashMap<BatchWork, BatchReduction> reductions =
+        IdentityHashMap<BatchWork, Set<RequestEntry>> reductions =
                 new IdentityHashMap<>();
         for (RequestEntry entry : requests.values()) {
-            if (entry.batchWork != null) {
+            if (entry.batchWork != null && included.test(entry.batchWork)) {
                 reductions.computeIfAbsent(
-                                entry.batchWork, BatchReduction::new)
+                                entry.batchWork, ignored -> java.util.Collections.newSetFromMap(new IdentityHashMap<>()))
                         .add(entry);
             }
         }
@@ -2101,15 +1823,15 @@ public final class PrefillState {
     }
 
     /** Build only the exact batch needed by a single-item terminal path. */
-    private BatchReduction batchReductionUnderLock(BatchWork exactBatch) {
+    private Set<RequestEntry> batchMembersUnderLock(BatchWork exactBatch) {
         requireLock();
-        BatchReduction reduction = new BatchReduction(exactBatch);
+        Set<RequestEntry> members = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (RequestEntry entry : requests.values()) {
             if (entry.batchWork == exactBatch) {
-                reduction.add(entry);
+                members.add(entry);
             }
         }
-        return reduction;
+        return members;
     }
 
     private BatchReservation findBatchReservationUnderLock(long batchId) {
@@ -2135,31 +1857,23 @@ public final class PrefillState {
             throw new IllegalStateException(
                     "Prefill lease rollback cannot run under queueLock");
         }
-        EndpointGenerationLifecycle.HandoffPermit generationHandoff = null;
-        boolean capacityReleased = false;
+        EndpointGenerationLifecycle.HandoffPermit generationHandoff;
         lock.lock();
         try {
-            if (lease.state == LeaseState.OPEN) {
-                generationHandoff = closeOpenLeaseUnderLock(lease);
-                capacityReleased = true;
+            if (lease.state != LeaseState.OPEN) {
+                return;
             }
+            generationHandoff = closeOpenLeaseUnderLock(lease);
         } finally {
             lock.unlock();
         }
-        if (!capacityReleased) {
-            return;
-        }
-        Throwable failure = null;
         try {
             if (generationHandoff != null) {
-                generationHandoff.close();
+                Failures.rethrow(Failures.close(generationHandoff), "Prefill exact capacity cleanup failed");
             }
-        } catch (Throwable handoffFailure) {
-            failure = handoffFailure;
         } finally {
             notifyCapacityAvailable(true);
         }
-        rethrowCleanupFailure(failure);
     }
 
     private void notifyCapacityAvailable(boolean capacityReleased) {
@@ -2178,12 +1892,6 @@ public final class PrefillState {
                 // make the caller lose its prebuilt terminal facts.
             }
         }
-    }
-
-    private EndpointGenerationLifecycle.HandoffPermit openGenerationHandoff(
-            BatchReservation lease) {
-        requireLock();
-        return lease.generationHandoff;
     }
 
     /** Move the exact handoff out of the OPEN admission before commit publishes. */
@@ -2265,19 +1973,6 @@ public final class PrefillState {
         }
     }
 
-    private static void rethrowCleanupFailure(Throwable failure) {
-        if (failure instanceof RuntimeException runtimeFailure) {
-            throw runtimeFailure;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        if (failure != null) {
-            throw new IllegalStateException(
-                    "Prefill exact capacity cleanup failed", failure);
-        }
-    }
-
     private RequestEntry openLeaseOwnerUnderLock(Reservation lease) {
         requireLock();
         RequestEntry originalOwner = lease.originalOwner;
@@ -2298,19 +1993,15 @@ public final class PrefillState {
         return null;
     }
 
-    private BatchWork findBatchWorkUnderLock(long batchId) {
-        for (RequestEntry entry : requests.values()) {
-            if (entry.batchWork != null
-                    && entry.batchWork.lease.batchId == batchId) {
-                return entry.batchWork;
-            }
-        }
-        return null;
-    }
-
     private void requireLock() {
         requireState(lock.isHeldByCurrentThread(),
                 "Prefill ownership requires queueLock");
+    }
+
+    private static void requireState(boolean condition, String message, long requestId) {
+        if (!condition) {
+            throw new IllegalStateException(message + requestId);
+        }
     }
 
     private static void requireState(boolean condition, String message) {

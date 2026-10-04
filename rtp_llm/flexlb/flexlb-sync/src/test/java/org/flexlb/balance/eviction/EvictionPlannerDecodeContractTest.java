@@ -1,24 +1,29 @@
 package org.flexlb.balance.eviction;
 
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.dao.master.WorkerStatus;
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.decodeRequirements;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
-import org.flexlb.balance.eviction.EngineCancelChannel.CancelAck;
-import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import java.math.BigInteger;
 
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Exact-value contracts for {@link EvictionPlanner#planDecode}: the frozen
@@ -38,23 +43,34 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 @DisplayName("EvictionPlanner.planDecode recompute contracts")
 class EvictionPlannerDecodeContractTest {
 
+    @Test
+    void scalarDiagnosticCostUsesExactHarmAndSaturatesAtLongBoundary() {
+        int[] priorities = {1, 30, 39, 40, 50, 60, 70, 100};
+        long[] factors = {1L, 1L, 1L, 1_024L, 1_048_576L, 1_073_741_824L,
+                1_099_511_627_776L, 1_099_511_627_776L};
+        BigInteger maximum = BigInteger.valueOf(Long.MAX_VALUE);
+        for (int i = 0; i < priorities.length; i++) {
+            BigInteger factor = BigInteger.valueOf(factors[i]);
+            BigInteger boundary = maximum.divide(factor);
+            for (BigInteger harm : List.of(BigInteger.ZERO, BigInteger.ONE, boundary,
+                    boundary.add(BigInteger.ONE), maximum, maximum.multiply(maximum))) {
+                var profile = PriorityHarmProfile.builder().add(priorities[i], harm).build();
+                assertEquals(harm.multiply(factor).min(maximum).longValueExact(), profile.totalCost());
+            }
+        }
+        var lower = PriorityHarmProfile.builder().add(30, BigInteger.valueOf(5)).build();
+        var higher = PriorityHarmProfile.builder().add(40, BigInteger.valueOf(3)).build();
+        assertEquals(3_077L, lower.plus(higher).totalCost());
+        assertEquals(5L, lower.totalCost());
+        assertEquals(0L, PriorityHarmProfile.empty().totalCost());
+        var saturated = PriorityHarmProfile.builder().add(30, maximum).build();
+        assertEquals(Long.MAX_VALUE, saturated.plus(higher).totalCost());
+        assertTrue(saturated.compareTo(higher) < 0, "scalar saturation must not decide exact priority ordering");
+    }
+
     private static final long H_SLOT = 4L;
     private static final long H_KV = 8L;
-    private static final EngineCancelChannel SUPPORTING_CHANNEL =
-            new EngineCancelChannel() {
-                @Override
-                public boolean isSupported(DecodeEndpoint endpoint) {
-                    return true;
-                }
-
-                @Override
-                public CompletableFuture<CancelAck> cancel(
-                        CancelTarget target, long a, long b) {
-                    return CompletableFuture.completedFuture(CancelAck.ACCEPTED);
-                }
-            };
-
-    private static PreemptionConfig engineOwned() {
+    private static org.flexlb.config.PreemptionConfig engineOwned() {
         PreemptionConfig p = new PreemptionConfig();
         p.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_ENGINE_OWNED));
         return p;
@@ -64,30 +80,86 @@ class EvictionPlannerDecodeContractTest {
         return new DecodeRequestView(
                 id, priority, kvTokens, kvTokens,
                 DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
-                true, 0L, false, false);
+                true, 0L, false);
     }
 
-    private static DecodeEndpointSnapshot endpoint(
+    private static EndpointFixture endpoint(
             long realKvAvailable, long realKvTotal,
             int engineLoad, long concurrencyLimit,
             List<DecodeRequestView> accepted) {
-        return new DecodeEndpointSnapshot(
-                null, "decode-a", new DecodeEndpoint.AdmissionCapacity(concurrencyLimit, 100L),
-                new DecodeEndpoint.CapacityUsage(
-                        engineLoad, realKvTotal, realKvAvailable, 0L,
-                        Math.max(0L, realKvTotal - realKvAvailable)),
-                List.of(), accepted, List.of());
+        var usage = new DecodeEndpoint.CapacityUsage(engineLoad, realKvTotal, realKvAvailable,
+                0L, Math.max(0L, realKvTotal - realKvAvailable));
+        WorkerStatus status = WorkerStatus.createDiscovered(
+                org.flexlb.dao.route.RoleType.DECODE, "default", "decode-a", 8080, 8081, "test");
+        var routing = new DecodeEndpoint.DecodeRoutingView("decode-a", status.getGenerationId(),
+                status.topologySnapshot(), status.committedWorkerStatus(), 0L, engineLoad, engineLoad,
+                usage, usage, 0L, 0L);
+        var requests = accepted.stream().collect(java.util.stream.Collectors.toMap(
+                DecodeRequestView::requestId, java.util.function.Function.identity()));
+        return new EndpointFixture(new DecodeEndpoint.AdmissionCapacity(concurrencyLimit, 100L),
+                new DecodeEndpoint.ResourceSnapshot(routing, requests, 0, 0));
     }
 
+    private record EndpointFixture(DecodeEndpoint.AdmissionCapacity capacity,
+                                   DecodeEndpoint.ResourceSnapshot snapshot) { }
+
     private static DecodeEvictionProposal plan(
-            int priority, long hardKvTokens, DecodeEndpointSnapshot ep,
+            int priority, long hardKvTokens, EndpointFixture ep,
             Map<String, String> failures) {
         return EvictionPlanner.planDecode(
-                priority, hardKvTokens, hardKvTokens, List.of(ep), engineOwned(), SUPPORTING_CHANNEL, failures);
+                decodeRequirements(priority, hardKvTokens, hardKvTokens, ep.capacity()), ep.snapshot(), engineOwned(), true, failures);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cancellationCapabilityGatesEngineVictimsOnly(boolean supported) {
+        var engine = endpoint(1_000L, 1_000L, 1, 1, List.of(accepted(1L, 10, 100L)));
+        var proposal = EvictionPlanner.planDecode(decodeRequirements(70, 0L, 0L, engine.capacity()), engine.snapshot(),
+                engineOwned(), supported, new HashMap<>());
+        if (supported) {
+            assertEquals(List.of(1L), victimIds(proposal));
+        } else {
+            assertNull(proposal);
+        }
+        var local = new DecodeRequestView(2L, 10, 100L, 100L,
+                DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED, true, 1L, false);
+        var policy = new PreemptionConfig();
+        policy.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_RESERVED));
+        var localEndpoint = endpoint(1_000L, 1_000L, 1, 1, List.of(local));
+        var localProposal = EvictionPlanner.planDecode(decodeRequirements(70, 0L, 0L, localEndpoint.capacity()), localEndpoint.snapshot(),
+                policy, supported, new HashMap<>());
+        assertNotNull(localProposal);
+        assertEquals(List.of(2L), victimIds(localProposal));
     }
 
     private static List<Long> victimIds(DecodeEvictionProposal p) {
         return p.victims().stream().map(DecodeRequestView::requestId).toList();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void combinedDeficitSelectsBothDimensionsWithoutRepeatingVictims(boolean kvFirst) {
+        List<DecodeRequestView> candidates = kvFirst
+                ? List.of(accepted(1L, 30, 2_000L), accepted(2L, 30, 100L),
+                        accepted(3L, 30, 100L), accepted(4L, 30, 100L), accepted(5L, 30, 2_000L))
+                : List.of(accepted(1L, 30, 100L), accepted(2L, 30, 100L), accepted(3L, 30, 2_000L));
+        EndpointFixture ep = endpoint(0L, 10_000L,
+                kvFirst ? 102 : 3, kvFirst ? 100 : 2, candidates);
+        long demand = kvFirst ? 4_000L : 1_200L;
+        DecodeEvictionProposal proposal = plan(70, demand, ep, new HashMap<>());
+
+        assertEquals(DecodeEvictionProposal.CASE_SLOT_AND_KV, proposal.evictionCase());
+        assertEquals(kvFirst ? List.of(1L, 5L, 2L) : List.of(1L, 2L, 3L), victimIds(proposal));
+        long cost = kvFirst ? 320L : 256L;
+        assertEquals(cost, proposal.priorityHarmProfile().totalCost());
+        assertEquals(PriorityHarmProfile.builder().add(30, BigInteger.valueOf(cost)).build(),
+                proposal.priorityHarmProfile());
+        DecodeEndpoint.CapacityRelease release = DecodeEndpoint.CapacityRelease.NONE;
+        for (DecodeRequestView victim : proposal.victims()) {
+            release = release.plus(victim.placementRelease());
+        }
+        assertEquals(kvFirst ? 4_100L : 2_200L, proposal.freedKvTokens());
+        assertTrue(ep.capacity().evaluate(ep.snapshot().routing().placementUsage(), demand, demand, release).fits());
     }
 
     // ─── No deficit ─────────────────────────────────────────────────────
@@ -121,7 +193,7 @@ class EvictionPlannerDecodeContractTest {
             assertEquals(List.of(1L), victimIds(p));
             assertEquals(DecodeEvictionProposal.CASE_SLOT, p.evictionCase());
             // cost = H_SLOT * f(30) * g(ACCEPTED) = 4 * 1 * 16 = 64
-            assertEquals(64L, p.totalCost());
+            assertEquals(64L, p.priorityHarmProfile().totalCost());
             assertEquals(128L, p.freedKvTokens());
         }
 
@@ -162,7 +234,7 @@ class EvictionPlannerDecodeContractTest {
             // cost = H_KV * f(30) * g(ACCEPTED) * lengthWasteCost(2048)
             //      = 8 * 1 * 16 * round(sqrt(ceil(2048/1024))) = 8*16*round(sqrt(2))
             //      = 8 * 16 * 1 = 128  (sqrt(2)=1.41→round=1)
-            assertEquals(128L, p.totalCost());
+            assertEquals(128L, p.priorityHarmProfile().totalCost());
             assertEquals(2048L, p.freedKvTokens());
         }
 

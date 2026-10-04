@@ -25,10 +25,6 @@ public record DeliveryResult(Status status, Throwable cause) {
         return new DeliveryResult(Status.PREFILL_REJECTED, cause);
     }
 
-    public static DeliveryResult timedOut(Throwable cause) {
-        return new DeliveryResult(Status.TIMED_OUT, cause);
-    }
-
     public static DeliveryResult uncertain(Throwable cause) {
         return new DeliveryResult(Status.UNCERTAIN, cause);
     }
@@ -43,7 +39,6 @@ public record DeliveryResult(Status status, Throwable cause) {
         NOT_SENT,
         /** Final per-member EnqueueBatch error; Decode may already own resources. */
         PREFILL_REJECTED,
-        TIMED_OUT,
         UNCERTAIN
     }
 }

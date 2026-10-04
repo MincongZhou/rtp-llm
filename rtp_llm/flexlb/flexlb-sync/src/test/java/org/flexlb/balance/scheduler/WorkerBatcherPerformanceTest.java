@@ -1,12 +1,15 @@
 package org.flexlb.balance.scheduler;
 
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.freezeInputs;
+
+import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -15,7 +18,6 @@ import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.management.ManagementFactory;
@@ -25,7 +27,6 @@ import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -43,7 +44,7 @@ class WorkerBatcherPerformanceTest {
     void waitDiagnosticsCaptureDoesNotScaleWithRequestCount() throws Throwable {
         var capture = MethodHandles.privateLookupIn(WorkerBatcher.class, MethodHandles.lookup())
                 .findVirtual(WorkerBatcher.class, "recordQueueWait",
-                        MethodType.methodType(void.class, ScheduledRequest.class, String.class));
+                        MethodType.methodType(void.class, RequestRoute.class, String.class));
         var allocationBean = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean
                 && bean.isThreadAllocatedMemorySupported() ? bean : null;
         if (allocationBean != null) { allocationBean.setThreadAllocatedMemoryEnabled(true); }
@@ -54,7 +55,7 @@ class WorkerBatcherPerformanceTest {
         for (int depth : new int[]{128, 512, 4096}) {
             WorkerBatcher runtime = runtimeWithDepth(depth);
             try {
-                ScheduledRequest head = runtime.captureQueueSnapshot().items().getFirst();
+                RequestRoute head = WorkerBatcherTestSupport.capture(runtime).items().getFirst();
                 for (int i = 0; i < operations; i++) {
                     capture.invokeExact(runtime, head, "Prefill capacity exhausted");
                 }
@@ -145,9 +146,11 @@ class WorkerBatcherPerformanceTest {
 
         for (int depth : QUEUE_DEPTHS) {
             WorkerBatcher runtime = runtimeWithDepth(depth);
+            PrefillEndpoint endpoint = (PrefillEndpoint) org.springframework.test.util.ReflectionTestUtils
+                    .getField(runtime, "prefillEndpoint");
             try {
                 for (int warmup = 0; warmup < 100; warmup++) {
-                    assertEquals(depth, runtime.captureRouteProjectionInputs()
+                    assertEquals(depth, endpoint.captureRouteProjectionInputs()
                             .queue().activeItems().size());
                 }
 
@@ -163,7 +166,7 @@ class WorkerBatcherPerformanceTest {
                          operation < operations;
                          operation++) {
                         RouteProjection.Inputs inputs =
-                                runtime.captureRouteProjectionInputs();
+                                endpoint.captureRouteProjectionInputs();
                         checksum += inputs.queue().activeItems().size();
                         checksum += inputs.ownershipVersion();
                     }
@@ -217,15 +220,12 @@ class WorkerBatcherPerformanceTest {
         SchedulingTestConfig.useSingleDecision(config);
         PrefillEndpoint endpoint = stablePrefillEndpoint();
         BlockingDeliveryStrategy delivery = new BlockingDeliveryStrategy();
-        WorkerBatcher runtime = new WorkerBatcher(
-                "perf-worker-" + depth,
-                endpoint,
-                config,
-                delivery,
-                mock(EndpointEventProjector.class));
+        endpoint = org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(
+                config, endpoint.getStatus(), delivery, mock(AbstractRequestScheduler.class));
+        WorkerBatcher runtime = org.flexlb.balance.endpoint.EndpointTestSupport.batcher(endpoint);
         runtime.start();
         long now = System.currentTimeMillis();
-        List<ScheduledRequest> items = new ArrayList<>(depth);
+        List<RequestRoute> items = new ArrayList<>(depth);
         for (int index = 0; index < depth; index++) {
             items.add(item(
                     config,
@@ -235,18 +235,18 @@ class WorkerBatcherPerformanceTest {
                     now - depth + index,
                     256L + (index % 32)));
         }
-        for (ScheduledRequest item : items) {
+        for (RequestRoute item : items) {
             assertTrue(runtime.offer(item));
         }
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (runtime.queueSize() != depth && System.nanoTime() < deadline) {
+        while (WorkerBatcherTestSupport.state(runtime).queueDepth() != depth && System.nanoTime() < deadline) {
             TimeUnit.MILLISECONDS.sleep(1L);
         }
-        assertEquals(depth, runtime.queueSize());
+        assertEquals(depth, WorkerBatcherTestSupport.state(runtime).queueDepth());
         return runtime;
     }
 
-    private static ScheduledRequest item(
+    private static RequestRoute item(
             FlexlbConfig config,
             PrefillEndpoint endpoint,
             long requestId,
@@ -261,9 +261,8 @@ class WorkerBatcherPerformanceTest {
         context.setRequest(request);
         context.setSchedulingMetadata(
                 SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
-        return new ScheduledRequest(
-                context,
-                new CompletableFuture<Response>(),
+        context.setFuture(new CompletableFuture<Response>());
+        return org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context),
                 null,
                 null,
                 null,
@@ -312,7 +311,7 @@ class WorkerBatcherPerformanceTest {
 
         @Override
         public Transaction prepare(
-                List<ScheduledRequest> candidates,
+                List<RequestRoute> candidates,
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
             return WorkerBatcherTestSupport.boundaryOnly(
@@ -327,10 +326,11 @@ class WorkerBatcherPerformanceTest {
         }
 
         @Override
-        public double projectGroupDurationMs(
-                List<ScheduledRequest> items,
+        public GroupPlanner.PrefixPrediction<RequestRoute> newGroupPredictor(
                 PrefillTimePredictor.Evaluator evaluator) {
-            return 0.0;
+            return (added, items) -> {
+                return 0.0;
+            };
         }
 
         @Override

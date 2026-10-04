@@ -24,8 +24,7 @@ public record CapacityBoundary(
         boolean failed = status == Status.FAILED;
         if (unavailable != (availability != null)
                 || failed != (cause != null)
-                || (!unavailable
-                        && (availability != null || projectionSemantics != null))) {
+                || (!unavailable && projectionSemantics != null)) {
             throw new IllegalArgumentException(
                     "capacity boundary status requires its exact payload");
         }

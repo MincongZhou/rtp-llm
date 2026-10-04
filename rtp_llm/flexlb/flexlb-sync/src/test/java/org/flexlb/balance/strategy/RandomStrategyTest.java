@@ -3,19 +3,17 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-
 import java.util.HashMap;
 import java.util.Map;
-
+import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -33,7 +31,7 @@ class RandomStrategyTest {
         Mockito.when(configService.loadBalanceConfig())
                 .thenReturn(new FlexlbConfig());
         endpoints = StrategyTestSupport.endpointRegistry(configService);
-        strategy = new RandomStrategy(new WorkerDirectory(endpoints));
+        strategy = new RandomStrategy(endpoints);
     }
 
     @AfterEach
@@ -94,6 +92,30 @@ class RandomStrategyTest {
         assertEquals(3, counts.size());
         counts.forEach((worker, count) -> assertTrue(
                 count > 750 && count < 1_250,
+                worker + " was selected " + count + " times"));
+    }
+
+    @Test
+    void matchingWorkersRemainUniformWhenOtherGroupsSeparateTheirAddresses() {
+        registerVit("127.0.0.1", 8080, "other");
+        registerVit("127.0.0.2", 8080, "target");
+        registerVit("127.0.0.3", 8080, "target");
+        registerVit("127.0.0.4", 8080, "other");
+        EndpointRegistry directory = Mockito.spy(endpoints);
+        Mockito.doReturn(List.of("127.0.0.1:8080", "127.0.0.2:8080",
+                "127.0.0.3:8080", "127.0.0.4:8080"))
+                .when(directory).endpointAddressSnapshot(RoleType.VIT);
+        RandomStrategy grouped = new RandomStrategy(directory);
+        Map<String, Integer> counts = new HashMap<>();
+        for (int request = 0; request < 4_000; request++) {
+            try (SelectedRole selected = grouped.select(context(request), RoleType.VIT, "target")) {
+                assertNotNull(selected);
+                assertEquals("target", selected.serverStatus().getGroup());
+                counts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
+            }
+        }
+        assertEquals(2, counts.size());
+        counts.forEach((worker, count) -> assertTrue(count > 1_600 && count < 2_400,
                 worker + " was selected " + count + " times"));
     }
 

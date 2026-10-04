@@ -1,12 +1,12 @@
 package org.flexlb.balance.projection;
 
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -22,6 +22,70 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Contract tests for the canonical route-projection value boundary. */
 class RouteProjectionTest {
+
+    @Test
+    void sortedQueueInsertionKeepsEqualItemsAheadAndSkipsExpiredItems() {
+        var items = new java.util.ArrayList<GroupPlanner.Item>();
+        for (int i = 0; i < 1024; i++) {
+            items.add(new GroupPlanner.Item(i, i / 256, i, 0L,
+                    i % 2 == 0 ? 13L : Long.MAX_VALUE, 1L, 0L));
+        }
+        Comparator<GroupPlanner.Item> order = Comparator.comparingInt(GroupPlanner.Item::priority);
+        var queue = new QueueSnapshot(13L, true, org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW, order,
+                new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 0L), items, null);
+        var incoming = new RouteProjection.Probe(9999L, 1, 0L, Long.MAX_VALUE, 20L, 0L, 0L);
+        var result = RouteProjection.project(new RouteProjection.Inputs(queue, emptyWork(13L)),
+                incoming, new CountingEvaluator(), routeProjection());
+        assertTrue(result.selectable());
+        // 256 live items of priority 0 or 1 must complete before this probe.
+        assertEquals(276L, result.projectedTtftMsValue());
+    }
+
+    @Test
+    void duplicateIdentityUsesLiveMembershipAndKeepsUnknownWorkConservative() {
+        var policy = routeProjection();
+        for (long expiry : new long[]{-1L, 0L, 12L, 13L, 14L, Long.MAX_VALUE}) {
+            var items = List.of(
+                    new GroupPlanner.Item(99L, 0, 1L, 0L, 13L, 1L, 0L),
+                    new GroupPlanner.Item(99L, 0, 2L, 0L, expiry, 1L, 0L));
+            var queue = new QueueSnapshot(13L, true,
+                    org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
+                    Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
+                    new GroupPlanner.Constraints(1, 1_000L, 1_000L, 0L, 0L), items, null);
+            var known = RouteProjection.project(new RouteProjection.Inputs(queue, emptyWork(13L)),
+                    probe(), new CountingEvaluator(), policy);
+            if (expiry > 13L) {
+                assertEquals("INCOMING_ALREADY_ACTIVE", known.detail());
+            } else {
+                assertTrue(known.selectable());
+                assertEquals(20L, known.projectedTtftMsValue());
+            }
+            var unknown = RouteProjection.project(new RouteProjection.Inputs(queue,
+                            new WorkSnapshot(13L, List.of(), List.of(), 1L)),
+                    probe(), new CountingEvaluator(), policy);
+            assertEquals("INCOMING_ALREADY_ACTIVE", unknown.detail());
+        }
+    }
+
+    @Test
+    void sameFrozenMembershipExpiresAtTheLaterPlanningClock() {
+        var items = new java.util.ArrayList<GroupPlanner.Item>();
+        items.add(new GroupPlanner.Item(99L, 0, 1L, 0L, 14L, 1L, 0L));
+        var queue = new QueueSnapshot(13L, true,
+                org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
+                Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
+                new GroupPlanner.Constraints(1, 1_000L, 1_000L, 0L, 0L), items, null);
+        items.clear();
+        var inputs = new RouteProjection.Inputs(queue, emptyWork(13L));
+        var policy = routeProjection();
+        assertEquals("INCOMING_ALREADY_ACTIVE",
+                RouteProjection.project(inputs, probe(), new CountingEvaluator(), policy, 13L).detail());
+        var expired = RouteProjection.project(inputs, probe(), new CountingEvaluator(), policy, 14L);
+        assertTrue(expired.selectable());
+        assertEquals(20L, expired.projectedTtftMsValue());
+        assertEquals(1, queue.activeItems().size());
+        assertThrows(UnsupportedOperationException.class, () -> queue.activeItems().clear());
+    }
 
     @Test
     void unchangedRunningWorkCanReuseItsEarlierClockBase() {
@@ -95,7 +159,7 @@ class RouteProjectionTest {
                 RouteProjection.Candidate.State.MODELED, OptionalLong.of(10L));
         RouteProjection.Candidate unmodeled = candidate(
                 RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK, OptionalLong.empty());
-        assertEquals(10L, modeled.requiredProjectedTtftMs());
+        assertEquals(10L, modeled.projectedTtftMs().orElseThrow());
         assertTrue(unmodeled.engineWorkUnmodeled());
     }
 
@@ -118,7 +182,7 @@ class RouteProjectionTest {
     private static QueueSnapshot emptyQueue(long capturedAtMs) {
         return new QueueSnapshot(
                 capturedAtMs,
-                true,
+                true, org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
                 Comparator.comparingLong(GroupPlanner.Item::requestId),
                 new GroupPlanner.Constraints(
                         1, 1_000_000L, 1_000_000L, 0L, 30L),
@@ -138,9 +202,7 @@ class RouteProjectionTest {
     }
 
     private static RouteProjection.DeliveryProjection routeProjection() {
-        return new RouteDeliveryStrategy(
-                Mockito.mock(RequestRegistry.class),
-                Mockito.mock(DeliveryMetrics.class))
+        return new RouteDeliveryStrategy(Mockito.mock(BatchSchedulerReporter.class))
                 .projectionPolicy();
     }
 

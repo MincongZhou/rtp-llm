@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
@@ -28,11 +28,11 @@ import static org.mockito.Mockito.when;
 class PrefillRequestCapacityTest {
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillState state = new PrefillState(lock,
-            PrefillActiveIndex.ordered(16, Comparator.comparingLong(ScheduledRequest::requestId)), () -> { });
+            PrefillActiveIndex.ordered(16, Comparator.comparingLong(RequestRoute::requestId)), () -> { });
 
     @Test
     void waitingPreparedAndCommittedRequestsShareOneCount() {
-        ScheduledRequest queued = item(1), immediate = item(2);
+        RequestRoute queued = item(1), immediate = item(2);
         assertTrue(enqueue(queued, 2L));
         var registration = reserve(immediate, 2L).reservation();
         assertNotNull(registration);
@@ -52,7 +52,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void workerDetailsDeduplicateLocalRequestsAndForeignRequestIds() {
-        ScheduledRequest local = item(1);
+        RequestRoute local = item(1);
         var registration = reserve(local, 4L).reservation();
         var localObservation = observed(1);
         var foreign = observed(2);
@@ -95,7 +95,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void batchRequestCountDoesNotLimitWaitingAndBatchPermitWaitsForLastMember() {
-        ScheduledRequest first = item(1), second = item(2);
+        RequestRoute first = item(1), second = item(2);
         assertTrue(enqueue(first, 0L));
         assertTrue(enqueue(second, 0L));
         var generation = new EndpointGenerationLifecycle(() -> { });
@@ -113,7 +113,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void staleOwnerCannotReleaseAReusedRequestId() {
-        ScheduledRequest previous = item(1);
+        RequestRoute previous = item(1);
         var old = reserve(previous, 1L).reservation();
         old.close();
         var current = reserve(item(1), 1L).reservation();
@@ -136,14 +136,14 @@ class PrefillRequestCapacityTest {
 
     @Test
     void advisoryReadersDoNotWaitForTheOwnershipLock() throws Exception {
-        ScheduledRequest queued = item(1);
+        RequestRoute queued = item(1);
         assertTrue(enqueue(queued, 2L));
         try (var reader = Executors.newSingleThreadExecutor()) {
             lock.lock();
             try {
                 assertFalse(reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS));
                 assertTrue(reader.submit(() -> state.canAcceptRequest(2L)).get(5, TimeUnit.SECONDS));
-                assertTrue(state.terminalizeActiveUnderLock(queued));
+                assertTrue(state.removeQueuedUnderLock(queued));
                 assertTrue(reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS),
                         "removal publishes capacity before the ownership lock is released");
             } finally {
@@ -160,7 +160,7 @@ class PrefillRequestCapacityTest {
         try (var executor = Executors.newFixedThreadPool(contenders)) {
             List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> attempts = new ArrayList<>();
             for (int i = 0; i < contenders; i++) {
-                ScheduledRequest request = item(i + 1);
+                RequestRoute request = item(i + 1);
                 attempts.add(executor.submit(() -> {
                     assertTrue(state.canAcceptRequest(1L));
                     selected.countDown();
@@ -235,16 +235,16 @@ class PrefillRequestCapacityTest {
         assertTrue(state.canAcceptRequest(2L));
     }
 
-    private PrefillState.ReservationResult<PrefillState.RouteReservation> reserve(ScheduledRequest item, long limit) {
+    private PrefillState.ReservationResult<PrefillState.RouteReservation> reserve(RequestRoute item, long limit) {
         return state.reserveUnqueuedRoute(item, 0L, limit);
     }
 
-    private PrefillState.CommittedHandoff commit(ScheduledRequest item, PrefillState.RouteReservation registration) {
+    private PrefillState.CommittedHandoff commit(RequestRoute item, PrefillState.RouteReservation registration) {
         return state.commitRouteGroup(List.of(item), List.of(registration),
                 new EndpointGenerationLifecycle(() -> { }).tryAcquireHandoff());
     }
 
-    private boolean enqueue(ScheduledRequest item, long limit) {
+    private boolean enqueue(RequestRoute item, long limit) {
         lock.lock();
         try { return state.enqueueActiveUnderLock(item, limit); }
         finally { lock.unlock(); }
@@ -265,8 +265,8 @@ class PrefillRequestCapacityTest {
                 TaskPhase.RUNNING, 0L, PriorityPreemptionProgress.NONE);
     }
 
-    private static ScheduledRequest item(long id) {
-        ScheduledRequest item = mock(ScheduledRequest.class);
+    private static RequestRoute item(long id) {
+        RequestRoute item = mock(RequestRoute.class);
         when(item.requestId()).thenReturn(id);
         return item;
     }

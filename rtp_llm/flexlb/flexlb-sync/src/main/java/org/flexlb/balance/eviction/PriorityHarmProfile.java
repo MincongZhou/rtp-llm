@@ -50,6 +50,19 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
         return new PriorityHarmProfile(sum);
     }
 
+    /** Diagnostic scalar derived from exact weighted harm; plan ordering stays lexicographic. */
+    public long totalCost() {
+        BigInteger cost = BigInteger.ZERO;
+        BigInteger maximum = BigInteger.valueOf(Long.MAX_VALUE);
+        for (int priority = PriorityNormalizer.MIN_PRIORITY; priority <= PriorityNormalizer.MAX_PRIORITY; priority++) {
+            if (harmByPriority[priority] != null) {
+                cost = cost.add(harmByPriority[priority].multiply(BigInteger.valueOf(PriorityCostFunction.f(priority))));
+                if (cost.compareTo(maximum) >= 0) { return Long.MAX_VALUE; }
+            }
+        }
+        return cost.longValueExact();
+    }
+
     /**
      * Smaller harm is preferable. The highest exact priority at which two
      * plans differ decides the result; lower-priority buckets are considered

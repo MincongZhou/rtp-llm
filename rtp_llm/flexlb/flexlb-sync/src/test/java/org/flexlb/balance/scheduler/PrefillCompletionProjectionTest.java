@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -15,6 +14,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.freezeInputs;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -44,11 +45,11 @@ class PrefillCompletionProjectionTest {
         when(service.loadBalanceConfig()).thenReturn(config);
         var reporter = mock(BatchSchedulerReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
-        var requests = new RequestRegistry(service, reporter, requestReporter);
-        var projector = new EndpointEventProjector(requests);
-        var endpoints = new EndpointRegistry(service, projector, reporter,
-                new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)), new PlacementAvailability());
-        var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
+        var requests = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, reporter, requestReporter,
+                mock(RecentCacheKeyTraceReporter.class));
+        var projector = requests;
+        var endpoints = new EndpointRegistry(service, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(projector), reporter, new RouteDeliveryStrategy(reporter), new PlacementAvailability());
+        var runtime = new SchedulerRuntime(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests), endpoints, reporter, requestReporter, org.mockito.Mockito.mock(DefaultBatchDispatcher.class), service, org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
         try {
             WorkerStatus worker = WorkerStatus.createDiscovered(
                     RoleType.PREFILL, "g1", "127.0.0.1", 8080, 8081, "test");
@@ -63,7 +64,7 @@ class PrefillCompletionProjectionTest {
             }
             WorkerStatus decodeWorker = WorkerStatus.createDiscovered(
                     RoleType.DECODE, "g1", "127.0.0.2", 8080, 8081, "test");
-            DecodeEndpoint decode = new DecodeEndpoint(decodeWorker, projector);
+            DecodeEndpoint decode = new DecodeEndpoint(decodeWorker, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(projector));
             applyStatus(decode, decodeStatus(1L, Map.of()));
             DecodeEndpoint.ReservationHandle reservation;
             var capacity = new DecodeEndpoint.AdmissionCapacity(10L, 90L);
@@ -75,25 +76,26 @@ class PrefillCompletionProjectionTest {
                 assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                         acquisition.permit().dispatch());
             }
-            var context = RequestLifecycleTestSupport.context(config, 101L);
-            var future = requests.register(context);
-            ScheduledRequest item = new ScheduledRequest(context, future, new Response(), null, null,
+            var context = RequestProtocolTestSupport.context(config, 101L);
+            var future = RequestProtocolTestSupport.register(requests, context);
+            context.setFuture(future);
+            RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null,
                     prefill, decode, reservation, System.currentTimeMillis());
             AtomicReference<PrefillState.RouteReservation> routeReservation = new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionHandle(101L, future);
+            try (var mutation = requests.claimAdmissionHandle(101L, future); var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(mutation);
                  var pin = prefill.tryPinGeneration()) {
                 assertNotNull(mutation);
                 assertNotNull(pin);
-                assertTrue(requests.commitItemForPublication(item, () -> {
+                assertTrue((requests.commitRoute(item, RequestProtocolTestSupport.publication(() -> {
                     var registered = prefill.reserveUnqueuedRoute(pin, item, 30_000L);
                     assertEquals(PrefillState.CapacityStatus.ACQUIRED, registered.status());
                     routeReservation.set(registered.reservation());
                     return true;
-                }));
+                })) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
             }
             try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
                 assertNotNull(routeCommit);
-                var claim = RequestLifecycleTestSupport.claimRouteWithoutPrediction(requests, item, () -> {
+                var claim = RequestProtocolTestSupport.claimRouteWithoutPrediction(requests, item, () -> {
                     try (var handoff = routeCommit.commit(List.of(item), List.of(routeReservation.get()))) {
                         return true;
                     }
@@ -109,15 +111,18 @@ class PrefillCompletionProjectionTest {
             task.setInputLength(16L);
             task.setPhase(TaskPhase.RUNNING);
             applyStatus(prefill, status(2L, Map.of("101", task), Map.of()));
-            RequestSlot slot = requests.requestSlot(101L);
+            requests.runtime.continuations().awaitIdle();
+            BalanceContext slot = requests.requestSlot(101L);
             synchronized (slot) {
                 assertTrue(slot.decisionDeadlineAtMs().isEmpty(), "running Prefill is positive Engine evidence");
             }
             if (decodeAlreadyAccepted) {
                 applyStatus(decode, decodeStatus(2L, Map.of("101", task)));
+                requests.runtime.continuations().awaitIdle();
             }
 
             applyStatus(prefill, status(3L, Map.of(), Map.of("101", task)));
+            requests.runtime.continuations().awaitIdle();
             assertEquals(0L, prefill.observedRequestCount());
             synchronized (slot) {
                 assertTrue(slot.isLiveGeneration(), "Prefill completion must retain the Decode lifecycle");
@@ -137,6 +142,7 @@ class PrefillCompletionProjectionTest {
             }
 
             applyStatus(prefill, status(4L, Map.of(), Map.of("101", task)));
+            requests.runtime.continuations().awaitIdle();
             assertEquals(0L, prefill.observedRequestCount());
         } finally {
             runtime.shutdown();

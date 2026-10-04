@@ -1,22 +1,22 @@
 package org.flexlb.balance.strategy;
 
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.freezeInputs;
+
+import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
-
 import java.util.List;
 import java.util.Map;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -34,9 +34,9 @@ class CostBasedPrefillStrategyBlockerTest {
         for (RoleType role : List.of(RoleType.PREFILL, RoleType.PDFUSION)) {
             for (AdmissionRejectReason first : AdmissionRejectReason.values()) {
                 for (AdmissionRejectReason second : AdmissionRejectReason.values()) {
-                    var directory = mock(WorkerDirectory.class);
+                    var directory = mock(EndpointRegistry.class);
                     var cache = mock(CacheAwareService.class);
-                    var strategy = new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class));
+                    var strategy = new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class), org.mockito.Mockito.mock(CacheMetricsReporter.class));
                     var outside = rejectedEndpoint(role, "other", AdmissionRejectReason.UNSPECIFIED);
                     var firstEndpoint = rejectedEndpoint(role, "target", first);
                     var secondEndpoint = rejectedEndpoint(role, "target", second);
@@ -51,7 +51,7 @@ class CostBasedPrefillStrategyBlockerTest {
                     context.setRequest(request);
                     context.setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
 
-                    var result = strategy.select(context, role, "target");
+                    var result = strategy.select(freezeInputs(context), role, "target");
                     var failure = result.failure();
 
                     // Missing provenance dominates; mixed known blockers are capacity, not arbitrary priority.

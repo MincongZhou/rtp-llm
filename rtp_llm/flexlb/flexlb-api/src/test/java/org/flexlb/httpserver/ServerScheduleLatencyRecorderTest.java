@@ -1,13 +1,12 @@
 package org.flexlb.httpserver;
 
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
-
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 

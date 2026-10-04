@@ -5,20 +5,24 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.util.Failures;
 
 import java.util.Objects;
 
 /**
  * One exact endpoint-generation selection.
  *
- * <p>The selection owns its generation pin until the router moves it into a
- * DIRECT registration or a queue-route admission.  It carries only immutable
+ * <p>The selection owns its generation pin and is transferred as a whole to
+ * route admission. It carries only immutable
  * routing output besides that pin; {@link ServerStatus} remains response
  * metadata and is never an ownership token.</p>
  */
 public final class SelectedRole implements AutoCloseable {
 
-    private WorkerEndpoint.GenerationPin generationPin;
+    private enum Owner { SELECTOR, ROUTE, CLOSED }
+
+    private final WorkerEndpoint.GenerationPin generationPin;
+    private volatile Owner owner = Owner.SELECTOR;
     private final ServerStatus serverStatus;
     private final long prefillWorkMs;
     private final long placementVersion;
@@ -35,11 +39,6 @@ public final class SelectedRole implements AutoCloseable {
                     "SelectedRole requires successful response metadata");
         }
         WorkerEndpoint endpoint = generationPin.endpoint();
-        if (endpoint.getStatus().getGenerationId()
-                != generationPin.generationId()) {
-            throw new IllegalArgumentException(
-                    "selection pin does not match endpoint generation");
-        }
         if (!Objects.equals(serverStatus.getServerIp(), endpoint.getIp())
                 || serverStatus.getHttpPort() != endpoint.getHttpPort()) {
             throw new IllegalArgumentException(
@@ -68,23 +67,12 @@ public final class SelectedRole implements AutoCloseable {
     public static SelectedRole prefill(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
-            long prefillWorkMs) {
-        return prefill(
-                generationPin, serverStatus, prefillWorkMs,
-                endpointPlacementVersion(generationPin));
-    }
-
-    public static SelectedRole prefill(
-            WorkerEndpoint.GenerationPin generationPin,
-            ServerStatus serverStatus,
             long prefillWorkMs,
             long placementVersion) {
         if (prefillWorkMs < 0L) {
-            if (generationPin != null) {
-                generationPin.close();
+            try (generationPin) {
+                throw new IllegalArgumentException("Prefill work must be non-negative");
             }
-            throw new IllegalArgumentException(
-                    "Prefill work must be non-negative");
         }
         return createOwned(
                 generationPin, serverStatus, prefillWorkMs,
@@ -93,21 +81,12 @@ public final class SelectedRole implements AutoCloseable {
 
     public static SelectedRole decode(
             WorkerEndpoint.GenerationPin generationPin,
-            ServerStatus serverStatus) {
-        return decode(
-                generationPin, serverStatus,
-                endpointPlacementVersion(generationPin));
-    }
-
-    public static SelectedRole decode(
-            WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long placementVersion) {
         if (serverStatus == null || serverStatus.getRole() != RoleType.DECODE) {
-            if (generationPin != null) {
-                generationPin.close();
+            try (generationPin) {
+                throw new IllegalArgumentException("Decode selection requires Decode metadata");
             }
-            throw new IllegalArgumentException("Decode selection requires Decode metadata");
         }
         return createOwned(generationPin, serverStatus, -1L, placementVersion);
     }
@@ -125,15 +104,16 @@ public final class SelectedRole implements AutoCloseable {
             ServerStatus serverStatus,
             long prefillWorkMs,
             long placementVersion) {
+        Throwable failure = null;
         try {
-            return new SelectedRole(
-                    generationPin, serverStatus, prefillWorkMs,
-                    placementVersion);
-        } catch (RuntimeException | Error failure) {
-            if (generationPin != null) {
-                generationPin.close();
+            return new SelectedRole(generationPin, serverStatus, prefillWorkMs, placementVersion);
+        } catch (RuntimeException | Error constructionFailure) {
+            failure = constructionFailure;
+            throw constructionFailure;
+        } finally {
+            if (failure != null && generationPin != null) {
+                Failures.append(failure, Failures.close(generationPin));
             }
-            throw failure;
         }
     }
 
@@ -153,42 +133,33 @@ public final class SelectedRole implements AutoCloseable {
         return placementVersion;
     }
 
-    private static long endpointPlacementVersion(
-            WorkerEndpoint.GenerationPin pin) {
-        if (pin == null) {
-            return 0L;
+    /** Transfer the whole selected result; its routing facts stay immutable. */
+    public synchronized void transferToRoute() {
+        if (owner != Owner.SELECTOR) {
+            throw new IllegalStateException("selected endpoint generation was already consumed");
         }
-        WorkerEndpoint endpoint = pin.endpoint();
-        if (endpoint instanceof PrefillEndpoint prefill) {
-            return prefill.placementVersion();
-        }
-        if (endpoint instanceof DecodeEndpoint decode) {
-            return decode.placementVersion();
-        }
-        return 0L;
+        owner = Owner.ROUTE;
     }
 
-    /** Move the exact pin to the next domain owner. */
-    public WorkerEndpoint.GenerationPin takeGenerationPin() {
-        WorkerEndpoint.GenerationPin owned = requireOwnedPin();
-        generationPin = null;
-        return owned;
+    public WorkerEndpoint endpoint() {
+        return generationPin.endpoint();
     }
 
-    private WorkerEndpoint.GenerationPin requireOwnedPin() {
-        if (generationPin == null) {
-            throw new IllegalStateException(
-                    "selected endpoint generation was already consumed");
+    public WorkerEndpoint.GenerationPin generationPin() {
+        if (owner == Owner.CLOSED) {
+            throw new IllegalStateException("selected endpoint generation is closed");
         }
         return generationPin;
     }
 
     @Override
     public void close() {
-        WorkerEndpoint.GenerationPin owned = generationPin;
-        generationPin = null;
-        if (owned != null) {
-            owned.close();
+        synchronized (this) {
+            if (owner == Owner.CLOSED) {
+                return;
+            }
+            owner = Owner.CLOSED;
         }
+        generationPin.close();
     }
 }

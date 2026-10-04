@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -19,6 +19,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 /** Decode worker boundary: lifecycle pins, resource operations and lock-free notifications.
  * DecodeState owns the generation-local resource ledger and its single mutation lock.
@@ -26,21 +27,28 @@ import java.util.function.LongPredicate;
 public class DecodeEndpoint extends WorkerEndpoint {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
     private final DecodeState state;
-    private final EndpointEventProjector endpointEvents;
+    private final RequestRepository scheduler;
     private final PlacementAvailability placementAvailability;
     private final Set<Runnable> engineDispatchCapacityListeners = ConcurrentHashMap.newKeySet();
 
     // Construction
 
-    public DecodeEndpoint(WorkerStatus status, EndpointEventProjector endpointEvents) {
-        this(status, endpointEvents, new PlacementAvailability());
+    private void notifyWorkerFacts(List<WorkerStatusFact> facts) {
+        for (WorkerStatusFact fact : facts) {
+            var context = scheduler.findActive(fact.reservation().requestId());
+            if (context != null) { context.scheduler().onDecodeStatus(this, List.of(fact)); }
+        }
     }
 
-    DecodeEndpoint(WorkerStatus status, EndpointEventProjector endpointEvents,
+    public DecodeEndpoint(WorkerStatus status, RequestRepository scheduler) {
+        this(status, scheduler, new PlacementAvailability());
+    }
+
+    DecodeEndpoint(WorkerStatus status, RequestRepository scheduler,
                    PlacementAvailability placementAvailability) {
         super(status);
         this.state = new DecodeState(status);
-        this.endpointEvents = java.util.Objects.requireNonNull(endpointEvents, "endpointEvents");
+        this.scheduler = java.util.Objects.requireNonNull(scheduler, "scheduler");
         this.placementAvailability = java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
     }
 
@@ -105,7 +113,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public enum ReleaseReason {
-        LOCAL_ROLLBACK, COUNTERPART_FINISHED, NOT_SENT, EXPIRED
+        LOCAL_ROLLBACK, COUNTERPART_FINISHED, NOT_SENT, REMOTE_CLEANUP, EXPIRED
     }
 
     public enum ReservationReleaseResult {
@@ -138,7 +146,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try (pin) {
             DecodeState.DispatchAcquisition acquired = state.acquireDispatchPermit(reservation, capacity);
             return new EngineDispatchPermitAcquisition(acquired.status(), acquired.permit() == null ? null
-                    : new EngineDispatchPermit(this, reservation.requestId(), acquired.permit()));
+                    : new EngineDispatchPermit(this, acquired.permit()));
         }
     }
 
@@ -147,20 +155,29 @@ public class DecodeEndpoint extends WorkerEndpoint {
         java.util.Objects.requireNonNull(permit, "permit");
         java.util.Objects.requireNonNull(outcome, "outcome");
         if (permit.endpoint != this) { throw new IllegalArgumentException("Dispatch permit belongs to another endpoint"); }
-        return permit.resolve(outcome);
-    }
-
-    private EngineDispatchPermitTransferStatus applyDispatch(EngineDispatchPermit permit, DispatchOutcome outcome) {
-        GenerationPin pin = outcome == DispatchOutcome.ENGINE_OWNED ? tryPinGeneration() : null;
-        if (outcome == DispatchOutcome.ENGINE_OWNED && pin == null) {
-            return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
-        }
-        try (pin) {
-            DecodeState.DispatchResult result = state.dispatch(permit.lease, outcome);
-            if (result.capacityReleased()) {
-                if (outcome == DispatchOutcome.ABANDONED) { publishCapacityRelease(); } else { notifyEngineDispatchCapacityListeners(); }
+        synchronized (permit) {
+            if (permit.dispatchResult != null) {
+                return outcome == DispatchOutcome.ENGINE_OWNED
+                        ? permit.dispatchResult : EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
             }
-            return result.status();
+            EngineDispatchPermitTransferStatus result;
+            GenerationPin pin = outcome == DispatchOutcome.ENGINE_OWNED ? tryPinGeneration() : null;
+            if (outcome == DispatchOutcome.ENGINE_OWNED && pin == null) {
+                result = EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
+            } else {
+                try (pin) {
+                    DecodeState.DispatchResult applied = state.dispatch(permit.lease, outcome);
+                    if (applied.capacityReleased()) {
+                        if (outcome == DispatchOutcome.ABANDONED) { publishCapacityRelease(); } else { notifyEngineDispatchCapacityListeners(); }
+                    }
+                    result = applied.status();
+                }
+            }
+            // Returning an unused permit succeeds once, but cannot grant sending ownership later.
+            permit.dispatchResult = result == EngineDispatchPermitTransferStatus.TRANSFERRED
+                    && outcome == DispatchOutcome.ABANDONED
+                    ? EngineDispatchPermitTransferStatus.OWNERSHIP_LOST : result;
+            return result;
         }
     }
 
@@ -171,29 +188,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public static final class EngineDispatchPermit {
 
-        private enum Resolution {
-            ACQUIRED,
-            ENGINE_LIFECYCLE_OWNED,
-            RELEASED,
-            INVALIDATED,
-            ENDPOINT_RETIRED
-        }
-
         private final DecodeEndpoint endpoint;
-        private final long requestId;
         private final DecodeState.DispatchLease lease;
-        private Resolution resolution = Resolution.ACQUIRED;
+        /** Null until resolved; cached result for dispatch, including ownership lost after release. */
+        private EngineDispatchPermitTransferStatus dispatchResult;
 
-        private EngineDispatchPermit(DecodeEndpoint endpoint,
-                                     long requestId,
-                                     DecodeState.DispatchLease lease) {
+        private EngineDispatchPermit(DecodeEndpoint endpoint, DecodeState.DispatchLease lease) {
             this.endpoint = endpoint;
-            this.requestId = requestId;
             this.lease = lease;
-        }
-
-        public long requestId() {
-            return requestId;
         }
 
         /**
@@ -211,27 +213,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     == EngineDispatchPermitTransferStatus.TRANSFERRED;
         }
 
-        private synchronized EngineDispatchPermitTransferStatus resolve(DispatchOutcome outcome) {
-            if (outcome == DispatchOutcome.ENGINE_OWNED) {
-                if (resolution == Resolution.ENGINE_LIFECYCLE_OWNED) {
-                    return EngineDispatchPermitTransferStatus.TRANSFERRED;
-                }
-                if (resolution == Resolution.ENDPOINT_RETIRED) {
-                    return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
-                }
-            }
-            if (resolution != Resolution.ACQUIRED) {
-                return EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
-            }
-            EngineDispatchPermitTransferStatus result = endpoint.applyDispatch(this, outcome);
-            resolution = switch (result) {
-                case TRANSFERRED -> outcome == DispatchOutcome.ENGINE_OWNED
-                        ? Resolution.ENGINE_LIFECYCLE_OWNED : Resolution.RELEASED;
-                case ENDPOINT_RETIRED -> Resolution.ENDPOINT_RETIRED;
-                case OWNERSHIP_LOST -> Resolution.INVALIDATED;
-            };
-            return result;
-        }
     }
 
     public record EngineDispatchPermitAcquisition(
@@ -290,13 +271,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     // Preemption: atomic local replacement or remote cancellation.
 
-    public boolean replaceQueuedRequests(List<ReservationHandle> victims, long incomingRequestId,
+    public ReservationHandle replaceQueuedRequests(List<ReservationHandle> victims, long incomingRequestId,
                                          long hardKv, long expectedKv, int priority, AdmissionCapacity capacity) {
         GenerationPin pin = tryPinGeneration();
-        if (pin == null) { return false; }
+        if (pin == null) { return null; }
         try (pin) {
-            boolean replaced = state.replaceQueuedRequests(victims, incomingRequestId, hardKv, expectedKv, priority, capacity);
-            if (replaced) { publishCapacityRelease(); }
+            ReservationHandle replaced = state.replaceQueuedRequests(victims, incomingRequestId, hardKv, expectedKv, priority, capacity);
+            if (replaced != null) { publishCapacityRelease(); }
             return replaced;
         }
     }
@@ -320,10 +301,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return changed;
     }
 
-    public boolean finishPreemption(long attemptToken, PreemptionDecision decision) {
-        boolean changed = state.finishPreemption(attemptToken, decision);
-        if (changed && decision == PreemptionDecision.ABORT) { publishCapacityRelease(); }
-        return changed;
+    public ReservationHandle commitPreemption(long attemptToken) {
+        return state.finishPreemption(attemptToken, true);
+    }
+
+    public boolean abortPreemption(long attemptToken) {
+        boolean aborted = state.finishPreemption(attemptToken, false) != null;
+        if (aborted) { publishCapacityRelease(); }
+        return aborted;
     }
 
     public enum PreemptionBeginResult {
@@ -336,8 +321,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         INCOMING_ALREADY_RESERVED,
         ATTEMPT_ALREADY_EXISTS
     }
-
-    public enum PreemptionDecision { COMMIT, ABORT }
 
     public record PreemptionUpdate(Kind kind, long requestId, ReservationHandle reservation,
                                    PreemptionCancelPhase phase) {
@@ -389,7 +372,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         notifyEngineDispatchCapacityListeners();
         if (result.capacityImproved()) { signalPlacementCapacityChanged(); }
-        return () -> endpointEvents.onDecodeStatus(this, result.facts());
+        return () -> notifyWorkerFacts(result.facts());
     }
 
     public Runnable initializeFromPreparedStatus(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
@@ -401,7 +384,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public Runnable observeStatusHeartbeat(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         List<WorkerStatusFact> facts = state.observeHeartbeat(observation);
-        return () -> endpointEvents.onDecodeStatus(this, facts);
+        return () -> notifyWorkerFacts(facts);
     }
 
     public record WorkerStatusFact(
@@ -421,10 +404,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return new WorkerStatusFact(Kind.ACTIVE, reservation, 0L);
         }
 
-        public static WorkerStatusFact accepted(ReservationHandle reservation) {
-            return new WorkerStatusFact(Kind.ACCEPTED, reservation, 0L);
-        }
-
         public static WorkerStatusFact terminal(
                 ReservationHandle reservation, long errorCode) {
             return new WorkerStatusFact(Kind.TERMINAL, reservation, errorCode);
@@ -432,7 +411,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         public enum Kind {
             ACTIVE,
-            ACCEPTED,
             TERMINAL
         }
     }
@@ -447,32 +425,37 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     DecodeRoutingView routingViewSnapshot(String address) { return state.routingViewSnapshot(address); }
 
-    public LayeredAdmissionView resourceSnapshot() { return state.resourceSnapshot(); }
+    public ResourceSnapshot resourceSnapshot() { return state.resourceSnapshot(); }
 
     public long placementVersion() { return state.placementVersion(); }
-
-    public long realKvAvailable() { return state.realKvAvailable(); }
 
     public int getInflightCount() { return state.getInflightCount(); }
 
     public OptionalLong getLoadMetric() { return OptionalLong.of(state.getTotalLoad()); }
 
-    public record LayeredAdmissionView(DecodeRoutingView routing,
-                                       Map<Long, DecodeRequestView> reserved,
-                                       List<DecodeRequestView> confirmed,
-                                       int queuedCount,
-                                       int activeDispatchPermits) {
+    /** One immutable request table and capacity view captured under the admission lock. */
+    public record ResourceSnapshot(DecodeRoutingView routing,
+                                   Map<Long, DecodeRequestView> requests,
+                                   int queuedCount,
+                                   int activeDispatchPermits) {
+        public ResourceSnapshot {
+            requests = Map.copyOf(requests);
+        }
 
-        public long admissionVersion() {
-            return routing.admissionVersion();
+        public int reservedCount() {
+            return requests.size() - confirmedCount();
+        }
+
+        public int confirmedCount() {
+            return phaseCount(DecodeTaskPhase::isEngineConfirmed);
         }
 
         public int acceptedCount() {
-            return phaseCount(DecodeTaskPhase.ACCEPTED_NOT_RUNNING);
+            return phaseCount(phase -> phase == DecodeTaskPhase.ACCEPTED_NOT_RUNNING);
         }
 
         public int runningCount() {
-            return phaseCount(DecodeTaskPhase.RUNNING);
+            return phaseCount(phase -> phase == DecodeTaskPhase.RUNNING);
         }
 
         public int engineCapacityUsed() {
@@ -480,14 +463,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         public boolean isQueued(long requestId) {
-            DecodeRequestView request = reserved.get(requestId);
+            DecodeRequestView request = requests.get(requestId);
             return request != null && request.queued();
         }
 
-        private int phaseCount(DecodeTaskPhase phase) {
+        public boolean isReserved(long requestId) {
+            DecodeRequestView request = requests.get(requestId);
+            return request != null && !request.phase().isEngineConfirmed();
+        }
+
+        private int phaseCount(Predicate<DecodeTaskPhase> matches) {
             int count = 0;
-            for (DecodeRequestView task : confirmed) {
-                if (task.phase() == phase) {
+            for (DecodeRequestView task : requests.values()) {
+                if (matches.test(task.phase())) {
                     count++;
                 }
             }
@@ -512,7 +500,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         public long realKvUsed() { return placementUsage.expectedKvUsed(); }
         public long realKvAvailable() { return placementUsage.hardKvAvailable(); }
         public long engineFacingKvUsed() { return dispatchUsage.expectedKvUsed(); }
-        public long engineFacingKvAvailable() { return dispatchUsage.hardKvAvailable(); }
         public long totalKv() { return placementUsage.totalKvTokens(); }
 
         public DecodeRoutingView {
@@ -533,8 +520,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                     DecodeTaskPhase phase,
                                     boolean priorityKnown,
                                     long reservationToken,
-                                    boolean queued,
                                     boolean claimedForPreemption) {
+        public boolean queued() { return phase.isMasterQueued(); }
+
         public CapacityRelease placementRelease() {
             return new CapacityRelease(1L, kvTokens, expectedKvTokens);
         }
@@ -654,7 +642,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     protected void closeEndpoint() {
         List<ReservationHandle> reservations = state.retire();
-        try { endpointEvents.onDecodeGenerationRetired(this, reservations); }
+        try { for (ReservationHandle reservation : reservations) {
+            var context = scheduler.findActive(reservation.requestId());
+            if (context != null) { context.scheduler().onDecodeGenerationRetired(this, List.of(reservation)); }
+        } }
         finally { notifyEngineDispatchCapacityListeners(); }
     }
 
@@ -668,22 +659,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         DecodeState.Stats stats = state.stats();
-        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), stats.inflight());
-        reporter.reportDecodeTotalLoad(getIp(), stats.totalLoad());
-        reporter.reportDecodeInflightKvReserved(getIp(), stats.expectedKv());
-        reporter.reportDecodeInflightHardKvReserved(getIp(), stats.hardKv());
-        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), getIp(), stats.oldestAgeMs());
+        reporter.reportDecodeInflight(getIp(), stats.inflight(), stats.totalLoad(),
+                stats.expectedKv(), stats.hardKv(), stats.oldestAgeMs());
     }
 
     public void reportAdmissionMetrics(RequestSchedulerReporter reporter) {
-        LayeredAdmissionView view = resourceSnapshot();
-        String endpoint = ipPort();
-        reporter.reportDecodeReservedCount(endpoint, view.reserved().size());
-        reporter.reportDecodeShadowKvReserved(
-                endpoint, view.routing().inflightHardKv());
-        reporter.reportDecodeRunningCount(endpoint, view.runningCount());
-        reporter.reportDecodeAcceptedCount(endpoint, view.acceptedCount());
-        reporter.reportDecodeEngineLoad(endpoint, view.routing().engineLoad());
+        reporter.reportDecodeAdmission(ipPort(), resourceSnapshot());
     }
 
     private void publishCapacityRelease() {
@@ -704,7 +685,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private void signalPlacementCapacityChanged() {
         WorkerStatus.TopologySnapshot topology =
                 getStatus().topologySnapshot();
-        placementAvailability.capacityChanged(
+        placementAvailability.changed(
                 RoleType.DECODE, topology.group(), ipPort());
     }
 }

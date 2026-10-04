@@ -1,3 +1,5 @@
+
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import com.sun.management.ThreadMXBean;
 import java.lang.management.ManagementFactory;
 import java.nio.file.*;
@@ -34,7 +36,7 @@ public class PlanningBench {
     static double select(List<GroupPlanner.Item> items, int size) {
         // INCREMENTAL_BEGIN
         var batch = model.newBatchPrediction();
-        var selected = GroupPlanner.selectWithPrediction(items, GroupPlanner.itemAccess(), constraints(size),
+        var selected = GroupPlanner.selectWithPrediction(items, constraints(size),
                 (added, prefix) -> batch.append(added.seqLen(), added.hitCache()));
         // INCREMENTAL_END
         return selected.items().size() + selected.selectedPredictionMs().orElse(0);
@@ -61,7 +63,7 @@ public class PlanningBench {
     public static void main(String[] args) throws Exception {
         model = new FormulaPredictor(Files.readString(Path.of(args[0])));
         policy = new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).projectionPolicy();
+                () -> 1L, mock(BatchSchedulerReporter.class)).projectionPolicy();
         for (int size : new int[]{1, 8, 32, 64}) {
             var inputs = new ArrayList<List<GroupPlanner.Item>>();
             for (int i = 0; i < 64; i++) inputs.add(items(size, i));
@@ -71,7 +73,7 @@ public class PlanningBench {
         for (int depth : new int[]{0, 32, 128, 512}) {
             var endpoints = new ArrayList<RouteProjection.Inputs>();
             for (int i = 0; i < 5; i++) {
-                endpoints.add(new RouteProjection.Inputs(new QueueSnapshot(1000, true, ORDER,
+                endpoints.add(new RouteProjection.Inputs(new QueueSnapshot(1000, true, org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW, ORDER,
                         constraints(64), items(depth, i), null),
                         new WorkSnapshot(1000, List.of(), List.of(), 0)));
             }
@@ -84,7 +86,7 @@ public class PlanningBench {
                 double total = 0;
                 for (var endpoint : endpoints) {
                     var candidate = RouteProjection.project(endpoint, probe, model, policy);
-                    total += candidate.requiredProjectedTtftMs();
+                    total += candidate.projectedTtftMs().orElseThrow();
                 }
                 return total;
             });

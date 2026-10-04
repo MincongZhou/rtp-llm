@@ -1,8 +1,11 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
-import org.flexlb.balance.eviction.DecodeEndpointSnapshot;
+import org.flexlb.balance.eviction.EvictionPlanner;
+import org.flexlb.config.PreemptionConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -11,17 +14,32 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.FlexMetricTags;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.decodeRequirements;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_RESERVED_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_SHADOW_KV_RESERVED;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_RUNNING_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_ACCEPTED_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_ENGINE_LOAD;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
  * Phase 5 tests for the decode layered view: calibrate splits confirmed
@@ -42,12 +60,39 @@ class DecodeEndpointLayeredViewTest {
     void setUp() {
         status = EndpointTestSupport.workerStatus(
                 RoleType.DECODE, "10.0.0.1", 8080, 8081);
-        endpoint = new DecodeEndpoint(
-                status, EndpointTestSupport.noopEventSink());
+        endpoint = new DecodeEndpoint(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
         updateStatus(Map.of(), Map.of(), 20_000);
     }
 
     // ==================== calibrate: layer split + inheritance ====================
+
+    @Test
+    void heartbeatCountsOnlyConfirmedOwnersRetainedAfterReconciliation() {
+        for (long id = 1; id <= 4; id++) {
+            reserve(id, 128, 128, 30);
+        }
+        updateStatus(Map.of(
+                "1", runningTask(1L, TaskPhase.RUNNING, 128),
+                "2", runningTask(2L, TaskPhase.RUNNING, 128),
+                "3", runningTask(3L, TaskPhase.RUNNING, 128),
+                "4", runningTask(4L, TaskPhase.RUNNING, 128)), null, 19_488);
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(800L, List.of(1L), 9L, 128, 128, 70));
+        assertTrue(endpoint.updatePreemption(800L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+        assertTrue(endpoint.updatePreemption(800L, DecodeEndpoint.PreemptionUpdate.cancelReply(
+                1L, PreemptionCancelPhase.CANCEL_UNKNOWN)));
+
+        // One synthetic claim, one regressed report, one current allocation,
+        // and one ordinary owner absent from the FULL snapshot.
+        for (int round = 0; round < 2; round++) {
+            updateStatus(Map.of(
+                    "2", runningTask(2L, TaskPhase.RECEIVED, 0),
+                    "3", runningTask(3L, TaskPhase.RUNNING, 128)), null, 19_872);
+            assertEquals(3, endpoint.resourceSnapshot().confirmedCount());
+            assertEquals(4, endpoint.routingView().totalLoad());
+            assertFalse(isConfirmed(4L));
+        }
+    }
 
     @Test
     void calibrate_splitsConfirmedIntoAcceptedAndRunningLayers() {
@@ -60,7 +105,7 @@ class DecodeEndpointLayeredViewTest {
 
         assertEquals(1, endpoint.resourceSnapshot().acceptedCount());
         assertEquals(1, endpoint.resourceSnapshot().runningCount());
-        assertEquals(2, endpoint.resourceSnapshot().confirmed().size());
+        assertEquals(2, endpoint.resourceSnapshot().confirmedCount());
         assertEquals(0, endpoint.getInflightCount());
         assertTrue(isConfirmed(1L));
         assertTrue(isConfirmed(2L));
@@ -70,12 +115,14 @@ class DecodeEndpointLayeredViewTest {
         DecodeEndpoint.DecodeRequestView acceptedView = confirmedView(1L);
         assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING, acceptedView.phase());
         assertEquals(30, acceptedView.priority());
+        assertTrue(acceptedView.priorityKnown());
         assertEquals(256, acceptedView.kvTokens());
         assertFalse(acceptedView.claimedForPreemption());
 
         DecodeEndpoint.DecodeRequestView runningView = confirmedView(2L);
         assertEquals(DecodeTaskPhase.RUNNING, runningView.phase());
         assertEquals(40, runningView.priority());
+        assertTrue(runningView.priorityKnown());
     }
 
     @Test
@@ -113,22 +160,17 @@ class DecodeEndpointLayeredViewTest {
                 "1", runningTask(1L, TaskPhase.KV_ALLOCATED, 256),
                 "2", runningTask(2L, TaskPhase.RUNNING, 256)), null, 10_000);
         reserve(3L, 300, 308, 50);
-        RequestSchedulerReporter reporter =
-                org.mockito.Mockito.mock(RequestSchedulerReporter.class);
+        FlexMonitor monitor = mock(FlexMonitor.class);
 
-        endpoint.reportAdmissionMetrics(reporter);
+        endpoint.reportAdmissionMetrics(new RequestSchedulerReporter(monitor));
 
-        String endpointKey = "10.0.0.1:8080";
-        org.mockito.Mockito.verify(reporter)
-                .reportDecodeReservedCount(endpointKey, 1);
-        org.mockito.Mockito.verify(reporter)
-                .reportDecodeShadowKvReserved(endpointKey, 300L);
-        org.mockito.Mockito.verify(reporter)
-                .reportDecodeAcceptedCount(endpointKey, 1);
-        org.mockito.Mockito.verify(reporter)
-                .reportDecodeRunningCount(endpointKey, 1);
-        org.mockito.Mockito.verify(reporter)
-                .reportDecodeEngineLoad(endpointKey, 3);
+        FlexMetricTags tags = FlexMetricTags.of("endpoint", "10.0.0.1:8080");
+        verify(monitor).report(AUTO_TPM_DECODE_RESERVED_COUNT, tags, 1.0);
+        verify(monitor).report(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, tags, 300.0);
+        verify(monitor).report(AUTO_TPM_DECODE_RUNNING_COUNT, tags, 1.0);
+        verify(monitor).report(AUTO_TPM_DECODE_ACCEPTED_COUNT, tags, 1.0);
+        verify(monitor).report(AUTO_TPM_DECODE_ENGINE_LOAD, tags, 3.0);
+        verifyNoMoreInteractions(monitor);
     }
 
     // ==================== calibrate: registry follows the reports ====================
@@ -145,7 +187,7 @@ class DecodeEndpointLayeredViewTest {
 
         assertFalse(isConfirmed(1L));
         assertEquals(0, endpoint.resourceSnapshot().acceptedCount());
-        assertEquals(0, endpoint.resourceSnapshot().confirmed().size());
+        assertEquals(0, endpoint.resourceSnapshot().confirmedCount());
     }
 
     @Test
@@ -174,7 +216,7 @@ class DecodeEndpointLayeredViewTest {
         endpoint.evictExpiredRequests(1, requestId -> false);
 
         assertFalse(isConfirmed(1L));
-        assertEquals(0, endpoint.resourceSnapshot().confirmed().size(),
+        assertEquals(0, endpoint.resourceSnapshot().confirmedCount(),
                 "tracked TTL removal must release the published confirmed slot");
         assertEquals(0, endpoint.routingView().totalLoad());
         assertTrue(endpoint.routingView().admissionVersion() > versionBefore);
@@ -193,7 +235,7 @@ class DecodeEndpointLayeredViewTest {
                 101L,
                 DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.CANCEL_REQUESTED)));
         assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.canceled(reservations.get(1L))));
-        assertTrue(endpoint.finishPreemption(101L, DecodeEndpoint.PreemptionDecision.COMMIT));
+        assertNotNull(endpoint.commitPreemption(101L));
 
         // A delayed Decode report cannot resurrect a recently canceled victim.
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
@@ -217,10 +259,10 @@ class DecodeEndpointLayeredViewTest {
         assertTrue(endpoint.updatePreemption(102L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
 
         assertTrue(endpoint.updatePreemption(102L, DecodeEndpoint.PreemptionUpdate.fenced(reservations.get(1L))));
-        assertTrue(endpoint.finishPreemption(102L, DecodeEndpoint.PreemptionDecision.COMMIT));
+        assertNotNull(endpoint.commitPreemption(102L));
 
         assertFalse(isConfirmed(1L));
-        assertTrue(endpoint.resourceSnapshot().reserved().containsKey(9L));
+        assertTrue(endpoint.resourceSnapshot().isReserved(9L));
         assertEquals(1, endpoint.routingView().totalLoad());
         // The same late Decode sample rejected by typed-CANCELED fencing must
         // also be rejected after the stronger absent+terminal record proof.
@@ -237,7 +279,7 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.KV_ALLOCATED, 256)), null, 10_000);
 
         // realKvAvailable = reportedKvAvailable - remaining shadow hard KV.
-        assertEquals(10_000 - 300, endpoint.realKvAvailable());
+        assertEquals(10_000 - 300, endpoint.routingView().realKvAvailable());
         assertEquals(300, endpoint.routingView().inflightHardKv());
         // totalLoad = confirmed Engine-owned count + reserved inflight count.
         assertEquals(2, endpoint.routingView().totalLoad());
@@ -286,7 +328,7 @@ class DecodeEndpointLayeredViewTest {
         // reservation is provisional until typed Prefill CANCELED settles it.
         assertTrue(isConfirmed(2L));
         assertTrue(confirmedView(2L).claimedForPreemption());
-        assertTrue(endpoint.resourceSnapshot().reserved().containsKey(9L));
+        assertTrue(endpoint.resourceSnapshot().isReserved(9L));
         assertEquals(700, endpoint.routingView().inflightHardKv());
         assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
         assertTrue(endpoint.updatePreemption(
@@ -330,8 +372,8 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(0, after.acceptedCount());
         assertEquals(0, after.activeDispatchPermits());
         assertEquals(0, after.engineCapacityUsed());
-        assertTrue(after.reserved().isEmpty());
-        assertTrue(after.confirmed().isEmpty());
+        assertTrue(after.reservedCount() == 0);
+        assertTrue(after.confirmedCount() == 0);
     }
 
     @Test
@@ -350,7 +392,48 @@ class DecodeEndpointLayeredViewTest {
 
         assertEquals(DecodeEndpoint.PreemptionBeginResult.VICTIM_GONE, result);
         assertFalse(confirmedView(1L).claimedForPreemption());
-        assertFalse(endpoint.resourceSnapshot().reserved().containsKey(9L));
+        assertFalse(endpoint.resourceSnapshot().isReserved(9L));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void beginPreemptionRejectsRepeatedVictimWithoutMutatingOwnership(boolean staleSecondToken) {
+        reserve(1L, 500, 508, 30);
+        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
+        var exact = reservations.get(1L);
+        var second = staleSecondToken ? new DecodeEndpoint.ReservationHandle(
+                exact.endpointGenerationId(), exact.requestId(), exact.reservationToken() + 1) : exact;
+        long version = endpoint.placementVersion();
+
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.VICTIM_GONE,
+                endpoint.beginPreemption(101L, List.of(exact, second), 9L, 700, 708, 70,
+                        new DecodeEndpoint.AdmissionCapacity(1, 100)));
+
+        assertEquals(version, endpoint.placementVersion());
+        assertFalse(confirmedView(1L).claimedForPreemption());
+        assertFalse(endpoint.resourceSnapshot().isReserved(9L));
+    }
+
+    @Test
+    void retirementReportsActivePreemptionOwnersExactlyOnce() {
+        var scheduler = mock(org.flexlb.balance.scheduler.AbstractRequestScheduler.class);
+        endpoint = new DecodeEndpoint(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(scheduler));
+        reserve(1L, 500, 508, 30);
+        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(101L, List.of(1L), 9L, 700, 708, 70));
+        var incoming = endpoint.reservationHandle(9L);
+        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+
+        endpoint.close();
+        endpoint.close();
+
+        verify(scheduler).onDecodeGenerationRetired(endpoint, List.of(reservations.get(1L)));
+        verify(scheduler).onDecodeGenerationRetired(endpoint, List.of(incoming));
+        assertTrue(endpoint.resourceSnapshot().reservedCount() == 0);
+        assertTrue(endpoint.resourceSnapshot().confirmedCount() == 0);
+        assertNull(endpoint.commitPreemption(101L));
+        assertFalse(endpoint.abortPreemption(101L));
     }
 
     @Test
@@ -363,7 +446,7 @@ class DecodeEndpointLayeredViewTest {
                 beginPreemption(101L, List.of(2L, 999L),
                         9L, 700, 708, 70));
         assertFalse(confirmedView(2L).claimedForPreemption());
-        assertFalse(endpoint.resourceSnapshot().reserved().containsKey(9L));
+        assertFalse(endpoint.resourceSnapshot().isReserved(9L));
         assertEquals(version, endpoint.routingView().admissionVersion());
     }
 
@@ -400,16 +483,56 @@ class DecodeEndpointLayeredViewTest {
 
         assertEquals(0, endpoint.evictExpiredRequests(
                 100, requestId -> false));
-        assertTrue(endpoint.resourceSnapshot().reserved().containsKey(1L),
+        assertTrue(endpoint.resourceSnapshot().isReserved(1L),
                 "generic TTL cleanup must not deduct a claimed victim");
         assertEquals(1_200, endpoint.routingView().inflightHardKv(),
                 "victim and provisional incoming remain fully charged");
 
-        endpoint.finishPreemption(101L, DecodeEndpoint.PreemptionDecision.ABORT);
+        endpoint.abortPreemption(101L);
         assertEquals(1, endpoint.evictExpiredRequests(
                 100, requestId -> false));
-        assertFalse(endpoint.resourceSnapshot().reserved().containsKey(1L));
+        assertFalse(endpoint.resourceSnapshot().isReserved(1L));
         assertEquals(0, endpoint.routingView().inflightHardKv());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void claimedShadowConfirmedLaterRetainsCapacityUntilTerminal(boolean receivedAgain) {
+        DecodeEndpoint.ReservationHandle victim = reserve(1L, 500, 508, 30);
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(105L, List.of(1L), 9L, 700, 708, 70));
+        assertTrue(endpoint.updatePreemption(105L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+        assertTrue(endpoint.updatePreemption(105L, DecodeEndpoint.PreemptionUpdate.cancelReply(
+                1L, PreemptionCancelPhase.CANCEL_UNKNOWN)));
+
+        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 500)), null, 10_000);
+        assertTrue(endpoint.isAcceptedByEngine(victim));
+        assertTrue(confirmedView(1L).claimedForPreemption());
+        assertEquals(700, endpoint.routingView().inflightHardKv());
+
+        Map<String, TaskInfo> active = receivedAgain
+                ? Map.of("1", runningTask(1L, TaskPhase.RECEIVED, 0)) : Map.of();
+        updateStatus(active, null, 10_000);
+        updateStatus(active, null, 10_000);
+        assertEquals(DecodeTaskPhase.RUNNING, confirmedView(1L).phase());
+        assertEquals(2, endpoint.routingView().totalLoad());
+        assertEquals(8_800, endpoint.routingView().realKvAvailable(),
+                "missing allocation evidence must retain the exact victim's synthetic KV once");
+        assertEquals(DecodeEndpoint.ReservationReleaseResult.ENGINE_ACCEPTED,
+                endpoint.release(victim, DecodeEndpoint.ReleaseReason.NOT_SENT));
+        assertNull(endpoint.commitPreemption(105L));
+
+        assertTrue(endpoint.updatePreemption(105L, DecodeEndpoint.PreemptionUpdate.canceled(victim)));
+        assertFalse(endpoint.updatePreemption(105L, DecodeEndpoint.PreemptionUpdate.canceled(victim)));
+        assertEquals(1, endpoint.routingView().totalLoad());
+        assertEquals(9_300, endpoint.routingView().realKvAvailable());
+        var incoming = endpoint.reservationHandle(9L);
+        assertNotNull(incoming);
+        assertEquals(incoming, endpoint.commitPreemption(105L));
+        assertNull(endpoint.commitPreemption(105L));
+        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 500)), null, 10_000);
+        assertFalse(isConfirmed(1L), "late status must not resurrect the settled victim");
+        assertEquals(1, endpoint.routingView().totalLoad());
     }
 
     @Test
@@ -421,15 +544,15 @@ class DecodeEndpointLayeredViewTest {
                         9L, 700, 708, 70));
         assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
         assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.NOT_FOUND_STALE)));
-        endpoint.finishPreemption(101L, DecodeEndpoint.PreemptionDecision.ABORT);
+        endpoint.abortPreemption(101L);
 
         // Decode disappears while NOT_FOUND is being reconciled. Its KV is
         // conservatively held until the original Prefill reports it active.
         updateStatus(Map.of(), null, 10_000);
-        assertEquals(9_500, endpoint.realKvAvailable());
+        assertEquals(9_500, endpoint.routingView().realKvAvailable());
 
         assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.active(reservations.get(1L))));
-        assertEquals(10_000, endpoint.realKvAvailable(),
+        assertEquals(10_000, endpoint.routingView().realKvAvailable(),
                 "active reconciliation must release held KV before dropping the claim");
         assertFalse(confirmedView(1L).claimedForPreemption());
     }
@@ -451,39 +574,47 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(700, endpoint.routingView().inflightHardKv());
         assertEquals(2, endpoint.routingView().totalLoad(),
                 "victim and provisional incoming must both remain charged before abort");
-        assertEquals(8_800, endpoint.realKvAvailable());
-        endpoint.finishPreemption(104L, DecodeEndpoint.PreemptionDecision.ABORT);
+        assertEquals(8_800, endpoint.routingView().realKvAvailable());
+        var beforeAbort = endpoint.routingViewSnapshot(endpoint.ipPort());
+        assertTrue(endpoint.abortPreemption(104L));
+        var afterAbort = endpoint.routingViewSnapshot(endpoint.ipPort());
+        assertTrue(afterAbort.admissionVersion() > beforeAbort.admissionVersion());
+        assertEquals(0, afterAbort.inflightHardKv(), "abort must invalidate the cached capacity view");
+        assertEquals(700, beforeAbort.inflightHardKv(), "previous snapshots remain immutable");
 
         assertEquals(0, endpoint.routingView().inflightHardKv(),
                 "aborting the attempt releases only its provisional incoming reservation");
-        assertEquals(9_500, endpoint.realKvAvailable(),
+        assertEquals(9_500, endpoint.routingView().realKvAvailable(),
                 "aborting incoming work must not release the victim KV hold");
         assertEquals(1, endpoint.routingView().totalLoad(),
                 "the disappeared confirmed victim remains a synthetic slot");
 
         assertTrue(endpoint.release(reservations.get(1L), DecodeEndpoint.ReleaseReason.EXPIRED).released());
-        assertEquals(10_000, endpoint.realKvAvailable());
+        assertEquals(10_000, endpoint.routingView().realKvAvailable());
         assertEquals(0, endpoint.routingView().totalLoad());
         assertFalse(endpoint.release(reservations.get(1L), DecodeEndpoint.ReleaseReason.EXPIRED).released(),
                 "the exact local lease expires at most once");
-        assertEquals(10_000, endpoint.realKvAvailable());
+        assertEquals(10_000, endpoint.routingView().realKvAvailable());
     }
 
-    // ==================== snapshot capture: layered lists ====================
+    // ==================== snapshot capture: request phases ====================
 
     @Test
-    void snapshotCapture_splitsLayersAndExcludesCancelRequested() {
-        reserve(1L, 500, 508, 30);
+    void snapshotCapture_preservesPhasesAndPlannerExcludesClaimedVictims() {
+        reserve(1L, 500, 508, 70);
         reserve(2L, 400, 408, 30);
         reserve(3L, 300, 308, 30);
         updateStatus(Map.of("2", runningTask(2L, TaskPhase.KV_ALLOCATED, 256),
                 "3", runningTask(3L, TaskPhase.RUNNING, 512)), null, 10_000);
 
-        DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
-        assertEquals(List.of(1L), ids(snapshot.reserved()));
-        assertEquals(List.of(2L), ids(snapshot.accepted()));
-        assertEquals(List.of(3L), ids(snapshot.running()));
-        DecodeRequestView accepted = snapshot.accepted().get(0);
+        var snapshot = endpoint.resourceSnapshot();
+        assertEquals(List.of(1L, 2L, 3L), snapshot.requests().keySet().stream().sorted().toList());
+        assertEquals(DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
+                snapshot.requests().values().stream().filter(item -> item.requestId() == 1L).findFirst().orElseThrow().phase());
+        assertEquals(DecodeTaskPhase.RUNNING,
+                snapshot.requests().values().stream().filter(item -> item.requestId() == 3L).findFirst().orElseThrow().phase());
+        DecodeRequestView accepted = snapshot.requests().values().stream()
+                .filter(item -> item.requestId() == 2L).findFirst().orElseThrow();
         assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING, accepted.phase());
         assertEquals(256, accepted.kvTokens());
 
@@ -493,9 +624,24 @@ class DecodeEndpointLayeredViewTest {
                 20L, 64, 72, 70);
         beginPreemption(102L, List.of(3L),
                 30L, 64, 72, 70);
-        DecodeEndpointSnapshot after = DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
-        assertTrue(after.accepted().isEmpty());
-        assertTrue(after.running().isEmpty());
+        var after = endpoint.resourceSnapshot();
+        assertTrue(after.requests().get(2L).claimedForPreemption());
+        assertTrue(after.requests().get(3L).claimedForPreemption());
+        assertFalse(snapshot.requests().get(2L).claimedForPreemption());
+        assertFalse(snapshot.requests().get(3L).claimedForPreemption());
+        assertThrows(UnsupportedOperationException.class, () -> snapshot.requests().clear());
+        var request = decodeRequirements(70, 0L, 0L, new DecodeEndpoint.AdmissionCapacity(3L, 90L));
+        var preemption = new PreemptionConfig();
+        preemption.setAllowedVictimStages(java.util.EnumSet.of(VictimStage.DECODE_ENGINE_OWNED));
+        var earlierPlan = EvictionPlanner.planDecode(request, snapshot, preemption, true, new HashMap<>());
+        assertNotNull(earlierPlan);
+        assertEquals(List.of(2L), earlierPlan.victims().stream().map(DecodeRequestView::requestId).toList());
+        // Both attempts reserve an incoming slot. Keep a one-slot deficit so a missing
+        // claimed filter would incorrectly choose the accepted victim again.
+        var laterRequest = decodeRequirements(70, 0L, 0L,
+                new DecodeEndpoint.AdmissionCapacity(after.routing().totalLoad(), 90L));
+        assertNull(EvictionPlanner.planDecode(laterRequest, after, preemption, true, new HashMap<>()),
+                "all lower-priority Engine victims belong to existing attempts");
     }
 
     // ==================== helpers ====================
@@ -549,15 +695,12 @@ class DecodeEndpointLayeredViewTest {
         assertTrue(confirmedView(703L).claimedForPreemption());
         assertEquals(before.engineCapacityUsed(), endpoint.routingView().engineCapacityUsed());
         assertEquals(before.inflightHardKv(), endpoint.routingView().inflightHardKv());
-        assertFalse(endpoint.finishPreemption(704L, DecodeEndpoint.PreemptionDecision.COMMIT));
-    }
-
-    private static List<Long> ids(List<DecodeRequestView> entries) {
-        return entries.stream().map(DecodeRequestView::requestId).toList();
+        assertNull(endpoint.commitPreemption(704L));
     }
 
     private DecodeEndpoint.DecodeRequestView confirmedView(long requestId) {
-        return endpoint.resourceSnapshot().confirmed().stream()
+        return endpoint.resourceSnapshot().requests().values().stream()
+                .filter(request -> request.phase().isEngineConfirmed())
                 .filter(view -> view.requestId() == requestId)
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("request " + requestId + " not tracked"));
@@ -588,7 +731,8 @@ class DecodeEndpointLayeredViewTest {
     }
 
     private boolean isConfirmed(long requestId) {
-        return endpoint.resourceSnapshot().confirmed().stream()
+        return endpoint.resourceSnapshot().requests().values().stream()
+                .filter(request -> request.phase().isEngineConfirmed())
                 .anyMatch(view -> view.requestId() == requestId);
     }
 

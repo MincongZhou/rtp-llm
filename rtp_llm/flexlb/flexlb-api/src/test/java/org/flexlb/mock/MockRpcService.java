@@ -34,6 +34,9 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     private record FinishedTask(long version, EngineRpcService.TaskInfoPB task) { }
 
+    // The fixture has no decoder execution or KV allocation. Fencing under this
+    // lock prevents delayed Enqueue handlers from creating any later acceptance.
+    private final java.util.Map<Long, EngineRpcService.RequestCancelReasonPB> fences = new java.util.HashMap<>();
     private final List<FinishedTask> finishedTasks = new ArrayList<>();
     private volatile Consumer<EngineRpcService.EnqueueBatchRequestPB> acceptedBatchListener;
 
@@ -144,6 +147,7 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(request.getBatchId());
 
+        synchronized (fences) {
         if (beh.isFailOnEnqueue()) {
             for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                 for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
@@ -161,6 +165,11 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
             for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                 for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
                     long reqId = ext.getInput().getRequestId();
+                    if (fences.containsKey(reqId)) {
+                        responseBuilder.addErrors(EngineRpcService.EnqueueBatchErrorPB.newBuilder().setRequestId(reqId)
+                                .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(1).setErrorMessage("request cancelled")));
+                        continue;
+                    }
                     responseBuilder.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
                             .setRequestId(reqId)
                             .build());
@@ -168,6 +177,7 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
             }
         }
 
+        }
         responseObserver.onNext(responseBuilder.build());
         responseObserver.onCompleted();
         Consumer<EngineRpcService.EnqueueBatchRequestPB> listener = acceptedBatchListener;
@@ -177,12 +187,23 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     }
 
     @Override
+    public void cancel(EngineRpcService.CancelRequestPB request,
+                       StreamObserver<EngineRpcService.CancelResponsePB> observer) {
+        synchronized (fences) { fences.putIfAbsent(request.getRequestId(), request.getReason()); }
+        observer.onNext(EngineRpcService.CancelResponsePB.newBuilder()
+                .setStatus(EngineRpcService.CancelStatusPB.CANCEL_STATUS_TOMBSTONED)
+                .setDecodeCleanupComplete(true).build());
+        observer.onCompleted();
+    }
+
+    @Override
     public void getWorkerStatus(EngineRpcService.StatusVersionPB request,
                                 StreamObserver<EngineRpcService.WorkerStatusPB> responseObserver) {
         workerStatusCallCount.incrementAndGet();
         MockWorkerBehavior beh = behavior;
 
         EngineRpcService.WorkerStatusPB.Builder builder = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setSupportsRequestCleanup(true)
                 .setAlive(true)
                 .setRoleType(beh.getRoleType())
                 .setAvailableConcurrency(beh.getAvailableConcurrency())

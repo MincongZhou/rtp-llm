@@ -32,7 +32,7 @@ public record PrefillBatchFeatures(List<Item> items) {
         return items.size();
     }
 
-    public record Item(long seqLen, long hitCache) {
+    public record Item(long seqLen, long hitCache) implements ArithmeticFormula.Variables {
         public Item {
             if (seqLen < 0L) {
                 throw new IllegalArgumentException(
@@ -42,6 +42,17 @@ public record PrefillBatchFeatures(List<Item> items) {
                 throw new IllegalArgumentException(
                         "hitCache must be in [0, seqLen]");
             }
+        }
+
+        @Override
+        public double variable(int index) {
+            return switch (index) {
+                case PrefillTimeFormula.IDX_INPUT_TOKENS -> seqLen;
+                case PrefillTimeFormula.IDX_HIT_CACHE_TOKENS -> hitCache;
+                case PrefillTimeFormula.IDX_COMPUTE_TOKENS -> seqLen - hitCache;
+                case PrefillTimeFormula.IDX_HAS_HIT_CACHE -> hitCache > 0L ? 1.0 : 0.0;
+                default -> 0.0;
+            };
         }
     }
 }

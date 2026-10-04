@@ -219,17 +219,8 @@ final class MockLruBlockCache {
      * @param totalBlocksDemand the request's FULL block demand (ceil(inputLen/spb))
      * @param keys the request's hash-channel block keys (may be empty)
      * @return the lease ({@code hitKeys} = referenced reuse blocks,
-     *         {@code nakedBlocks} = net-new blocks), or {@code null} = LACK_MEM
-     *         (no state changed)
-     */
-    synchronized BlockLease acquireWithReuse(int totalBlocksDemand, List<Long> keys) {
-        return acquireWithReuseDetailed(totalBlocksDemand, keys).lease();
-    }
-
-    /**
-     * Detailed decode-flavoured admission (same semantics as
-     * {@link #acquireWithReuse}, plus the failure family on the LACK_MEM
-     * gate — see {@link AllocationFailure}). Failure changes no state.
+     *         {@code nakedBlocks} = net-new blocks), or the allocation failure
+     *         without changing state
      */
     synchronized AllocationOutcome acquireWithReuseDetailed(int totalBlocksDemand, List<Long> keys) {
         if (totalBlocksDemand <= 0) {

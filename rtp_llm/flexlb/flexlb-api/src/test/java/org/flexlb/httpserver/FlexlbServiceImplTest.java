@@ -11,13 +11,14 @@ import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
-import org.flexlb.service.RouteService;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -29,7 +30,6 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
-
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -38,7 +38,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
 import java.util.stream.Stream;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -60,13 +59,15 @@ class FlexlbServiceImplTest {
 
     private final java.util.concurrent.ScheduledExecutorService deadlineTimer =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
-    private RouteService routeService;
+    private RequestScheduler requestScheduler;
+    private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
     private LBStatusConsistencyService lbStatusConsistencyService;
     private EngineHealthReporter engineHealthReporter;
     private FlexlbGrpcForwarder grpcForwarder;
     private ConfigService configService;
     private BatchSchedulerReporter batchSchedulerReporter;
     private ServerScheduleLatencyRecorder serverLatencyRecorder;
+    private RequestSchedulerReporter requestSchedulerReporter;
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
     private ListAppender<ILoggingEvent> pvAppender;
@@ -74,7 +75,7 @@ class FlexlbServiceImplTest {
     @BeforeEach
     void setUp() {
         org.flexlb.telemetry.FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), "");
-        routeService = mock(RouteService.class);
+        requestScheduler = mock(RequestScheduler.class);
         lbStatusConsistencyService = mock(LBStatusConsistencyService.class);
         engineHealthReporter = mock(EngineHealthReporter.class);
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
@@ -85,21 +86,20 @@ class FlexlbServiceImplTest {
         FlexlbConfig flexlbConfig = org.flexlb.mock.TestFlexlbConfigs.create();
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
 
-        service = new FlexlbServiceImpl(
-                routeService,
-                lbStatusConsistencyService,
-                engineHealthReporter,
-                grpcForwarder,
-                configService,
-                batchSchedulerReporter,
-                serverLatencyRecorder,
-                mock(RequestSchedulerReporter.class)
-        );
+        requestSchedulerReporter = mock(RequestSchedulerReporter.class);
+        createService();
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
         pvAppender = new ListAppender<>();
         pvAppender.start();
         pvLogger.addAppender(pvAppender);
+    }
+
+    private void createService() {
+        service = FlexlbServiceTestSupport.create(requestScheduler,
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState),
+                lbStatusConsistencyService, engineHealthReporter, grpcForwarder, configService,
+                batchSchedulerReporter, serverLatencyRecorder, requestSchedulerReporter);
     }
 
     @AfterEach
@@ -115,13 +115,15 @@ class FlexlbServiceImplTest {
         FlexlbConfig requestConfig = org.flexlb.mock.TestFlexlbConfigs.create();
         when(configService.loadBalanceConfig()).thenReturn(requestConfig)
                 .thenThrow(new IllegalStateException("configuration must only be read once"));
+        org.mockito.Mockito.clearInvocations(configService);
+        createService();
         // Given: not master, no consistency needed
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
 
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
-        when(routeService.route(any(BalanceContext.class))).thenReturn(CompletableFuture.completedFuture(response));
+        when(requestScheduler.submit(any(BalanceContext.class))).thenReturn(CompletableFuture.completedFuture(response));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -145,8 +147,9 @@ class FlexlbServiceImplTest {
         assertTrue(resp.getSuccess());
         assertEquals(200, resp.getCode());
         ArgumentCaptor<BalanceContext> contextCaptor = ArgumentCaptor.forClass(BalanceContext.class);
-        verify(routeService).route(contextCaptor.capture());
-        assertSame(requestConfig, contextCaptor.getValue().getConfig());
+        verify(requestScheduler).submit(contextCaptor.capture());
+        org.junit.jupiter.api.Assertions.assertSame(requestConfig, contextCaptor.getValue().getConfig());
+        assertEquals(requestConfig.getScheduler().getType(), contextCaptor.getValue().getConfig().getScheduler().getType());
         verify(configService).loadBalanceConfig();
         assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
         verify(serverLatencyRecorder).recordArrival(anyLong());
@@ -157,9 +160,10 @@ class FlexlbServiceImplTest {
     void testSchedule_clientCancellationReleasesSchedulerOwnedRequest() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         CompletableFuture<Response> pendingRoute = new CompletableFuture<>();
-        when(routeService.route(any(BalanceContext.class))).thenReturn(pendingRoute);
-        when(routeService.cancelRequest(12_356L, 0L, CancelReason.CLIENT_CANCELLED))
-                .thenReturn(null);
+        when(requestScheduler.submit(any(BalanceContext.class))).thenAnswer(call -> {
+            org.flexlb.balance.scheduler.SchedulerTestSupport.bindOwner(call.getArgument(0, BalanceContext.class), requestState);
+            return pendingRoute;
+        });
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
@@ -171,8 +175,7 @@ class FlexlbServiceImplTest {
         inbound.run(() -> service.schedule(request, observer));
         inbound.cancel(null);
 
-        verify(routeService).cancelRequest(
-                12_356L, 0L, CancelReason.CLIENT_CANCELLED);
+        verify(requestState).onResponseUndeliverable(org.mockito.ArgumentMatchers.argThat(context -> context.getRequestId() == 12_356L));
         verifyNoInteractions(observer);
 
         Response lateRoute = new Response();
@@ -187,7 +190,10 @@ class FlexlbServiceImplTest {
     void testSchedule_alreadyCancelledContextCannotRaceAheadOfRegistration() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         CompletableFuture<Response> pendingRoute = new CompletableFuture<>();
-        when(routeService.route(any(BalanceContext.class))).thenReturn(pendingRoute);
+        when(requestScheduler.submit(any(BalanceContext.class))).thenAnswer(call -> {
+            org.flexlb.balance.scheduler.SchedulerTestSupport.bindOwner(call.getArgument(0, BalanceContext.class), requestState);
+            return pendingRoute;
+        });
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
         Context.CancellableContext inbound = Context.current().withCancellation();
@@ -198,10 +204,9 @@ class FlexlbServiceImplTest {
                         .setRequestId(12_357L)
                         .build(), observer));
 
-        var inOrder = inOrder(routeService);
-        inOrder.verify(routeService).route(any(BalanceContext.class));
-        inOrder.verify(routeService).cancelRequest(
-                12_357L, 0L, CancelReason.CLIENT_CANCELLED);
+        var inOrder = inOrder(requestScheduler, requestState);
+        inOrder.verify(requestScheduler).submit(any(BalanceContext.class));
+        inOrder.verify(requestState).onResponseUndeliverable(org.mockito.ArgumentMatchers.argThat(context -> context.getRequestId() == 12_357L));
         verifyNoInteractions(observer);
     }
 
@@ -214,7 +219,7 @@ class FlexlbServiceImplTest {
             response.setSuccess(true);
             response.setCode(200);
             response.setEnqueuedByMaster(expected);
-            when(routeService.route(any(BalanceContext.class)))
+            when(requestScheduler.submit(any(BalanceContext.class)))
                     .thenReturn(CompletableFuture.completedFuture(response));
 
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
@@ -238,7 +243,7 @@ class FlexlbServiceImplTest {
         Response response = Response.error(
                 StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
                 AdmissionRejectReason.SAME_PRIORITY_AHEAD);
-        when(routeService.route(any(BalanceContext.class)))
+        when(requestScheduler.submit(any(BalanceContext.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
@@ -272,7 +277,7 @@ class FlexlbServiceImplTest {
             response.setSuccess(true);
             response.setCode(200);
         }
-        when(routeService.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+        when(requestScheduler.submit(any(BalanceContext.class))).thenAnswer(invocation -> {
             BalanceContext ctx = invocation.getArgument(0);
             ctx.setSchedulingDiagnostics(java.util.Map.of(
                     "cause", "decode engine slots exhausted",
@@ -327,7 +332,7 @@ class FlexlbServiceImplTest {
 
         // Then
         verify(grpcForwarder).forwardScheduleToMaster(request);
-        verify(routeService, never()).route(any());
+        verify(requestScheduler, never()).submit(any());
 
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
@@ -358,7 +363,7 @@ class FlexlbServiceImplTest {
                 () -> service.schedule(request, observer));
 
         verifyNoInteractions(observer);
-        verify(routeService, never()).route(any());
+        verify(requestScheduler, never()).submit(any());
 
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response =
                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
@@ -374,7 +379,7 @@ class FlexlbServiceImplTest {
 
         verify(observer, times(1)).onNext(response);
         verify(observer, times(1)).onCompleted();
-        verify(routeService, never()).route(any());
+        verify(requestScheduler, never()).submit(any());
     }
 
     @Test
@@ -408,7 +413,7 @@ class FlexlbServiceImplTest {
 
         verify(observer, times(1)).onNext(response);
         verify(observer, times(1)).onCompleted();
-        verify(routeService, never()).route(any());
+        verify(requestScheduler, never()).submit(any());
     }
 
     @Test
@@ -434,7 +439,7 @@ class FlexlbServiceImplTest {
         assertFalse(response.getValue().getSuccess());
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
                 response.getValue().getCode());
-        verify(routeService, never()).route(any());
+        verify(requestScheduler, never()).submit(any());
     }
 
     @Test
@@ -495,7 +500,7 @@ class FlexlbServiceImplTest {
         assertEquals(
                 FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED,
                 cancel.getValue().getReason());
-        verify(routeService, never()).route(any());
+        verify(requestScheduler, never()).submit(any());
         verify(observer, times(1)).onNext(any());
         verify(observer, never()).onCompleted();
     }
@@ -512,7 +517,7 @@ class FlexlbServiceImplTest {
         Response localResponse = new Response();
         localResponse.setSuccess(true);
         localResponse.setCode(200);
-        when(routeService.route(any(BalanceContext.class))).thenReturn(CompletableFuture.completedFuture(localResponse));
+        when(requestScheduler.submit(any(BalanceContext.class))).thenReturn(CompletableFuture.completedFuture(localResponse));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -525,7 +530,7 @@ class FlexlbServiceImplTest {
 
         // Then
         verify(grpcForwarder).forwardScheduleToMaster(request);
-        verify(routeService).route(any(BalanceContext.class));
+        verify(requestScheduler).submit(any(BalanceContext.class));
 
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
@@ -583,7 +588,7 @@ class FlexlbServiceImplTest {
         assertFalse(response.getValue().getSuccess());
         verify(observer).onCompleted();
         verify(observer, never()).onError(any());
-        verifyNoInteractions(routeService);
+        verifyNoInteractions(requestScheduler);
     }
 
     @Test
@@ -609,7 +614,7 @@ class FlexlbServiceImplTest {
                 FlexlbGrpcForwarder.MasterForwardResult.failed(
                         Status.CANCELLED.asRuntimeException(), "10.0.0.2:7001")));
 
-        verify(routeService, never()).route(any());
+        verify(requestScheduler, never()).submit(any());
         verify(grpcForwarder).forwardScheduleToMaster(request);
         verifyNoMoreInteractions(grpcForwarder);
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
@@ -637,14 +642,14 @@ class FlexlbServiceImplTest {
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
-        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
+        when(requestScheduler.submit(any())).thenReturn(CompletableFuture.completedFuture(response));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12_349L)
                 .build(), mock(StreamObserver.class));
 
         verify(grpcForwarder, never()).forwardCancelToMaster(any());
-        verify(routeService, times(1)).route(any());
+        verify(requestScheduler, times(1)).submit(any());
     }
 
     @Test
@@ -656,10 +661,10 @@ class FlexlbServiceImplTest {
         Response success = new Response();
         success.setSuccess(true);
         success.setCode(200);
-        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(success));
+        when(requestScheduler.submit(any())).thenReturn(CompletableFuture.completedFuture(success));
         var inbound = Context.current().withDeadlineAfter(5, java.util.concurrent.TimeUnit.SECONDS,
                 deadlineTimer);
-        when(routeService.route(any())).thenAnswer(invocation -> {
+        when(requestScheduler.submit(any())).thenAnswer(invocation -> {
             assertSame(inbound.getDeadline(), Context.current().getDeadline());
             return CompletableFuture.completedFuture(success);
         });
@@ -670,7 +675,7 @@ class FlexlbServiceImplTest {
             pending.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(
                     nodeRejected(), "old:7001")); // Complete outside the original Context.
             ArgumentCaptor<BalanceContext> ctx = ArgumentCaptor.forClass(BalanceContext.class);
-            verify(routeService).route(ctx.capture());
+            verify(requestScheduler).submit(ctx.capture());
             assertEquals(81, ctx.getValue().getRequestId());
             verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
             verify(grpcForwarder, never()).forwardCancelToMaster(any());
@@ -691,7 +696,7 @@ class FlexlbServiceImplTest {
                 mock(StreamObserver.class)));
         inbound.cancel(null);
         pending.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(nodeRejected(), "old:7001"));
-        verify(routeService, never()).route(any());
+        verify(requestScheduler, never()).submit(any());
     }
 
     @Test
@@ -711,7 +716,7 @@ class FlexlbServiceImplTest {
             assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getValue().getCode());
             assertEquals("old:7001", response.getValue().getRealMasterHost());
         }
-        verify(routeService, never()).route(any());
+        verify(requestScheduler, never()).submit(any());
         verify(grpcForwarder, times(2)).forwardScheduleToMaster(any());
         verifyNoMoreInteractions(grpcForwarder);
     }
@@ -724,7 +729,7 @@ class FlexlbServiceImplTest {
         CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> stage = new CompletableFuture<>();
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(stage);
         CompletableFuture<Response> local = new CompletableFuture<>();
-        when(routeService.route(any())).thenReturn(local);
+        when(requestScheduler.submit(any())).thenReturn(local);
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(91).build(), observer);
 
@@ -732,7 +737,7 @@ class FlexlbServiceImplTest {
         assertTrue(stage.complete(rejection));
         assertFalse(stage.complete(rejection));
         verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
-        verify(routeService, times(1)).route(any());
+        verify(requestScheduler, times(1)).submit(any());
         verifyNoInteractions(observer);
         Response success = new Response();
         success.setSuccess(true);
@@ -747,7 +752,7 @@ class FlexlbServiceImplTest {
     void formerMasterDoesNotClaimAnOwnedRequestWasNeverAccepted() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-        when(routeService.getRequestState(88L, 0L)).thenReturn(new RequestState(88L,
+        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState).getRequestState(88L, 0L)).thenReturn(new RequestState(88L,
                 RequestState.Phase.ACKNOWLEDGED, DeliveryClaimKind.BATCH_ENQUEUE,
                 1001L, 10L, 20L, "already dispatched"));
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
@@ -758,7 +763,7 @@ class FlexlbServiceImplTest {
         verify(observer).onNext(result.capture());
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), result.getValue().getCode());
         assertTrue(result.getValue().hasLifecycle());
-        verify(routeService, never()).route(any());
+        verify(requestScheduler, never()).submit(any());
         verifyNoInteractions(grpcForwarder);
     }
 
@@ -768,13 +773,13 @@ class FlexlbServiceImplTest {
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
         RequestState owned = new RequestState(86L, RequestState.Phase.ACKNOWLEDGED,
                 DeliveryClaimKind.BATCH_ENQUEUE, 1001L, 10L, 20L, "owned here");
-        when(routeService.getRequestState(86L, 1001L)).thenReturn(owned);
-        when(routeService.cancelRequest(86L, 1001L, CancelReason.CLIENT_CANCELLED)).thenReturn(owned);
+        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState).getRequestState(86L, 1001L)).thenReturn(owned);
+        when(requestScheduler.cancel(86L, 1001L, CancelReason.CLIENT_CANCELLED)).thenReturn(owned);
         service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
                 .setRequestId(86).setBatchId(1001).build(), mock(StreamObserver.class));
         service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
                 .setRequestId(86).setBatchId(1001).build(), mock(StreamObserver.class));
-        verify(routeService).cancelRequest(86L, 1001L, CancelReason.CLIENT_CANCELLED);
+        verify(requestScheduler).cancel(86L, 1001L, CancelReason.CLIENT_CANCELLED);
         verifyNoInteractions(grpcForwarder);
     }
 
@@ -789,7 +794,7 @@ class FlexlbServiceImplTest {
         try {
             inbound.run(() -> service.schedule(
                     FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(87).build(), observer));
-            verify(routeService, never()).route(any());
+            verify(requestScheduler, never()).submit(any());
             ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> result =
                     ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
             verify(observer).onNext(result.capture());
@@ -899,7 +904,7 @@ class FlexlbServiceImplTest {
                     FlexlbGrpcForwarder.MasterForwardResult.failed(error, "old:7001")));
         }
         verifyNoInteractions(grpcForwarder);
-        verify(routeService, never()).route(any());
+        verify(requestScheduler, never()).submit(any());
     }
 
     private static FlexlbScheduleProtocol.FlexlbScheduleResponsePB nodeRejected() {
@@ -911,7 +916,7 @@ class FlexlbServiceImplTest {
     void testSchedule_exceptionHandling() {
         // Given: route throws exception
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
-        when(routeService.route(any(BalanceContext.class))).thenReturn(CompletableFuture.failedFuture(new RuntimeException("test error")));
+        when(requestScheduler.submit(any(BalanceContext.class))).thenReturn(CompletableFuture.failedFuture(new RuntimeException("test error")));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -956,9 +961,8 @@ class FlexlbServiceImplTest {
                     org.flexlb.telemetry.FlexlbTrace.startServer(
                             "rtp_llm.flexlb.schedule", io.opentelemetry.context.Context.root());
 
-            // buildContext() reads loadBalanceConfig(); make it throw.
-            when(configService.loadBalanceConfig())
-                    .thenThrow(new IllegalStateException("config unavailable"));
+            doThrow(new IllegalStateException("request reporting failed"))
+                    .when(requestSchedulerReporter).reportRequest(org.mockito.ArgumentMatchers.anyInt());
 
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                     FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
@@ -1028,7 +1032,7 @@ class FlexlbServiceImplTest {
             assertEquals((long) StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), data.getAttributes().get(
                     io.opentelemetry.api.common.AttributeKey.longKey("flexlb.schedule.code")));
             assertTrue(data.getEvents().isEmpty());
-            verify(routeService, never()).route(any());
+            verify(requestScheduler, never()).submit(any());
         }
     }
 
@@ -1090,7 +1094,7 @@ class FlexlbServiceImplTest {
             when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(forwarded);
             when(lbStatusConsistencyService.isMaster()).thenReturn(false);
             when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(remote);
-            when(routeService.route(any())).thenReturn(local);
+            when(requestScheduler.submit(any())).thenReturn(local);
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = new StreamObserver<>() {
                 public void onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB value) {
                     org.flexlb.telemetry.FlexlbTrace.finishWithGrpcStatus(span, "OK", 0, true);
@@ -1170,8 +1174,11 @@ class FlexlbServiceImplTest {
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
-        when(routeService.route(any(BalanceContext.class)))
-                .thenReturn(CompletableFuture.completedFuture(response));
+        when(requestScheduler.submit(any(BalanceContext.class)))
+                .thenAnswer(call -> {
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.bindOwner(call.getArgument(0, BalanceContext.class), requestState);
+                    return CompletableFuture.completedFuture(response);
+                });
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
         doThrow(new RuntimeException("client disconnected"))
@@ -1183,8 +1190,7 @@ class FlexlbServiceImplTest {
 
         verify(observer, times(1)).onNext(any());
         verify(observer, never()).onCompleted();
-        verify(routeService).cancelRequest(
-                88_001L, 0L, CancelReason.CLIENT_CANCELLED);
+        verify(requestState).onResponseUndeliverable(org.mockito.ArgumentMatchers.argThat(context -> context.getRequestId() == 88_001L));
         assertPvContains("\"requestId\":88001");
         assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
     }
@@ -1199,7 +1205,7 @@ class FlexlbServiceImplTest {
         response.setCode(200);
 
         ArgumentCaptor<BalanceContext> ctxCaptor = ArgumentCaptor.forClass(BalanceContext.class);
-        when(routeService.route(ctxCaptor.capture())).thenReturn(CompletableFuture.completedFuture(response));
+        when(requestScheduler.submit(ctxCaptor.capture())).thenReturn(CompletableFuture.completedFuture(response));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(99999L)
@@ -1239,12 +1245,13 @@ class FlexlbServiceImplTest {
                 }
                 """);
         when(configService.loadBalanceConfig()).thenReturn(queueConfig);
+        createService();
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
-        when(routeService.route(context.capture())).thenReturn(
+        when(requestScheduler.submit(context.capture())).thenReturn(
                 CompletableFuture.completedFuture(response));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
@@ -1267,12 +1274,13 @@ class FlexlbServiceImplTest {
                 }
                 """);
         when(configService.loadBalanceConfig()).thenReturn(directConfig);
+        createService();
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
-        when(routeService.route(context.capture())).thenReturn(
+        when(requestScheduler.submit(context.capture())).thenReturn(
                 CompletableFuture.completedFuture(response));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
@@ -1290,8 +1298,8 @@ class FlexlbServiceImplTest {
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
-        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
-        when(routeService.getRequestState(700L, 0)).thenReturn(
+        when(requestScheduler.submit(any())).thenReturn(CompletableFuture.completedFuture(response));
+        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState).getRequestState(700L, 0)).thenReturn(
                 new RequestState(700L, RequestState.Phase.ACKNOWLEDGED,
                         DeliveryClaimKind.BATCH_ENQUEUE, 1001L, 10L, 20L,
                         "engine acknowledged batch"));
@@ -1311,7 +1319,7 @@ class FlexlbServiceImplTest {
 
     @Test
     void testGetRequestState_rejectsStaleBatchIdAsNotFound() {
-        when(routeService.getRequestState(702L, 1002L)).thenReturn(null);
+        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState).getRequestState(702L, 1002L)).thenReturn(null);
         StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> observer = mock(StreamObserver.class);
 
         service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()

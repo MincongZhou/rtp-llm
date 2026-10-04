@@ -1,5 +1,6 @@
 package org.flexlb.httpserver;
 
+import org.flexlb.config.FlexlbConfig;
 import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
@@ -66,7 +67,7 @@ class FlexlbGrpcForwarderAsyncTest {
             CountDownLatch received = new CountDownLatch(1);
             try (TraceCapture capture = new TraceCapture();
                  RpcFixture fixture = RpcFixture.start((request, observer) -> {
-                     serverContext.set(FlexlbTrace.spanContext(GrpcTraceInterceptor.getOtelContext()));
+                     serverContext.set(Span.fromContext(GrpcTraceInterceptor.getOtelContext()).getSpanContext());
                      response.set(observer);
                      received.countDown();
                  })) {
@@ -143,7 +144,7 @@ class FlexlbGrpcForwarderAsyncTest {
         try (TraceCapture capture = new TraceCapture();
              RpcFixture fixture = RpcFixture.startCancel((request, observer) -> {
                  assertFalse(Context.current().isCancelled());
-                 assertEquals("one", FlexlbTrace.spanContext(GrpcTraceInterceptor.getOtelContext())
+                 assertEquals("one", Span.fromContext(GrpcTraceInterceptor.getOtelContext()).getSpanContext()
                          .getTraceState().get("vendor"));
                  observer.onNext(FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().setFound(true).build());
                  observer.onCompleted();

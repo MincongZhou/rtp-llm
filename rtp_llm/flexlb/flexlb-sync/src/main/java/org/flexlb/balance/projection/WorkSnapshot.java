@@ -165,9 +165,7 @@ public final class WorkSnapshot {
      * Complete committed duration, absent when any work unit lacks a duration.
      */
     public OptionalLong totalRemainingWorkMs() {
-        return hasUnknownWork()
-                ? OptionalLong.empty()
-                : OptionalLong.of(knownRemainingWorkMs());
+        return totalRemainingWorkMsAt(capturedAtMs);
     }
 
     /** Complete preceding work at a later clock; only observed running work consumes time. */
@@ -175,18 +173,6 @@ public final class WorkSnapshot {
         return hasUnknownWork()
                 ? OptionalLong.empty()
                 : OptionalLong.of(knownRemainingWorkMsAt(observedAtMs));
-    }
-
-    /**
-     * Sum of work units whose duration is known. Callers that require a complete
-     * endpoint total must use {@link #totalRemainingWorkMs()}.
-     */
-    public long knownRemainingWorkMs() {
-        long total = knownNonRunningWorkMs;
-        for (long runningMs : runningWorkMs) {
-            total = saturatedAdd(total, runningMs);
-        }
-        return total;
     }
 
     /** Known work rebased to a later planning clock without copying the snapshot. */

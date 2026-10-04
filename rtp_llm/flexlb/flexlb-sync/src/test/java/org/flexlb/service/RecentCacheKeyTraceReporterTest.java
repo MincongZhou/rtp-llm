@@ -1,11 +1,14 @@
 package org.flexlb.service;
 
-import org.flexlb.cache.core.ShardedRecentCacheKeyWindow;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.prediction.DecodeCostFormula;
+import org.flexlb.balance.scheduler.BalanceContext;
+import org.flexlb.balance.scheduler.RequestRequirements;
+import org.flexlb.cache.core.RecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -14,6 +17,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -32,24 +36,18 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_report_request_hits_against_prior_pool() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
+        inject(reporter, "recentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         BalanceContext firstContext = mock(BalanceContext.class);
         Request firstRequest = mock(Request.class);
-        when(firstContext.getRequestId()).thenReturn(1L);
         when(firstContext.getRequest()).thenReturn(firstRequest);
-        when(firstRequest.getBlockCacheKeys()).thenReturn(List.of(1L, 2L, 3L));
-        when(firstRequest.getSeqLen()).thenReturn(300L);
-        when(firstRequest.getCacheKeyBlockSize()).thenReturn(100L);
+        when(firstContext.getRequirements()).thenReturn(inputs(1L, List.of(1L, 2L, 3L), 300L, 100L));
 
         BalanceContext secondContext = mock(BalanceContext.class);
         Request secondRequest = mock(Request.class);
-        when(secondContext.getRequestId()).thenReturn(2L);
         when(secondContext.getRequest()).thenReturn(secondRequest);
-        when(secondRequest.getBlockCacheKeys()).thenReturn(List.of(2L, 3L, 4L));
-        when(secondRequest.getSeqLen()).thenReturn(300L);
-        when(secondRequest.getCacheKeyBlockSize()).thenReturn(100L);
+        when(secondContext.getRequirements()).thenReturn(inputs(2L, List.of(2L, 3L, 4L), 300L, 100L));
 
         reporter.report(firstContext);
         reporter.report(secondContext);
@@ -64,7 +62,7 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_skip_window_write_and_metric_when_window_switch_is_off() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
+        inject(reporter, "recentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig disabledConfig = new FlexlbConfig();
@@ -84,7 +82,7 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_write_window_but_skip_metric_when_metric_switch_is_off() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
+        inject(reporter, "recentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig metricOffConfig = new FlexlbConfig();
@@ -107,7 +105,7 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_record_zero_theory_hit_for_empty_cache_key_request() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
+        inject(reporter, "recentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig config = new FlexlbConfig();
@@ -123,7 +121,7 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_report_theory_hit_tokens_over_input_tokens() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
+        inject(reporter, "recentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig config = new FlexlbConfig();
@@ -143,7 +141,7 @@ class RecentCacheKeyTraceReporterTest {
     @Test
     void should_report_recent_hit_tokens_with_page_rr_cache_key_block_size() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
-        inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
+        inject(reporter, "recentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig config = new FlexlbConfig();
@@ -157,13 +155,39 @@ class RecentCacheKeyTraceReporterTest {
                 60_000L, 1024L, 2048L);
     }
 
+    @Test
+    void laterRequestMutationDoesNotChangeTheRegisteredCacheInput() throws Exception {
+        RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
+        inject(reporter, "recentCacheKeyWindow", smallWindow());
+        inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
+
+        List<Long> originalKeys = new ArrayList<>(List.of(11L, 22L));
+        Request request = new Request();
+        request.setBlockCacheKeys(originalKeys);
+        request.setSeqLen(256L);
+        request.setCacheKeyBlockSize(128L);
+        BalanceContext first = mock(BalanceContext.class);
+        when(first.getRequest()).thenReturn(request);
+        when(first.getRequirements()).thenReturn(inputs(17L, originalKeys, 256L, 128L));
+
+        originalKeys.clear();
+        request.setSeqLen(1L);
+        request.setCacheKeyBlockSize(1L);
+        reporter.report(first);
+        reporter.report(context(new FlexlbConfig(), List.of(11L, 22L), 256L, 128L));
+
+        InOrder inOrder = inOrder(cacheMetricsReporter);
+        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(60_000L, 0L, 256L);
+        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(60_000L, 256L, 256L);
+    }
+
     private static void inject(Object target, String fieldName, Object value) throws Exception {
         Field field = RecentCacheKeyTraceReporter.class.getDeclaredField(fieldName);
         field.setAccessible(true);
         field.set(target, value);
     }
 
-    private static ShardedRecentCacheKeyWindow smallWindow() {
+    private static RecentCacheKeyWindow smallWindow() {
         FlexlbConfig config = new FlexlbConfig();
         config.getObservability().getCacheHit().getRecentKeyWindow()
                 .setDurationMs(60_000L);
@@ -171,7 +195,7 @@ class RecentCacheKeyTraceReporterTest {
                 .setMaxKeyOccurrences(3_200L);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        return new ShardedRecentCacheKeyWindow(configService);
+        return new RecentCacheKeyWindow(configService);
     }
 
     private static BalanceContext contextWithConfig(FlexlbConfig config) {
@@ -189,9 +213,15 @@ class RecentCacheKeyTraceReporterTest {
         Request request = mock(Request.class);
         when(balanceContext.getConfig()).thenReturn(config);
         when(balanceContext.getRequest()).thenReturn(request);
-        when(request.getBlockCacheKeys()).thenReturn(cacheKeys);
-        when(request.getSeqLen()).thenReturn(seqLen);
-        when(request.getCacheKeyBlockSize()).thenReturn(cacheKeyBlockSize);
+        when(balanceContext.getRequirements()).thenReturn(inputs(0L, cacheKeys, seqLen, cacheKeyBlockSize));
         return balanceContext;
+    }
+
+    private static RequestRequirements inputs(long requestId, List<Long> cacheKeys,
+                                             long seqLen, long cacheKeyBlockSize) {
+        return new RequestRequirements(requestId, 50, seqLen,
+                new DecodeEndpoint.AdmissionCapacity(0L, 100L),
+                RequestRequirements.DecodeMode.IMMEDIATE,
+                DecodeCostFormula.parse("running_size"), seqLen, null, cacheKeys, cacheKeyBlockSize, true, 0);
     }
 }

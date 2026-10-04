@@ -6,20 +6,26 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestBatchSubmission;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestContext;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestEndpointCapabilities;
-import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestRequestRegistry;
+import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestRequestScheduler;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestTelemetry;
 import org.junit.jupiter.api.Test;
-
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
-
 import static org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.unavailable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.mock;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 
 /** Final batch admission, transport handoff, and completion-correlation contract. */
@@ -28,8 +34,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void preparedPredictionAndExactBatchReachTransportOnce() {
         Fixture fixture = new Fixture(701L);
-        ScheduledRequest first = fixture.item(1L);
-        ScheduledRequest second = fixture.item(2L);
+        RequestRoute first = fixture.item(1L);
+        RequestRoute second = fixture.item(2L);
         String result = fixture.context.deliver(
                 fixture.strategy, List.of(first, second), "fixed_window", 3,
                 OptionalLong.of(83L));
@@ -64,8 +70,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void missingPlannedPredictionUsesFrozenEvaluatorForCommittedBatch() {
         Fixture fixture = new Fixture(702L);
-        ScheduledRequest first = fixture.item(1L);
-        ScheduledRequest second = fixture.item(2L);
+        RequestRoute first = fixture.item(1L);
+        RequestRoute second = fixture.item(2L);
 
         fixture.context.deliver(
                 fixture.strategy, List.of(first, second),
@@ -82,7 +88,7 @@ class BatchDeliveryStrategyTest {
     @Test
     void nonPositiveBatchIdClosesSubmissionBeforeEndpointOwnership() {
         Fixture fixture = new Fixture(0L);
-        ScheduledRequest item = fixture.item(1L);
+        RequestRoute item = fixture.item(1L);
 
         String result = fixture.context.deliver(
                 fixture.strategy, List.of(item),
@@ -98,10 +104,35 @@ class BatchDeliveryStrategyTest {
         assertTrue(fixture.slots.committed().isEmpty());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedPreparationClosesSubmissionOnceAndPreservesCause(boolean cleanupFails) {
+        Fixture fixture = new Fixture(701L);
+        var submission = mock(BatchDeliveryStrategy.PreparedSubmission.class);
+        var primary = new IllegalStateException("batch id allocation failed");
+        var cleanup = new IllegalStateException("submission close failed");
+        if (cleanupFails) {
+            doThrow(cleanup).when(submission).close();
+        }
+        var strategy = new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.accepted(submission), () -> { throw primary; }, fixture.telemetry.metrics());
+
+        var transaction = strategy.prepare(List.of(fixture.item(1L)),
+                DeliveryStrategyTestSupport.EVALUATOR, OptionalLong.empty());
+
+        assertThrows(IllegalStateException.class, transaction::commitUnderLock);
+        transaction.close();
+        assertEquals(CapacityBoundary.Status.FAILED, transaction.blockedResult().status());
+        assertSame(primary, transaction.blockedResult().cause());
+        assertEquals(cleanupFails ? List.of(cleanup) : List.of(), List.of(primary.getSuppressed()));
+        verify(submission).close();
+        verify(submission, never()).submit(any());
+        assertTrue(fixture.capabilities.handoffs().isEmpty());
+    }
+
     @Test
     void unavailableSubmissionReturnsExactHeadBoundaryBeforeAdmission() {
         Fixture fixture = new Fixture(701L);
-        ScheduledRequest head = fixture.item(1L);
+        RequestRoute head = fixture.item(1L);
         CapacityBoundary unavailable = unavailable();
         fixture.submission.prepareBoundary(unavailable);
 
@@ -119,7 +150,7 @@ class BatchDeliveryStrategyTest {
     @Test
     void unavailableAdmissionClosesPreparedSubmissionAndReturnsBoundary() {
         Fixture fixture = new Fixture(701L);
-        ScheduledRequest head = fixture.item(1L);
+        RequestRoute head = fixture.item(1L);
         fixture.capabilities.rejectPermitAt(0);
 
         String result = fixture.context.deliver(
@@ -139,8 +170,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void unavailableSuffixSubmitsLargestAdmittedPrefixAndRepredictsIt() {
         Fixture fixture = new Fixture(701L);
-        ScheduledRequest first = fixture.item(1L);
-        ScheduledRequest second = fixture.item(2L);
+        RequestRoute first = fixture.item(1L);
+        RequestRoute second = fixture.item(2L);
         fixture.capabilities.rejectPermitAt(1);
 
         String result = fixture.context.deliver(
@@ -160,8 +191,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void synchronousTransportCompletionWaitsForCapabilityHandoffClose() {
         Fixture fixture = new Fixture(701L);
-        ScheduledRequest first = fixture.item(1L);
-        ScheduledRequest second = fixture.item(2L);
+        RequestRoute first = fixture.item(1L);
+        RequestRoute second = fixture.item(2L);
         fixture.submission.completeSynchronously(
                 first, DeliveryResult.delivered());
         fixture.submission.completeSynchronously(
@@ -190,8 +221,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void callbackForUnsubmittedIdentityFailsClosed() {
         Fixture fixture = new Fixture(701L);
-        ScheduledRequest canonical = fixture.item(1L);
-        ScheduledRequest lookalike = DeliveryStrategyTestSupport.item(
+        RequestRoute canonical = fixture.item(1L);
+        RequestRoute lookalike = DeliveryStrategyTestSupport.item(
                 canonical.requestId(), canonical.priority(),
                 canonical.enqueuedAtMs(), canonical.seqLen(),
                 canonical.hitCache());
@@ -213,16 +244,16 @@ class BatchDeliveryStrategyTest {
     @Test
     void timeoutAndUncertainTransportOutcomesReachExactClaims() {
         Fixture fixture = new Fixture(701L);
-        ScheduledRequest first = fixture.item(1L);
-        ScheduledRequest second = fixture.item(2L);
+        RequestRoute first = fixture.item(1L);
+        RequestRoute second = fixture.item(2L);
         fixture.context.deliver(
                 fixture.strategy, List.of(first, second),
                 "outcomes", 0, OptionalLong.empty());
-        RuntimeException timeout = new RuntimeException("timeout");
+        var timeout = new java.util.concurrent.TimeoutException("timeout");
         RuntimeException uncertain = new RuntimeException("uncertain");
 
         fixture.submission.complete(
-                first, DeliveryResult.timedOut(timeout));
+                first, DeliveryResult.uncertain(timeout));
         fixture.submission.complete(
                 second, DeliveryResult.uncertain(uncertain));
 
@@ -231,7 +262,7 @@ class BatchDeliveryStrategyTest {
                 fixture.slots.completions().get(0).completion();
         DeliveryResult unresolved =
                 fixture.slots.completions().get(1).completion();
-        assertEquals(DeliveryResult.Status.TIMED_OUT,
+        assertEquals(DeliveryResult.Status.UNCERTAIN,
                 timedOut.status());
         assertEquals(DeliveryResult.Status.UNCERTAIN,
                 unresolved.status());
@@ -239,36 +270,38 @@ class BatchDeliveryStrategyTest {
         assertSame(uncertain, unresolved.cause());
     }
 
-    @Test
-    void lostClaimExcludesOnlyThatMemberFromSubmittedBatch() {
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1})
+    void lostClaimExcludesOnlyThatMemberFromSubmittedBatch(int lostIndex) {
         Fixture fixture = new Fixture(701L);
-        ScheduledRequest first = fixture.item(1L);
-        ScheduledRequest second = fixture.item(2L);
-        fixture.slots.commitLostFor(first);
+        List<RequestRoute> items = List.of(fixture.item(1L), fixture.item(2L), fixture.item(3L));
+        RequestRoute lost = items.get(lostIndex);
+        List<RequestRoute> submitted = items.stream().filter(item -> item != lost).toList();
+        fixture.slots.commitLostFor(lost);
         fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(new WorkSnapshot.RequestWork(99L, WorkSnapshot.Phase.COMMITTED, 25L)), List.of(), 0L));
 
-        fixture.context.deliver(
-                fixture.strategy, List.of(first, second),
-                "claim-race", 0,
-                OptionalLong.of(999L));
+        fixture.context.deliver(fixture.strategy, items, "claim-race", 0, OptionalLong.of(999L));
 
-        assertEquals(List.of(second),
-                fixture.submission.command().exactItems());
-        assertEquals(100L, fixture.submission.command().predictedMs());
-        DeliveryStrategyTestSupport.BatchTelemetry telemetry =
-                fixture.telemetry.batches().getFirst();
-        assertEquals(List.of(second), telemetry.dispatched());
-        assertEquals(100L, telemetry.predictedMs());
-        assertEquals(Map.of(second, 100L),
+        assertEquals(submitted, fixture.submission.command().exactItems());
+        assertEquals(200L, fixture.submission.command().predictedMs());
+        DeliveryStrategyTestSupport.BatchTelemetry telemetry = fixture.telemetry.batches().getFirst();
+        assertEquals(submitted, telemetry.dispatched());
+        assertEquals(200L, telemetry.predictedMs());
+        assertEquals(Map.of(submitted.get(0), 200L, submitted.get(1), 200L),
                 fixture.slots.unstartedWorkMs(),
                 "cancelled members must not inflate the delivered batch lifetime");
-        assertEquals(125L, fixture.slots.remainingWorkMsAt(second, 1_000L).orElseThrow());
+        for (RequestRoute item : submitted) {
+            assertEquals(225L, fixture.slots.remainingWorkMsAt(item, 1_000L).orElseThrow());
+            verify(fixture.capabilities.permit(item)).dispatch();
+        }
+        verify(fixture.capabilities.permit(lost), never()).dispatch();
+        verify(fixture.capabilities.permit(lost)).release();
     }
 
     @Test
     void zeroPredictionStillSubmitsTheBatch() {
         Fixture fixture = new Fixture(701L);
-        ScheduledRequest item = fixture.item(1L);
+        RequestRoute item = fixture.item(1L);
 
         fixture.context.deliver(fixture.strategy, List.of(item),
                 "zero", 0, OptionalLong.of(0L));
@@ -280,7 +313,7 @@ class BatchDeliveryStrategyTest {
     @Test
     void unknownPrecedingWorkStillSubmitsWithUnknownRemainingTime() {
         Fixture fixture = new Fixture(701L);
-        ScheduledRequest item = fixture.item(1L);
+        RequestRoute item = fixture.item(1L);
         fixture.capabilities.precedingWork(new WorkSnapshot(2_000L, List.of(), List.of(), 1L));
 
         fixture.context.deliver(fixture.strategy, List.of(item),
@@ -292,12 +325,97 @@ class BatchDeliveryStrategyTest {
         assertTrue(fixture.slots.remainingWorkMsAt(item, 2_000L).isEmpty());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void preparationFailureReleasesAllOwnedResourcesAndPreservesCause(boolean cleanupFails) {
+        Fixture fixture = new Fixture(701L);
+        RequestRoute first = fixture.item(1L);
+        RequestRoute second = fixture.item(2L);
+        RequestRoute last = fixture.item(3L);
+        IllegalStateException primary = new IllegalStateException("preparation failed");
+        IllegalStateException cleanup = new IllegalStateException("permit release failed");
+        doAnswer(invocation -> {
+            if (cleanupFails) {
+                doThrow(cleanup).when(fixture.capabilities.permit(first)).release();
+            }
+            throw primary;
+        }).when(fixture.slots.requests()).prepareDispatch(eq(last), any());
+
+        assertSame(primary, assertThrows(IllegalStateException.class,
+                () -> fixture.strategy.prepare(List.of(first, second, last),
+                        DeliveryStrategyTestSupport.EVALUATOR, OptionalLong.empty())));
+
+        for (RequestRoute item : List.of(first, second)) {
+            verify(fixture.capabilities.permit(item)).release();
+            verify(fixture.capabilities.permit(item), never()).dispatch();
+        }
+        verify(fixture.capabilities.batchReservation()).close();
+        assertEquals(1, fixture.submission.totalCloseCount());
+        assertEquals(cleanupFails ? List.of(cleanup) : List.of(), List.of(primary.getSuppressed()));
+        assertTrue(fixture.slots.committed().isEmpty());
+    }
+
+    @Test
+    void preparedMembersAreFrozenUntilCommitOrClose() {
+        Fixture fixture = new Fixture(701L);
+        RequestRoute first = fixture.item(1L);
+        RequestRoute late = fixture.item(2L);
+        try (var transaction = (BatchDeliveryStrategy.BatchTransaction) fixture.strategy.prepare(
+                List.of(first), DeliveryStrategyTestSupport.EVALUATOR, OptionalLong.of(10L))) {
+            assertEquals(List.of(first), transaction.items());
+            assertThrows(UnsupportedOperationException.class, () -> transaction.items().set(0, late));
+            assertThrows(IllegalStateException.class, () -> transaction.append(late));
+        }
+        verify(fixture.capabilities.permit(first)).release();
+        verify(fixture.capabilities.batchReservation()).close();
+        assertEquals(1, fixture.submission.closeCount());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedCommittedDeliverySettlesEveryMemberDespiteCleanupFailures(boolean submitRejected) {
+        Fixture fixture = new Fixture(701L);
+        RequestRoute first = fixture.item(1L);
+        RequestRoute second = fixture.item(2L);
+        var submission = mock(BatchDeliveryStrategy.PreparedSubmission.class);
+        var cause = new IllegalStateException("delivery abandoned");
+        var submissionFailure = new IllegalStateException("submission cleanup failed");
+        var memberFailure = new IllegalStateException("first member cleanup failed");
+        doThrow(cause).when(submission).submit(any());
+        doThrow(submissionFailure).when(submission).close();
+        doThrow(memberFailure).when(fixture.slots.requests()).failDeliveryPreparation(first, cause);
+        var strategy = new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.accepted(submission), () -> 701L, fixture.telemetry.metrics());
+
+        try (var transaction = strategy.prepare(List.of(first, second),
+                DeliveryStrategyTestSupport.EVALUATOR, OptionalLong.of(20L))) {
+            var preceding = transaction.commitUnderLock().materialize();
+            if (submitRejected) {
+                assertSame(cause, assertThrows(IllegalStateException.class,
+                        () -> transaction.handoff("rejected", 0, preceding)));
+                assertEquals(List.of(submissionFailure), List.of(cause.getSuppressed()));
+            } else {
+                assertSame(submissionFailure, assertThrows(IllegalStateException.class,
+                        () -> transaction.abort(cause)));
+            }
+            transaction.abort(cause);
+        }
+
+        assertEquals(List.of(memberFailure), List.of(submissionFailure.getSuppressed()));
+        verify(submission).close();
+        verify(fixture.slots.requests()).failDeliveryPreparation(first, cause);
+        verify(fixture.slots.requests()).failDeliveryPreparation(second, cause);
+        verify(fixture.capabilities.permit(first)).release();
+        verify(fixture.capabilities.permit(second)).release();
+        fixture.capabilities.handoffs().forEach(handoff -> verify(handoff).close());
+        assertTrue(fixture.slots.completions().isEmpty());
+    }
+
     private static final class Fixture {
         private final TestBatchSubmission submission =
                 new TestBatchSubmission();
         private final TestEndpointCapabilities capabilities =
                 new TestEndpointCapabilities();
-        private final TestRequestRegistry slots = new TestRequestRegistry();
+        private final TestRequestScheduler slots = new TestRequestScheduler();
         private final TestTelemetry telemetry = new TestTelemetry();
         private final TestContext context = new TestContext();
         private final long correlationId;
@@ -305,15 +423,14 @@ class BatchDeliveryStrategyTest {
 
         private Fixture(long correlationId) {
             this.correlationId = correlationId;
-            this.strategy = new BatchDeliveryStrategy(
-                    submission::tryPrepareSubmission,
-                    () -> this.correlationId,
-                    slots.requests(),
-                    telemetry.metrics());
+            this.strategy = new BatchDeliveryStrategy(submission::tryPrepareSubmission, () -> this.correlationId, telemetry.metrics());
         }
 
-        private ScheduledRequest item(long requestId) {
-            ScheduledRequest item = DeliveryStrategyTestSupport.item(requestId);
+        private RequestRoute item(long requestId) {
+            RequestRoute item = DeliveryStrategyTestSupport.item(requestId);
+            var request = org.mockito.Mockito.mock(BalanceContext.class);
+            org.mockito.Mockito.when(request.scheduler()).thenReturn(slots.requests());
+            org.mockito.Mockito.when(item.ctx()).thenReturn(request);
             capabilities.bind(item);
             return item;
         }

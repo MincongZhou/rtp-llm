@@ -18,18 +18,17 @@ import java.util.List;
  * @param endpointId       decode endpoint key ("ip:httpPort")
  * @param victims          selected victims in eviction order
  * @param evictionCase     {@link #CASE_SLOT} / {@link #CASE_KV} / {@link #CASE_SLOT_AND_KV}
- * @param totalCost        h-weighted total cost; a combined plan sums its two
- *                         already-weighted parts and is never re-multiplied
  * @param freedKvTokens    sum of the victims' releasable hard KV tokens
- * @param cost             structured {@link PlanCost} for 7.2 comparison
+ * @param priorityHarmProfile exact priority harm, the absolute first comparison dimension
+ * @param deterministicTieBreak smallest victim request id
  */
 public record DecodeEvictionProposal(
         String endpointId,
         List<DecodeRequestView> victims,
         String evictionCase,
-        long totalCost,
         long freedKvTokens,
-        PlanCost cost) {
+        PriorityHarmProfile priorityHarmProfile,
+        long deterministicTieBreak) {
 
     public DecodeEvictionProposal {
         victims = List.copyOf(victims);
@@ -53,10 +52,12 @@ public record DecodeEvictionProposal(
     public static final String CASE_SLOT_AND_KV = "decode_slot_and_kv_full";
 
     /**
-     * Cross-endpoint plan preference (smaller = better): {@link PlanCost#ORDER}
-     * then endpointId for determinism.
+     * Prefer less exact priority harm, then fewer victims and the smallest request id.
+     * Scalar diagnostic cost never participates in priority-safety ordering.
      */
     public static final Comparator<DecodeEvictionProposal> ORDER = Comparator
-            .comparing(DecodeEvictionProposal::cost, PlanCost.ORDER)
+            .comparing(DecodeEvictionProposal::priorityHarmProfile)
+            .thenComparingInt(proposal -> proposal.victims().size())
+            .thenComparingLong(DecodeEvictionProposal::deterministicTieBreak)
             .thenComparing(DecodeEvictionProposal::endpointId);
 }

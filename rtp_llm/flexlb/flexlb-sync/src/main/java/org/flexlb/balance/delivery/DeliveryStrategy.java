@@ -1,10 +1,11 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.RequestRoute;
 
 import java.util.List;
 import java.util.OptionalLong;
@@ -18,23 +19,13 @@ public interface DeliveryStrategy {
 
     /** Reserve the largest feasible prefix without mutating queue ownership. */
     Transaction prepare(
-            List<ScheduledRequest> candidates,
+            List<RequestRoute> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs);
 
-    /**
-     * Pure planning duration for an exact group. The return value keeps
-     * fractional milliseconds so GroupPlanner can compare exact boundaries.
-     */
-    double projectGroupDurationMs(
-            List<ScheduledRequest> items,
-            PrefillTimePredictor.Evaluator evaluator);
-
     /** Fresh callback for GroupPlanner's strictly growing prefixes in one select call. */
-    default GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
-            PrefillTimePredictor.Evaluator evaluator) {
-        return (added, items) -> projectGroupDurationMs(items, evaluator);
-    }
+    GroupPlanner.PrefixPrediction<RequestRoute> newGroupPredictor(
+            PrefillTimePredictor.Evaluator evaluator);
 
     /** Pure projection behavior paired with this live delivery strategy. */
     RouteProjection.DeliveryProjection projectionPolicy();
@@ -42,21 +33,21 @@ public interface DeliveryStrategy {
     /** One delivery transaction across prepare, queue commit, and handoff. */
     interface Transaction extends AutoCloseable {
 
-        List<ScheduledRequest> items();
+        List<RequestRoute> items();
 
         /** First candidate not covered by this transaction, if any. */
-        ScheduledRequest blockedItem();
+        RequestRoute blockedItem();
 
         CapacityBoundary blockedResult();
 
         /** Commit ownership and capture preceding work under the same endpoint lock. */
-        WorkSnapshot commitUnderLock();
+        PrefillState.WorkCapture commitUnderLock();
 
         /** Transfer committed ownership to the configured delivery mode. */
         void handoff(String decisionReason, int remainingQueueDepth,
                      WorkSnapshot precedingWork);
 
-        /** Resolve any committed ownership that handoff did not transfer. */
+        /** Resolve untransferred committed ownership; null means handoff returned without an exception. */
         void abort(Throwable cause);
 
         @Override

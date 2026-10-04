@@ -60,11 +60,6 @@ public final class SchedulingMetadata {
         return expiresAtMs;
     }
 
-    /** Remaining request lifetime; may be zero or negative after expiration. */
-    public long remainingMs(long nowMs) {
-        return expiresAtMs - nowMs;
-    }
-
     public boolean expired(long nowMs) {
         return nowMs >= expiresAtMs;
     }

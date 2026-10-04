@@ -5,15 +5,15 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeMode;
+import org.flexlb.balance.scheduler.RequestRequirements;
+import org.flexlb.balance.scheduler.RequestRequirements.DecodeMode;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.PriorityNormalizer;
 import org.springframework.stereotype.Component;
@@ -27,42 +27,39 @@ public class DecodeSelector {
 
     private static final int MAX_SELECTION_ATTEMPTS = 2;
     private enum Availability { READY, BUSY, IMPOSSIBLE }
-    private final WorkerDirectory workerDirectory;
+    private final EndpointRegistry endpointRegistry;
     private final EndpointRoundRobin rotation = new EndpointRoundRobin();
 
-    public DecodeSelector(WorkerDirectory workerDirectory) {
-        this.workerDirectory = workerDirectory;
+    public DecodeSelector(EndpointRegistry endpointRegistry) {
+        this.endpointRegistry = endpointRegistry;
     }
 
     public PlacementResult<SelectedRole, RoleType> select(
-            DecodeBinding request, String group) {
+            RequestRequirements request, String group) {
         for (int attempt = 0; attempt < MAX_SELECTION_ATTEMPTS; attempt++) {
-            List<DecodeRoutingView> snapshots = workerDirectory.decodeRoutingSnapshot(group);
+            List<DecodeRoutingView> snapshots = endpointRegistry.decodeRoutingSnapshot(group);
             if (snapshots.isEmpty()) {
                 return PlacementResult.blocked(RoleType.DECODE);
             }
             Availability[] availabilityByWorker = new Availability[snapshots.size()];
             Availability preferredAvailability = Availability.IMPOSSIBLE;
-            boolean allWorkersTooSmall = true;
             long largestKvBudget = 0L;
             for (int index = 0; index < snapshots.size(); index++) {
                 DecodeRoutingView view = snapshots.get(index);
                 Availability availability = availability(request, view);
                 availabilityByWorker[index] = availability;
-                allWorkersTooSmall &= availability == Availability.IMPOSSIBLE;
                 largestKvBudget = Math.max(largestKvBudget, request.capacity().kvBudget(view.totalKv()));
                 if (availability == Availability.READY
                         || availability == Availability.BUSY
-                            && preferredAvailability == Availability.IMPOSSIBLE
-                            && request.mode() != DecodeMode.IMMEDIATE) {
+                            && preferredAvailability == Availability.IMPOSSIBLE) {
                     preferredAvailability = availability;
                 }
             }
-            if (allWorkersTooSmall) {
+            if (preferredAvailability == Availability.IMPOSSIBLE) {
                 return PlacementResult.rejected(oversizedRequestFailure(
                         request.expectedKvTokens(), largestKvBudget));
             }
-            if (preferredAvailability == Availability.IMPOSSIBLE) {
+            if (preferredAvailability == Availability.BUSY && request.mode() == DecodeMode.IMMEDIATE) {
                 return classifyCapacityFailure(request, snapshots);
             }
             Availability selectedAvailability = preferredAvailability;
@@ -89,7 +86,7 @@ public class DecodeSelector {
                     i -> snapshots.get(i).address());
             if (selectedIndex < 0) { throw new IllegalStateException("Decode snapshot candidate disappeared"); }
             DecodeRoutingView selected = snapshots.get(selectedIndex);
-            WorkerEndpoint.GenerationPin pin = workerDirectory.captureDecodeGeneration(selected);
+            WorkerEndpoint.GenerationPin pin = endpointRegistry.captureDecodeGeneration(selected);
             if (pin != null) {
                 return PlacementResult.success(buildSelectedRole(
                         selected, pin, request.requestId()));
@@ -99,13 +96,13 @@ public class DecodeSelector {
     }
 
     private PlacementResult<SelectedRole, RoleType> classifyCapacityFailure(
-            DecodeBinding request, List<DecodeRoutingView> views) {
+            RequestRequirements request, List<DecodeRoutingView> views) {
         Response failure = null;
         boolean uniformFailure = true;
         List<Map<String, Object>> evidence = new ArrayList<>();
         for (DecodeRoutingView view : views) {
             Response workerFailure;
-            try (WorkerEndpoint.GenerationPin pin = workerDirectory.captureDecodeGeneration(view)) {
+            try (WorkerEndpoint.GenerationPin pin = endpointRegistry.captureDecodeGeneration(view)) {
                 if (pin == null) {
                     workerFailure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
                 } else {
@@ -134,7 +131,7 @@ public class DecodeSelector {
     }
 
     /** Classify only the dimensions that prevent this request from fitting. */
-    static Response classifyCapacityFailure(DecodeBinding request, DecodeEndpoint.AdmissionSummary snapshot) {
+    static Response classifyCapacityFailure(RequestRequirements request, DecodeEndpoint.AdmissionSummary snapshot) {
         boolean dispatch = request.mode() == DecodeMode.IMMEDIATE;
         var routing = snapshot.routing();
         var usage = dispatch ? routing.dispatchUsage() : routing.placementUsage();
@@ -175,7 +172,7 @@ public class DecodeSelector {
                 ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD : AdmissionRejectReason.SAME_PRIORITY_AHEAD);
     }
 
-    private static Availability availability(DecodeBinding request, DecodeRoutingView view) {
+    private static Availability availability(RequestRequirements request, DecodeRoutingView view) {
         if (view.totalKv() > 0L && request.expectedKvTokens() > request.capacity().kvBudget(view.totalKv())) {
             return Availability.IMPOSSIBLE;
         }
