@@ -30,8 +30,8 @@ class SchedulerArchitectureTest {
     }
 
     @Test
-    void publicContractHasOnlySchedulingAndDrainOperations() {
-        org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of("submit", "cancel", "stopAccepting", "termination"),
+    void publicContractHasOnlySchedulingAndCancellation() {
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of("submit", "cancel"),
                 Arrays.stream(RequestScheduler.class.getDeclaredMethods()).map(java.lang.reflect.Method::getName)
                         .collect(java.util.stream.Collectors.toSet()));
         for (Class<?> type : new Class<?>[] {AbstractRequestScheduler.class, DirectRequestScheduler.class,

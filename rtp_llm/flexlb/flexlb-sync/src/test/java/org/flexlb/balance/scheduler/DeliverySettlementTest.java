@@ -206,7 +206,7 @@ class DeliverySettlementTest {
     }
 
     @Test
-    void failedLocalCleanupRetainsOwnershipAndFailsTerminationWithoutBusyRetry() throws Exception {
+    void failedLocalCleanupRetainsOwnershipAndRecordsFailureWithoutBusyRetry() throws Exception {
         Member member = member(60L, 60L);
         ledger.commit(60L, List.of(member.item()));
         doThrow(new IllegalStateException("injected endpoint failure")).when(prefill).releaseCommittedItem(member.item());
@@ -215,7 +215,7 @@ class DeliverySettlementTest {
         assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(1, 1);
         assertTrue(registry.requests.isCurrent(member.slot()));
-        assertTrue(registry.termination().toCompletableFuture().isCompletedExceptionally());
+        org.junit.jupiter.api.Assertions.assertNotNull(SchedulerTestSupport.failure(registry));
         verify(prefill, after(150).times(1)).releaseCommittedItem(member.item());
     }
 

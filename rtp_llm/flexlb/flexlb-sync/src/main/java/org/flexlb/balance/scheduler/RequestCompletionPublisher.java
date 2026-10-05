@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * reporting runs here before asking the context to select its response; a terminal
  * fact recorded in the meantime can invalidate that acknowledgement. Already
  * selected terminal responses are queued directly. This executor owns execution,
- * in-flight accounting and shutdown, while resource settlement remains with the scheduler.
+ * in-flight accounting and shutdown, while request resource settlement remains with BalanceContext.
  * External Future operations execute synchronously; internal responses are
  * queued so user continuations run outside scheduler and endpoint locks.
  */
@@ -57,8 +57,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
 
         void closePublication() {
             if (closed.compareAndSet(false, true)) {
-                publisher.exitPublication();
-                slot.scheduler().release();
+                publisher.exitPublication(this);
             }
         }
 
@@ -119,7 +118,8 @@ final class RequestCompletionPublisher implements AutoCloseable {
     /** Null while open; otherwise the shared, uninterruptible close result. */
     private CompletableFuture<Throwable> closeCompletion;
 
-    private int inFlightPublications;
+    private final java.util.Set<PublicationPermit> publications =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 
     RequestCompletionPublisher(int configuredWorkers, org.flexlb.service.monitor.BatchSchedulerReporter reporter) {
         this.reporter = reporter;
@@ -139,28 +139,22 @@ final class RequestCompletionPublisher implements AutoCloseable {
         executor.prestartAllCoreThreads();
     }
 
-    // ── 发布许可：认领与归还执行计数 ──
+    // ── 发布许可：记录实际尚未结束的回包 ──
     RequestCompletionPublisher.PublicationPermit tryReservePublication(BalanceContext exactSlot, BalanceContext.PublicationKind kind) {
         synchronized (lifecycleMonitor) {
             if (closeCompletion != null) {
                 return null;
             }
-            inFlightPublications++;
-            exactSlot.scheduler().retain();
-            return new RequestCompletionPublisher.PublicationPermit(this, exactSlot, kind);
+            var permit = new PublicationPermit(this, exactSlot, kind);
+            publications.add(permit);
+            return permit;
         }
     }
 
-    void exitPublication() {
+    private void exitPublication(PublicationPermit permit) {
         synchronized (lifecycleMonitor) {
-            if (inFlightPublications <= 0) {
-                throw new IllegalStateException(
-                        "completion publication counter underflow");
-            }
-            inFlightPublications--;
-            if (inFlightPublications == 0) {
-                lifecycleMonitor.notifyAll();
-            }
+            publications.remove(permit);
+            if (publications.isEmpty()) { lifecycleMonitor.notifyAll(); }
         }
     }
 
@@ -295,7 +289,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
     private void finishClose() {
         boolean interrupted = false;
         synchronized (lifecycleMonitor) {
-            while (inFlightPublications != 0) {
+            while (!publications.isEmpty()) {
                 try {
                     lifecycleMonitor.wait();
                 } catch (InterruptedException interruption) {

@@ -6,7 +6,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import java.util.function.Consumer;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
@@ -76,83 +75,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     private List<BalanceContext> ownedRequests() {
         return requests.snapshotActive().stream().filter(context -> context.scheduler() == this).toList();
     }
-    private final Object lifecycle = new Object();
-    private final CompletableFuture<Void> terminated = new CompletableFuture<>();
-    private boolean accepting = true;
-    private long obligations;
-    private Throwable failure;
-    private boolean drainScheduled;
-
-
-    /**
-     * Accept one submission and retain a shutdown obligation atomically.
-     * The caller must release it in finally, including when registration fails.
-     * This guards graceful drain; it does not reserve scheduling capacity.
-     */
-    protected final boolean tryAcquireSubmissionPermit() {
-        synchronized (lifecycle) {
-            if (!accepting) { return false; }
-            obligations++;
-            return true;
-        }
-    }
-
-    final void retain() {
-        if (!retainIfActive()) { throw new IllegalStateException("scheduler has drained"); }
-    }
-
-    /** Late timer and endpoint callbacks cannot reopen an already drained scheduler. */
-    final boolean retainIfActive() {
-        synchronized (lifecycle) {
-            if (!accepting && obligations == 0) { return false; }
-            obligations++;
-            return true;
-        }
-    }
-
-    final void release() {
-        synchronized (lifecycle) {
-            if (obligations <= 0) { throw new IllegalStateException("scheduler obligation underflow"); }
-            obligations--;
-            completeIfDrained();
-        }
-    }
-
-    final void recordFailure(Throwable cause) {
-        synchronized (lifecycle) { failure = Failures.append(failure, cause); }
-        terminated.completeExceptionally(cause);
-    }
-
-    @Override
-    public final void stopAccepting() {
-        synchronized (lifecycle) {
-            accepting = false;
-            completeIfDrained();
-        }
-    }
-
-    private void completeIfDrained() {
-        if (accepting || obligations != 0 || drainScheduled) { return; }
-        drainScheduled = true;
-        Throwable result = failure;
-        // Do not execute user callbacks under a request/endpoint/publication lock.
-        Thread.ofPlatform().daemon().name("flexlb-scheduler-close").start(() -> {
-            // Cleanup still runs if an earlier failure already completed termination.
-            Throwable finalFailure = Failures.run(result, this::closeOwnedResources);
-            if (finalFailure == null) {
-                terminated.complete(null);
-            } else {
-                terminated.completeExceptionally(finalFailure);
-            }
-        });
-    }
-
-    /** Release scheduler infrastructure after the final request obligation. */
-    protected void closeOwnedResources() {
-    }
-
-    @Override
-    public final CompletionStage<Void> termination() { return terminated.minimalCompletionStage(); }
+    final void recordFailure(Throwable cause) { runtime.recordFailure(cause); }
 
     @Override
     public final RequestState cancel(long requestId, long batchId, CancelReason reason) {
@@ -246,8 +169,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         if (!enterAdmissionHandleGate()) {
             return null;
         }
-        AdmissionHandle claim = null;
-        boolean retained = false;
+        boolean transferred = false;
         try {
             BalanceContext slot = requestSlot(victim.requestId());
             if (slot == null) {
@@ -261,18 +183,13 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         || item.requestExpired(System.currentTimeMillis())) {
                     return null;
                 }
-                claim = slot.beginWithdrawal(item, (operation, response) -> finishAdmission(slot, operation, response));
-                slot.scheduler().retain();
-                retained = true;
+                AdmissionHandle claim = slot.beginWithdrawal(item, (operation, response) -> finishAdmission(slot, operation, response));
+                transferred = claim != null;
                 return claim;
             }
         } finally {
-            if (!retained) {
-                if (claim == null) {
-                    exitAdmissionHandleGate();
-                } else {
-                    claim.finish();
-                }
+            if (!transferred) {
+                exitAdmissionHandleGate();
             }
         }
     }
@@ -430,7 +347,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 handle = isCurrentSlot(slot) ? slot.beginAdmission((operation, response) -> finishAdmission(slot, operation, response)) : null;
             }
             transferred = handle != null;
-            if (transferred) { slot.scheduler().retain(); }
             return handle;
         } finally {
             if (!transferred) {
@@ -716,14 +632,11 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             failure = Failures.run(failure, () -> expirationTimer.attachInactivityDeadline(ctx));
             // Drain must see the failure before the last admission gate opens.
             if (failure != null) {
-                synchronized (lifecycle) { this.failure = Failures.append(this.failure, failure); }
+                runtime.recordFailure(failure);
             }
         } finally {
             exitAdmissionHandleGate();
-            ctx.scheduler().release();
         }
-        // Completion listeners may reenter shutdown and wait for admission drain.
-        if (failure != null) { terminated.completeExceptionally(failure); }
         Failures.rethrow(failure, "request slot cleanup failed");
     }
 
@@ -1063,7 +976,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             actionTerminal = terminal;
         }
         requests.archive(ctx, actionTerminal);
-        ctx.scheduler().release();
     }
 
     private void executeFinalization(TerminalAction action) {

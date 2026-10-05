@@ -388,7 +388,7 @@ class RequestLifetimeTest {
         AbstractRequestScheduler scheduler = mock(AbstractRequestScheduler.class);
         BalanceContext context = org.mockito.Mockito.spy(RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 901L));
         when(SchedulerTestSupport.repository(scheduler).isCurrent(context)).thenReturn(true);
-        context.attachScheduler(scheduler);
+        context.bindScheduler(scheduler);
         var exact = new java.util.concurrent.atomic.AtomicReference<ExpirationTimer.RequestDeadline>();
         var failure = new IllegalStateException("installation failed");
         try (var timer = new ExpirationTimer(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(scheduler))) {

@@ -52,7 +52,7 @@ class RequestCompletionPublicationRaceTest {
     void nestedSynchronousPublicationKeepsOuterCloseReentrant(boolean asyncOuter) throws Exception {
         var publisher = new RequestCompletionPublisher(1, mock(BatchSchedulerReporter.class));
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 510L);
-        context.attachScheduler(RequestProtocolTestSupport.directOwner(mock(AbstractRequestScheduler.class)));
+        context.bindScheduler(RequestProtocolTestSupport.directOwner(mock(AbstractRequestScheduler.class)));
         var outerPermit = publisher.tryReservePublication(context, BalanceContext.PublicationKind.TERMINAL);
         var innerPermit = publisher.tryReservePublication(context, BalanceContext.PublicationKind.TERMINAL);
         var outer = new BalanceContext.RequestFuture((completion, response, failure, interrupt) -> false);
@@ -92,7 +92,7 @@ class RequestCompletionPublicationRaceTest {
         try (var owner = new RequestCompletionPublisher(1, mock(BatchSchedulerReporter.class));
              var other = new RequestCompletionPublisher(1, mock(BatchSchedulerReporter.class))) {
             var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 511L);
-            context.attachScheduler(RequestProtocolTestSupport.directOwner(mock(AbstractRequestScheduler.class)));
+            context.bindScheduler(RequestProtocolTestSupport.directOwner(mock(AbstractRequestScheduler.class)));
             var permit = owner.tryReservePublication(context, BalanceContext.PublicationKind.TERMINAL);
             try {
                 var publication = new RequestCompletionPublisher.SelectedPublication(permit, null, null);
@@ -100,8 +100,8 @@ class RequestCompletionPublicationRaceTest {
                     if (async) { other.submit(publication); }
                     else { other.publishNow(publication); }
                 });
-                assertEquals(0, org.springframework.test.util.ReflectionTestUtils
-                        .getField(owner, "inFlightPublications"));
+                assertTrue(((java.util.Set<?>) org.springframework.test.util.ReflectionTestUtils
+                        .getField(owner, "publications")).isEmpty());
             } finally {
                 permit.closePublication();
             }
@@ -209,7 +209,7 @@ class RequestCompletionPublicationRaceTest {
             org.springframework.test.util.ReflectionTestUtils.setField(publisher, "executor", failedExecutor);
         }
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 504L);
-        context.attachScheduler(RequestProtocolTestSupport.directOwner(mock(AbstractRequestScheduler.class)));
+        context.bindScheduler(RequestProtocolTestSupport.directOwner(mock(AbstractRequestScheduler.class)));
         var permit = publisher.tryReservePublication(context, BalanceContext.PublicationKind.TERMINAL);
         assertNotNull(permit);
         var owner = new java.util.concurrent.atomic.AtomicReference<Thread>();

@@ -33,7 +33,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -94,7 +93,6 @@ class DefaultRouterTest {
                 .useConstructor(mock(DefaultRouter.class), runtime, config)
                 .defaultAnswer(invocation -> {
                     if (invocation.getMethod().getDeclaringClass() == DirectRequestScheduler.class) { return invocation.callRealMethod(); }
-                    if (invocation.getMethod().getName().equals("tryAcquireSubmissionPermit")) { return true; }
                     if (invocation.getMethod().getName().equals("expirationTimer")) { return mock(ExpirationTimer.class); }
                     return org.mockito.Answers.RETURNS_DEFAULTS.answer(invocation);
                 }));
@@ -103,7 +101,7 @@ class DefaultRouterTest {
             var context = call.getArgument(0, BalanceContext.class);
             var future = new CompletableFuture<Response>();
             context.setFuture(future);
-            context.attachScheduler(requests);
+            context.bindScheduler(requests);
             return future;
         });
         when(requests.commitRoute(any(), any())).thenAnswer(call -> RequestProtocolTestSupport.publish(call.getArgument(1)) ? PlacementResult.Status.SUCCESS : PlacementResult.Status.BLOCKED);

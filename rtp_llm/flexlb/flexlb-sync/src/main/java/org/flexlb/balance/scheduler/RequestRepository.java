@@ -23,7 +23,7 @@ public final class RequestRepository {
         java.util.Objects.requireNonNull(scheduler, "scheduler");
         java.util.Objects.requireNonNull(response, "response");
         synchronized (registrationLock) {
-            if (closed) { return RegistrationResult.CLOSED; }
+            if (closed || !scheduler.runtime.isAccepting()) { return RegistrationResult.CLOSED; }
             if (activeRequests.containsKey(context.getRequestId()) || terminalRecords.containsKey(context.getRequestId())) {
                 return RegistrationResult.DUPLICATE_ID;
             }
@@ -31,15 +31,9 @@ public final class RequestRepository {
                 if (context.scheduler() != null || context.getFuture() instanceof BalanceContext.RequestFuture) {
                     return RegistrationResult.CONTEXT_BOUND;
                 }
-                scheduler.retain();
-                try {
-                    context.activate(response);
-                    context.attachScheduler(scheduler);
-                    activeRequests.put(context.getRequestId(), context);
-                } catch (RuntimeException | Error failure) {
-                    scheduler.release();
-                    throw failure;
-                }
+                context.activate(response);
+                context.bindScheduler(scheduler);
+                activeRequests.put(context.getRequestId(), context);
             }
             return RegistrationResult.REGISTERED;
         }

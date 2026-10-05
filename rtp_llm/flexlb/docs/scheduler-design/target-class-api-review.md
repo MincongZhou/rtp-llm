@@ -18,7 +18,7 @@
 
 - 图列核心成员和 API，省略日志、指标、普通 getter、现有算法内部细节。
 - `+` 是对外或必要的跨包入口；`~` 是子系统协作入口，`#` 是子类扩展点，`-` 是私有成员。
-- 四方法 RequestScheduler 是公开业务接口；其余事件入口是内部协议，不增加到这个接口。
+- RequestScheduler 只公开提交和取消；其余事件入口是内部协议，不增加到这个接口。
 - 下列新签名是目标 API 契约，参数类型的含义在正文定义；不是已经编译的 Java 接口集合。
 - 不可变配置值、事件、返回值可以作为嵌套 record；不据此建立新的服务类、线程池或通用事件总线。
 - 未列出的 Endpoint、Router、预测、容量能力、组批算法 API 原则上保留。
@@ -32,8 +32,6 @@ classDiagram
         <<interface>>
         +submit(BalanceContext request) CompletableFuture~Response~
         +cancel(long requestId, long batchId, CancelReason reason) RequestState
-        +stopAccepting() void
-        +termination() CompletionStage~Void~
     }
     class AbstractRequestScheduler {
         <<abstract>>
@@ -42,11 +40,6 @@ classDiagram
         -ExpirationTimer timer
         -RequestContinuationExecutor continuations
         -RequestCompletionPublisher publisher
-        -boolean accepting
-        -long obligations
-        -Throwable failure
-        -CompletableFuture terminated
-        #tryAcquireSubmissionPermit() boolean
         #register(BalanceContext request) CompletableFuture
         ~onDeliveryResult(DeliveryClaim exact, DeliveryResult result) void
         ~onWorkerFact(WorkerFact fact) void
@@ -55,9 +48,6 @@ classDiagram
         #onCancellationRecorded(BalanceContext exact) void
         ~tryWithdrawQueuedRoute(RequestRoute exact, int incomingPriority) AdmissionHandle
         ~completeWithdrawal(AdmissionHandle exact) void
-        ~retainIfActive() boolean
-        ~release() void
-        #closeOwnedResources() void
     }
     class DirectRequestScheduler {
         -DefaultRouter router
@@ -76,17 +66,15 @@ classDiagram
         ~requeue(RequestRoute previous) boolean
         ~signalControl(BalanceContext exact) void
         #onCancellationRecorded(BalanceContext exact) void
-        #closeOwnedResources() void
     }
     class SchedulerRuntime {
-        -SchedulerBinding current
-        -Set schedulerInstances
+        -RequestScheduler scheduler
         -RequestRepository requests
         -EndpointRegistry endpoints
         -QueueExecutionSettings queueSettings
         -boolean stopping
-        +currentBinding() SchedulerBinding
-        +schedulerFor(long requestId) RequestScheduler
+        +scheduler() RequestScheduler
+        +stopAccepting() void
         ~shutdown() void
     }
     class RequestRepository {
@@ -105,8 +93,8 @@ classDiagram
     RequestScheduler <|.. AbstractRequestScheduler
     AbstractRequestScheduler <|-- DirectRequestScheduler
     AbstractRequestScheduler <|-- QueuedRequestScheduler
-    SchedulerRuntime --> RequestScheduler : 管理新旧实例
-    SchedulerRuntime *-- RequestRepository : 跨实例共享
+    SchedulerRuntime --> RequestScheduler : 管理唯一调度实例
+    SchedulerRuntime *-- RequestRepository : 请求索引
     AbstractRequestScheduler --> RequestRepository
     QueuedRequestScheduler --> EvictionManager
     DirectRequestScheduler --> DefaultRouter
@@ -119,8 +107,8 @@ classDiagram
 | --- | --- |
 | `submit` | 返回最终调度结果，不能返回入队确认。注册成功后始终返回原请求 Future；重复 ID、停收和输入错误不得伪装成已接管 |
 | `cancel` | 向原属调度器提出取消；不承诺调用返回时远端资源已经释放。保留当前 batchId 校验和未找到返回 null 的契约 |
-| `stopAccepting` | 幂等，只拒绝后续新接管；旧请求选路、内部重新入队、取消和结算继续推进 |
-| `termination` | 只观察结束，不触发关闭；请求、admission、交付清理、续接及发布责任都结清后，关闭本实例执行设施。清理失败不能正常完成 |
+| `SchedulerRuntime.stopAccepting` | 幂等，只拒绝后续新接管；旧请求选路、内部重新入队、取消和结算继续推进 |
+| `SchedulerRuntime.shutdown` | Spring 停服时同步执行停收、等待结算和设施关闭；完成后返回，未结清资源或内部清理异常必须抛出 |
 | `onCancellationRecorded` | 仅是模式专属队列控制事件。DIRECT 默认无需队列动作；QUEUE 清理/唤醒自己的队列。不再增加一串细碎模板流程钩子 |
 
 基类不读取 `isQueue/isDirect`、队列排序、组批窗口或抢占配置来分派模式。DIRECT 和 QUEUE 的 submit 仍各自完整表达算法。公共请求协议可以存在基类，策略分支不能迁进基类。
@@ -137,13 +125,11 @@ classDiagram
 
 ### 3.3 配置快照
 
-`SchedulerBinding` 是不可变值 `(scheduler, settings)`，不是新流程类。API 在入口取得一次 binding，构造请求和本地提交都使用该绑定。不能先读一份配置，异步转发后再取另一个调度器提交。
+Runtime 启动时创建一个 DIRECT 或 QUEUE 调度器，运行中不切换调度实例。请求注册时冻结所需配置，调度和资源结算继续使用该请求的快照。
 
-`SchedulerSettings` 是请求及调度所需的冻结配置值；不能只用 record 包装可变 FlexlbConfig 引用。切换时，已进入 tryAcquireSubmissionPermit 的提交继续由旧实例完成；尚未接管、原实例已停收的提交明确拒绝，不自动换实例重放。
+Runtime 统一负责停机；BalanceContext 负责单个请求结束与资源结算。submit 不持有覆盖整个方法的提交锁，也不增加通用 retain/release 计数。注册入口使用原有互斥机制与 shutdown 关闭注册入口协调；已经登记的准入操作仍由原有 admission gate 保证资源操作结束后才能关闭共享设施。
 
-本轮支持 DIRECT/QUEUE 模式切换。`QueueExecutionSettings` 只包含共享 WorkerBatcher 实际使用的排序、组批、交付容量和 Prefill 队列抢占配置。Runtime 在发布 QUEUE 实例前校验其与已启用队列执行设施的配置兼容；不兼容时拒绝切换，保留旧实例。首次启用的共享队列配置一旦发布，后续实例和新发现的 Endpoint 都使用它。
-
-Endpoint 可以延迟启动 WorkerBatcher，但接收显式 QueueExecutionSettings，禁止通过某个请求的完整 config 决定共享设施配置。启用队列不重建已有资源账本，不释放旧 DIRECT 请求。排序/组批参数热更新、dispatcher 类型热切换不在本轮承诺内，不能静默部分生效。
+QUEUE 启动时配置共享 Endpoint 的 QueueExecutionSettings。排序、组批和 dispatcher 类型的运行中切换不在当前范围内。
 
 ## 4. 单请求与交付责任
 
@@ -253,7 +239,7 @@ NON_BATCH 路由交付不伪造 Enqueue 发送责任。RouteDeliveryStrategy 未
 | --- | --- | --- |
 | `submit().future` 完成 | 对外调度响应确定 | 远端执行完成、取消完成、资源释放 |
 | `delivery.settlement()` 完成 | 本次交付的发送与清理责任结束 | 整个调度器已经排空 |
-| `scheduler.termination()` 完成 | 本实例全部责任与所属执行设施结清 | 服务共享 Endpoint 必须被关闭 |
+| `runtime.shutdown()` 正常返回 | 停服时请求、共享资源和执行设施已关闭 | 仅停收或仅响应 Future 完成就能推出退出完成 |
 
 仍保留 ACK 到达、选定对外响应、执行 Future 回调三个时刻。ACK 到达但尚未选定响应时，终态可使候选成功失效；响应已经选定后不可改写，但 API 交付失败仍可启动远端清理。
 
@@ -288,7 +274,7 @@ Prefill 事实携带 RequestRoute 时直接路由回原 owner；Decode 等只有
 3. RPC、用户 Future 回调、队列发布、耗时清理不在 Context 锁内执行。Endpoint 先提交账本，释放资源锁后再投递请求事实；不得在 Endpoint 锁内回调 owner 获取 Context 锁。
 4. 注册锁不得与 Context 锁形成反向获取。归档时先在请求锁内冻结精确终态，锁外调用 Repository 的精确归档操作；此时 Context 处于不可重开的结束状态，索引尚在即可继续挡住重复 ID。
 5. 发送、取消、发布动作先取得一次性的责任/许可，再执行锁外动作。无论同步异常、线程池拒绝还是重入回调，都必须结清对应许可或显式记录未结清失败。
-6. 不用 future.isDone 代替“仍持有远端清理责任”的判断。清理异常不能无条件吞掉并正常完成 termination。
+6. 不用 future.isDone 代替“仍持有远端清理责任”的判断。清理异常不能无条件吞掉并让 shutdown 正常返回。
 
 ### 6.2 模式与事件归属
 
@@ -303,7 +289,7 @@ Prefill 事实携带 RequestRoute 时直接路由回原 owner；Decode 等只有
 - 初次取消及时发送；后续失败重试与用户 RPC 的生命周期脱钩，用户断开不能连带取消清理 RPC。
 - 请求即使已经返回失败，也保留足以继续取消的目标、精确身份和责任；不得归档后把这些信息丢失。
 - 停机先关闭新接管，再停止/排空生产者，保持取消及事实通道可用，最后排空续接和发布设施。
-- 超过服务停机预算可报告失败和未结清清单，但不能宣称正常 termination，不能把 Engine TTL 当作已经收到的清理证明。进程崩溃仍需 Engine 自身超时兜底，不能宣称内存对象提供崩溃后的可靠重试。
+- 超过服务停机预算可报告失败和未结清清单，但不能宣称 shutdown 正常完成，不能把 Engine TTL 当作已经收到的清理证明。进程崩溃仍需 Engine 自身超时兜底，不能宣称内存对象提供崩溃后的可靠重试。
 - Callback 已归档或过期时应无害；旧取消尝试不能改写新尝试结果。保留已有重复完成检查、精确清理和实例责任计数，不以删类为由删除它们。
 
 ## 7. Engine 协议前置工作
@@ -348,7 +334,7 @@ Prefill 事实携带 RequestRoute 时直接路由回原 owner；Decode 等只有
 | 同一 Worker 地址重启→旧回调 | 不影响新 Worker 资源 | 识别 Worker 实例，不能只按地址 |
 | 失败响应已返回→Cancel 未结清→停机 | 继续清理，不能正常报告全部结束 | 取消通道最后阶段仍需可用 |
 | 归档→迟到旧回调/旧清理 | 不重开请求、不删新记录、不重复释放 | Context/route/reservation/record 精确身份保护 |
-| 重入 Future 回调调用 stopAccepting | 不死锁；发布回调退出前不正常 termination | 不在请求锁内执行用户代码 |
+| 重入 Future 回调调用 stopAccepting | 只停收；停服线程的 shutdown 等待发布回调退出 | 不在请求锁内执行用户代码 |
 
 ## 9. 方法迁移与删除清单
 

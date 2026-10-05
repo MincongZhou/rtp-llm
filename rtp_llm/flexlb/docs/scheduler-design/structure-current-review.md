@@ -3643,9 +3643,9 @@ remote.log、final-sync.log及新旧同步清单。原始微基准日志在容�
 
 唯一生产注册入口 AbstractRequestScheduler.register 始终传 this，Direct/Queued.submit
 先取得 submission obligation。RequestLifecycle.register 在激活请求前拒绝 null owner；
-BalanceContext.attachScheduler 同样明确非空契约。注册前 Context.scheduler 仍可为空，
+BalanceContext.bindScheduler 同样明确非空契约。注册前 Context.scheduler 仍可为空，
 queueOwner 仍区分直接与队列模式。准入、终态清理、PublicationPermit、Continuation
-删除11处 nullable owner 兼容判断，保留各自 retain/release 和晚到事实的 retainIfActive。
+删除11处 nullable owner 兼容判断。当前由 Runtime 统一退出，等待真实准入操作、交付结算、请求事件队列和回包许可；已删除通用 retain/release 计数，执行设施关闭后不再接收新的工作。
 注册方法还删除 slot/registeredContext 两个只指向参数context的局部别名。
 
 直接注册的旧测试改用真实 DirectRequestScheduler；手工activate的DIRECT夹具取得一次
@@ -12476,6 +12476,12 @@ FlexlbServiceImpl 的 completeOnce 从四个实现/转发入口收成一个：�
 
 原始日志、XML、补丁和输入哈希：/tmp/flexlb-regression-20261005-r3。可持久复核的摘要：evidence/review-regression-2026-10-05.json。750P 使用真实 loopback Mock Prefill RPC、Decode 是逻辑账本；不是 GPU 模型推理性能。
 
+## Runtime 统一停机（当前边界）
+
+此前关于 scheduler 独立排空、提交读写锁以及 retain/release 的描述已被本次实现替代。RequestScheduler 只保留 submit/cancel；SchedulerRuntime.stopAccepting 只停收，shutdown 由 Spring 停服线程同步执行，成功返回或抛出关闭异常。Runtime 没有生产消费者需要的 termination Future，已删除两个关闭 Future、回调标识和额外关闭线程，仅保留后台内部异常的汇总记录。BalanceContext 仍负责单请求终态和真实资源结算，不能用响应 Future 完成代替资源已释放。
+
+已删除通用 obligations、整个 submit 的读写锁和按 owner 排空执行器的逻辑。关闭注册入口仍使用原有 registrationLock；实际 admission 操作的等待机制保留。DIRECT/QUEUE 并发提交与停机测试验证晚到提交不会等待整个旧提交退出，已取消的注册回调恢复后不能重新入队。
+
 
 ## 2026-10-05：750P/750D 复跑与尾延迟热点
 
@@ -12513,6 +12519,8 @@ candidate-default-c 的 10000 QPS **预热**失败，正式测量没有开始；
 与该事实相符的流程：终态 action 先 detach / cancel 原定时器；等待 delivery settlement 期间仍是 FINALIZING 且 delivery 非空；finishAdmission 再次 attach inactivity deadline，而 inactivityDeadlineAtMs 把该阶段视作可继续追踪；finishTerminal 设置 FINISHED 后触发不变量异常，跳过 archive。应先增加受控交错回归，再禁止已持有终态 action 的请求重新安装 inactivity watch，同时保留真正尚未清理资源的超时协议。该失败已定位到具体状态与异常栈，但本轮没有实现修复，不能将性能测试整体判定通过。
 
 远端 521 个被切换输入最终逐项 SHA256 审核差异为 0，原始 API / Mock test-compile 通过。原始日志 / XML / JFR / GC / 源码哈希和执行脚本：/tmp/flexlb-perf-rerun-20261005-r4。持久摘要与逐轮结果：evidence/perf-rerun-hotspots-2026-10-05.json。
+
+三路审查曾针对回调内调用 Runtime.shutdown 的重入场景构造复现；随后核验生产只有 Spring @PreDestroy 停服入口，没有回调或 termination 监听器调用停机，因此删除为该场景增加的关闭线程、两个完成 Future、ThreadLocal 和专属测试。最终保留同步停服、真实资源排空以及内部失败汇总；回包许可归零时才 notifyAll，避免无效唤醒。简化后再次完成性能、锁和基本功能三路只读审查，496 项相关回归通过。并发内部异常测试验证首因和 suppressed 异常均在停服时报告，且设施关闭不被遗漏。
 
 
 ## 2026-10-05：最新工作区与 adb724b28d 的性能对照

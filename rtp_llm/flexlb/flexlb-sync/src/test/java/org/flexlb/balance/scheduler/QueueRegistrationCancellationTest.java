@@ -77,15 +77,16 @@ class QueueRegistrationCancellationTest {
             try {
                 assertTrue(registered.await(2L, TimeUnit.SECONDS));
                 assertNotNull(f.queue.cancel(903L, 0L, CancelReason.CLIENT_CANCELLED));
-                f.queue.stopAccepting();
-                assertFalse(f.queue.termination().toCompletableFuture().isDone(),
-                        "submission must retain the scheduler until the registration hook returns");
+                SchedulerTestSupport.runtime(f.queue).shutdown();
+
+                assertFalse(submitted.isDone(), "a cancelled hook holds no scheduling resources");
             } finally {
                 resume.countDown();
             }
             assertFalse(submitted.get(2L, TimeUnit.SECONDS).get(2L, TimeUnit.SECONDS).isSuccess());
             verify(f.router, never()).select(any(), nullable(String.class));
-            f.queue.termination().toCompletableFuture().get(2L, TimeUnit.SECONDS);
+            SchedulerTestSupport.runtime(f.queue).shutdown();
+
         }
     }
 
@@ -97,7 +98,7 @@ class QueueRegistrationCancellationTest {
             });
             assertFalse(result.get(2L, TimeUnit.SECONDS).isSuccess());
             verify(f.router, never()).select(any(), nullable(String.class));
-            f.queue.stopAccepting();
+            SchedulerTestSupport.runtime(f.queue).stopAccepting();
             AtomicBoolean called = new AtomicBoolean();
             assertFalse(f.queue.submit(f.context(905L), () -> called.set(true)).get().isSuccess());
             assertFalse(called.get());

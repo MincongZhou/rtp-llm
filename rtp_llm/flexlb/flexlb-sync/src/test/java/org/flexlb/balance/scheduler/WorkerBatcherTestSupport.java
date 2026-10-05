@@ -78,7 +78,7 @@ public final class WorkerBatcherTestSupport {
                 .defaultAnswer(org.mockito.Mockito.CALLS_REAL_METHODS));
         org.mockito.Mockito.doAnswer(call -> {
             RequestRoute route = call.getArgument(0);
-            if (route.ctx().scheduler() == null) { route.ctx().attachScheduler(scheduler); }
+            if (route.ctx().scheduler() == null) { route.ctx().bindScheduler(scheduler); }
             return call.callRealMethod();
         }).when(worker).offer(org.mockito.ArgumentMatchers.any());
         runtime.set(worker);

@@ -70,8 +70,8 @@ public class BalanceContext {
         return scheduler instanceof QueuedRequestScheduler queue ? queue : null;
     }
 
-    /** 由 RequestRepository 在 context 锁内调用；已绑定的 owner 不允许更换。 */
-    void attachScheduler(AbstractRequestScheduler owner) {
+    /** 绑定本请求的调度所有者；RequestRepository 在 context 锁内调用，绑定后不可更换 owner。 */
+    void bindScheduler(AbstractRequestScheduler owner) {
         if (scheduler != null && scheduler != owner) {
             throw new IllegalStateException("request scheduler ownership cannot change");
         }
@@ -974,8 +974,6 @@ public class BalanceContext {
             this.completion = completion;
             this.cleanupStarter = Objects.requireNonNull(cleanupStarter);
             this.decodeSettled = item.decodeEp() == null || item.decodeReservation() == null;
-            owner.scheduler.retain();
-            settled.thenRun(owner.scheduler::release);
         }
 
         /** The final request check immediately before adding this member to the actual RPC. */

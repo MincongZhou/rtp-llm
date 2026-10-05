@@ -32,7 +32,7 @@ public final class SchedulerTestSupport {
         return repository;
     }
     public static void bindOwner(BalanceContext context, AbstractRequestScheduler owner) {
-        if (context.scheduler() == null) { context.attachScheduler(owner); }
+        if (context.scheduler() == null) { context.bindScheduler(owner); }
     }
     private static final Map<org.flexlb.balance.endpoint.PrefillEndpoint, RequestRepository> endpointRepositories = java.util.Collections.synchronizedMap(new WeakHashMap<>());
     public static void associateEndpoint(org.flexlb.balance.endpoint.PrefillEndpoint endpoint, RequestRepository repository) {
@@ -52,7 +52,7 @@ public final class SchedulerTestSupport {
         }
     }
     public static SchedulerRuntime runtime(SchedulerRuntime value) { return value; }
-    public static SchedulerRuntime runtime(AbstractRequestScheduler owner) { return owner.runtime; }
+    public static SchedulerRuntime runtime(RequestScheduler owner) { return ((AbstractRequestScheduler) owner).runtime; }
     public static FlexlbConfig config(AbstractRequestScheduler owner) { return owner.config; }
     public static EvictionManager eviction(AbstractRequestScheduler owner) {
         return new EvictionManager(mock(RequestSchedulerReporter.class), mock(EngineCancelChannel.class),

@@ -1151,7 +1151,7 @@ class TransientCapacityQueueContractTest {
 
         @Override
         public void close() {
-            runtime.scheduler().stopAccepting();
+            SchedulerTestSupport.runtime(runtime.scheduler()).stopAccepting();
             submission.finishHeldCompletions();
             runtime.close();
         }

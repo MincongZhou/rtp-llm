@@ -107,7 +107,7 @@ final class RequestProtocolTestSupport {
     }
 
     static void close(RequestScheduler scheduler) {
-        scheduler.stopAccepting();
+        SchedulerTestSupport.runtime(scheduler).stopAccepting();
         if (scheduler instanceof QueuedRequestScheduler queue) { queue.close(); }
     }
 
@@ -145,7 +145,6 @@ final class RequestProtocolTestSupport {
                 .defaultAnswer(invocation -> {
                     String name = invocation.getMethod().getName();
                     if (name.equals("expirationTimer")) { return timer; }
-                    if (name.equals("tryAcquireSubmissionPermit") || name.equals("retainIfActive")) { return true; }
                     if (invocation.getMethod().getDeclaringClass() == QueuedRequestScheduler.class) {
                         return invocation.callRealMethod();
                     }

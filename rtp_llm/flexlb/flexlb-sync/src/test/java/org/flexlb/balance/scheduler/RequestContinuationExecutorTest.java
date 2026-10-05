@@ -206,8 +206,6 @@ class RequestContinuationExecutorTest {
             assertTrue(nested.await(5, TimeUnit.SECONDS));
             executor.awaitIdle();
             assertEquals(java.util.List.of(1, 2, 3), observed);
-            org.mockito.Mockito.verify(context.scheduler(), org.mockito.Mockito.times(3)).retainIfActive();
-            org.mockito.Mockito.verify(context.scheduler(), org.mockito.Mockito.times(3)).release();
         } finally {
             release.countDown();
             executor.close();
@@ -218,8 +216,7 @@ class RequestContinuationExecutorTest {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         BalanceContext context = RequestProtocolTestSupport.context(config, requestId);
         var owner = org.mockito.Mockito.mock(AbstractRequestScheduler.class);
-        org.mockito.Mockito.when(owner.retainIfActive()).thenReturn(true);
-        context.attachScheduler(owner);
+        context.bindScheduler(owner);
         return context;
     }
 }

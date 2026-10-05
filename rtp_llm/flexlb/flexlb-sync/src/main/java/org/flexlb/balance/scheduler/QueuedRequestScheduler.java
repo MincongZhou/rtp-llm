@@ -85,7 +85,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private final Thread decisionThread;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final PlacementAvailability.Listener availabilityListener =
-            key -> postEvent(new QueueEvent(EventKind.CAPACITY, null, key), false);
+            key -> postEvent(new QueueEvent(EventKind.CAPACITY, null, key));
 
     QueuedRequestScheduler(FlexlbConfig config, DefaultRouter router,
             BatchSchedulerReporter reporter, EvictionManager evictionManager,
@@ -139,7 +139,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     @Override
     public CompletableFuture<Response> submit(BalanceContext context, Runnable onRegistered) {
         Objects.requireNonNull(onRegistered, "onRegistered");
-        if (!tryAcquireSubmissionPermit()) { return rejected(); }
+        if (!runtime.isAccepting() || closed.get()) { return rejected(); }
         try {
             if (context != null && !context.getConfig().isQueue()) {
                 return invalidMode();
@@ -164,8 +164,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             return future;
         } catch (RuntimeException failure) {
             return failSubmission(context, failure);
-        } finally {
-            release();
         }
     }
 
@@ -175,7 +173,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             CompletableFuture<Response> future = Objects.requireNonNull(context.getFuture(), "registered future");
             GlobalQueueEntry entry = new GlobalQueueEntry(context, PriorityNormalizer.normalize(context.getPriority(), null),
                     router.resolvePolicyGroup(context));
-            if (!postEvent(new QueueEvent(EventKind.SUBMIT, entry, null), true)) { return false; }
+            if (!postEvent(new QueueEvent(EventKind.SUBMIT, entry, null))) { return false; }
             future.whenComplete((ignored, failure) -> signalControl(context));
             return true;
         } catch (RuntimeException failure) {
@@ -206,14 +204,13 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         GlobalQueueEntry entry = new GlobalQueueEntry(context,
                 PriorityNormalizer.normalize(context.getPriority(), null), router.resolvePolicyGroup(context));
         entry.sequence = context.placementSequence();
-        return postEvent(new QueueEvent(EventKind.REQUEUE, entry, null), true);
+        return postEvent(new QueueEvent(EventKind.REQUEUE, entry, null));
     }
 
-    private boolean postEvent(QueueEvent event, boolean retainEntry) {
+    private boolean postEvent(QueueEvent event) {
         lock.lock();
         try {
             if (closed.get()) { return false; }
-            if (retainEntry) { retain(); }
             events.addLast(event);
             changed.signal();
             return true;
@@ -221,7 +218,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     }
 
     void signalControl(BalanceContext context) {
-        postEvent(new QueueEvent(EventKind.CONTROL, new GlobalQueueEntry(context, 0, null), null), false);
+        postEvent(new QueueEvent(EventKind.CONTROL, new GlobalQueueEntry(context, 0, null), null));
     }
 
     private void consumeEventsUnderLock() {
@@ -236,7 +233,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 case SUBMIT, REQUEUE -> {
                     GlobalQueueEntry entry = event.entry;
                     if (queuedEntries.putIfAbsent(entry.context, entry) != null) {
-                        release();
                         throw new IllegalStateException("duplicate global queue identity");
                     }
                     if (event.kind == EventKind.REQUEUE) {
@@ -665,7 +661,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         orderedQueue.remove(entry);
         waitingRequests.remove(entry);
         preemptionQuotaWaiters.remove(entry);
-        if (queuedEntries.remove(entry.context, entry)) { release(); }
+        queuedEntries.remove(entry.context, entry);
         changed.signal();
     }
 
@@ -705,7 +701,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
 
     private void drainOnClose() {
         List<GlobalQueueEntry> abandoned;
-        int registrations;
         lock.lock();
         try {
             Set<GlobalQueueEntry> all = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -713,11 +708,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             all.addAll(queuedEntries.values());
             waitingRequests.clear();
             preemptionQuotaWaiters.clear();
-            registrations = queuedEntries.size();
             for (QueueEvent event : events) {
                 if (event.kind == EventKind.SUBMIT || event.kind == EventKind.REQUEUE) {
                     all.add(event.entry);
-                    registrations++;
                 }
             }
             abandoned = List.copyOf(all);
@@ -739,17 +732,10 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                         entry.context.getRequestId(), failure);
             }
         }
-        for (int i = 0; i < registrations; i++) { release(); }
-    }
-
-    @Override
-    protected void closeOwnedResources() {
-        close();
     }
 
     @Override
     public void close() {
-        stopAccepting();
         if (closed.compareAndSet(false, true)) {
             availability.removeListener(availabilityListener);
             signal();

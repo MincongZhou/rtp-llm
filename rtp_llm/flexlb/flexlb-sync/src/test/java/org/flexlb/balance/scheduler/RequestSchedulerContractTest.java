@@ -55,8 +55,9 @@ class RequestSchedulerContractTest {
                 f.scheduler.cancel(900, 0, CancelReason.CLIENT_CANCELLED);
             }
             future.get(3, TimeUnit.SECONDS);
-            f.scheduler.stopAccepting();
-            f.scheduler.termination().toCompletableFuture().get(3, TimeUnit.SECONDS);
+            SchedulerTestSupport.runtime(f.scheduler).stopAccepting();
+            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+
         }
     }
 
@@ -70,8 +71,9 @@ class RequestSchedulerContractTest {
             assertNotNull(deadline);
             f.scheduler.cancel(901, 0, CancelReason.CLIENT_CANCELLED);
             future.get(3, TimeUnit.SECONDS);
-            f.scheduler.stopAccepting();
-            f.scheduler.termination().toCompletableFuture().get(3, TimeUnit.SECONDS);
+            SchedulerTestSupport.runtime(f.scheduler).stopAccepting();
+            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+
             f.requests.enqueueInactivityDeadline(request, deadline, Long.MAX_VALUE,
                     () -> { throw new AssertionError("stale deadline must not rearm"); });
             f.requests.runtime.continuations().awaitIdle();
@@ -81,8 +83,9 @@ class RequestSchedulerContractTest {
     @Test
     void queuedTerminationIncludesItsOwnWorkers() throws Exception {
         try (Fixture f = new Fixture(true)) {
-            f.scheduler.stopAccepting();
-            f.scheduler.termination().toCompletableFuture().get(3, TimeUnit.SECONDS);
+            SchedulerTestSupport.runtime(f.scheduler).stopAccepting();
+            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+
             var decision = (Thread) org.springframework.test.util.ReflectionTestUtils.getField(f.scheduler, "decisionThread");
             var planners = (java.util.concurrent.ExecutorService)
                     org.springframework.test.util.ReflectionTestUtils.getField(f.scheduler, "planners");
@@ -92,24 +95,71 @@ class RequestSchedulerContractTest {
     }
 
     @Test
-    void failedGenerationStillClosesItsWorkersAfterTheLastObligation() throws Exception {
+    void runtimeShutdownClosesWorkersEvenAfterEarlierCleanupFailure() throws Exception {
         try (Fixture f = new Fixture(true)) {
-            var owner = (AbstractRequestScheduler) f.scheduler;
+            var runtime = f.requests.runtime;
             var planners = (java.util.concurrent.ExecutorService)
-                    org.springframework.test.util.ReflectionTestUtils.getField(owner, "planners");
-            var decision = (Thread) org.springframework.test.util.ReflectionTestUtils.getField(owner, "decisionThread");
+                    org.springframework.test.util.ReflectionTestUtils.getField(f.scheduler, "planners");
+            var decision = (Thread) org.springframework.test.util.ReflectionTestUtils.getField(f.scheduler, "decisionThread");
             var failure = new IllegalStateException("delivery cleanup failed");
-            assertTrue(owner.tryAcquireSubmissionPermit());
-            owner.recordFailure(failure);
-            owner.stopAccepting();
-            assertSame(failure, assertThrows(ExecutionException.class,
-                    () -> owner.termination().toCompletableFuture().get()).getCause());
-            assertFalse(planners.isShutdown(), "the outstanding submission still owns the generation");
-            owner.release();
-            assertTrue(planners.awaitTermination(3, TimeUnit.SECONDS),
-                    "exceptional termination must not skip the final executor cleanup");
-            decision.join(3_000);
+            runtime.recordFailure(failure);
+            runtime.stopAccepting();
+            assertFalse(planners.isShutdown(), "stopping intake does not execute shutdown");
+            assertSame(failure, assertThrows(IllegalStateException.class, runtime::shutdown));
+            assertTrue(planners.isTerminated());
             assertFalse(decision.isAlive());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void stoppingFromPlacementDoesNotWaitForItsOwnSubmission(boolean queued) throws Exception {
+        try (Fixture f = new Fixture(queued); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var request = f.context(98);
+            when(f.router.select(request, null)).thenAnswer(call -> {
+                SchedulerTestSupport.runtime(f.scheduler).stopAccepting();
+                SchedulerTestSupport.runtime(f.scheduler).stopAccepting();
+                return rejection();
+            });
+            var submission = executor.submit(() -> f.scheduler.submit(request));
+            assertFalse(submission.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS).isSuccess());
+            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void acceptedSubmissionsCanEnterConcurrently(boolean queued) throws Exception {
+        CountDownLatch entered = new CountDownLatch(2);
+        CountDownLatch resume = new CountDownLatch(1);
+        try (Fixture f = new Fixture(queued); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Runnable pause = () -> {
+                entered.countDown();
+                RequestProtocolTestSupport.await(resume);
+            };
+            when(f.router.select(any(), any())).thenAnswer(call -> {
+                if (!queued) { pause.run(); }
+                return rejection();
+            });
+            var first = executor.submit(() -> queued
+                    ? f.scheduler.submit(f.context(96), pause) : f.scheduler.submit(f.context(96)));
+            var second = executor.submit(() -> queued
+                    ? f.scheduler.submit(f.context(97), pause) : f.scheduler.submit(f.context(97)));
+            try {
+                assertTrue(entered.await(3, TimeUnit.SECONDS), "submissions must not serialize on an exclusive lock");
+                SchedulerTestSupport.runtime(f.scheduler).stopAccepting();
+
+                assertFalse(f.scheduler.submit(f.context(95)).get(3, TimeUnit.SECONDS).isSuccess());
+            } finally {
+                resume.countDown();
+            }
+            first.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS);
+            second.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS);
+            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+
+        } finally {
+            resume.countDown();
         }
     }
 
@@ -133,7 +183,7 @@ class RequestSchedulerContractTest {
                 assertSame(owner, runtime.scheduler());
                 assertSame(owner, runtime.scheduler());
                 assertSame(owner, runtime.scheduler());
-                assertFalse(owner.termination().toCompletableFuture().isDone());
+
                 var next = f.context(101);
                 var nextFuture = owner.register(next, StrategyErrorType.BATCH_SLO_EXPIRED);
                 assertSame(owner, runtime.scheduler());
@@ -149,21 +199,19 @@ class RequestSchedulerContractTest {
     }
 
     @Test
-    void observingTerminationDoesNotStopAcceptanceAndClientsCannotCompleteIt() throws Exception {
+    void stoppingIntakeIsIdempotentAndRejectsNewRequests() throws Exception {
         try (Fixture f = new Fixture(false)) {
             RequestScheduler api = f.scheduler;
-            var observation = api.termination().toCompletableFuture();
-            assertFalse(observation.isDone());
-            observation.complete(null);
-            assertFalse(api.termination().toCompletableFuture().isDone());
+
 
             var request = f.context(1);
             when(f.router.select(request, null)).thenReturn(rejection());
             assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     api.submit(request).get(3, TimeUnit.SECONDS).getCode());
-            api.stopAccepting();
-            api.stopAccepting();
-            api.termination().toCompletableFuture().get(3, TimeUnit.SECONDS);
+            SchedulerTestSupport.runtime(api).stopAccepting();
+            SchedulerTestSupport.runtime(api).stopAccepting();
+            SchedulerTestSupport.runtime(api).shutdown();
+
             assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                     api.submit(f.context(2)).join().getCode());
             verify(f.router, times(1)).select(any(), any());
@@ -186,8 +234,8 @@ class RequestSchedulerContractTest {
             var submission = executor.submit(() -> api.submit(request));
             try {
                 assertTrue(selecting.await(3, TimeUnit.SECONDS));
-                api.stopAccepting();
-                assertFalse(api.termination().toCompletableFuture().isDone());
+                SchedulerTestSupport.runtime(api).stopAccepting();
+
                 assertFalse(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.requests).isClosed(), "draining must not close accepted admission");
                 assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), api.submit(f.context(11)).join().getCode());
             } finally {
@@ -196,7 +244,8 @@ class RequestSchedulerContractTest {
             var future = submission.get(3, TimeUnit.SECONDS);
             assertSame(request.getFuture(), future);
             assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), future.get(3, TimeUnit.SECONDS).getCode());
-            api.termination().toCompletableFuture().get(3, TimeUnit.SECONDS);
+            SchedulerTestSupport.runtime(api).shutdown();
+
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.requests).liveRequestCount());
         } finally {
             release.countDown();
@@ -210,14 +259,15 @@ class RequestSchedulerContractTest {
             RequestScheduler api = f.scheduler;
             var request = f.context(20);
             var future = f.requests.register(request, StrategyErrorType.BATCH_SLO_EXPIRED);
-            api.stopAccepting();
+            SchedulerTestSupport.runtime(api).stopAccepting();
             try (var admission = f.requests.claimAdmissionHandle(20, future); var admissionCompletion3 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertNotNull(api.cancel(20, 0, CancelReason.CLIENT_CANCELLED));
-                assertFalse(api.termination().toCompletableFuture().isDone());
+
             }
             assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), future.get(3, TimeUnit.SECONDS).getCode());
-            api.termination().toCompletableFuture().get(3, TimeUnit.SECONDS);
+            SchedulerTestSupport.runtime(api).shutdown();
+
             assertNotNull(api.cancel(20, 0, CancelReason.CLIENT_CANCELLED));
             assertNull(api.cancel(999, 0, CancelReason.CLIENT_CANCELLED));
         }
@@ -232,11 +282,12 @@ class RequestSchedulerContractTest {
             try (var admission = f.requests.claimAdmissionHandle(30, future); var admissionCompletion4 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertTrue(future.cancel(true));
-                api.stopAccepting();
+                SchedulerTestSupport.runtime(api).stopAccepting();
                 assertTrue(future.isDone());
-                assertFalse(api.termination().toCompletableFuture().isDone());
+
             }
-            api.termination().toCompletableFuture().get(3, TimeUnit.SECONDS);
+            SchedulerTestSupport.runtime(api).shutdown();
+
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.requests).liveRequestCount());
         }
     }
@@ -250,21 +301,29 @@ class RequestSchedulerContractTest {
             var request = f.context(40);
             var future = f.requests.register(request, StrategyErrorType.BATCH_SLO_EXPIRED);
             CompletableFuture<Response> callback = future.whenComplete((result, failure) -> {
-                api.stopAccepting();
+                SchedulerTestSupport.runtime(api).stopAccepting();
                 publishing.countDown();
                 RequestProtocolTestSupport.await(release);
             });
+            CompletableFuture<Void> shutdown = null;
             try {
                 assertTrue(f.requests.publishDecisionResponseAsync(40, future, Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
                 assertTrue(publishing.await(3, TimeUnit.SECONDS));
                 assertTrue(future.isDone());
                 assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.requests).liveRequestCount());
-                assertFalse(api.termination().toCompletableFuture().isDone());
+                var runtime = SchedulerTestSupport.runtime(api);
+                shutdown = CompletableFuture.runAsync(runtime::shutdown);
+                RequestProtocolTestSupport.awaitCondition(() -> runtime.requests().isClosed());
+                var closing = shutdown;
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> closing.get(100, TimeUnit.MILLISECONDS), "shutdown must await the active publication");
+
             } finally {
                 release.countDown();
             }
             callback.get(3, TimeUnit.SECONDS);
-            api.termination().toCompletableFuture().get(3, TimeUnit.SECONDS);
+            shutdown.get(3, TimeUnit.SECONDS);
+
         } finally {
             release.countDown();
         }
@@ -275,7 +334,7 @@ class RequestSchedulerContractTest {
     }
 
     @Test
-    void cleanupFailureCannotBeReportedAsSuccessfulTermination() throws Exception {
+    void cleanupFailureIsRetainedForShutdownReporting() throws Exception {
         try (Fixture f = new Fixture(false)) {
             RequestScheduler api = f.scheduler;
             var request = f.context(50);
@@ -289,11 +348,9 @@ class RequestSchedulerContractTest {
             }
             var failure = new IllegalStateException("endpoint release failed");
             doThrow(failure).when(endpoint).releaseCommittedItem(route);
-            api.stopAccepting();
+            SchedulerTestSupport.runtime(api).stopAccepting();
             assertTrue(future.completeExceptionally(new IllegalStateException("request failed")));
-            var terminationFailure = assertThrows(ExecutionException.class,
-                    () -> api.termination().toCompletableFuture().get(3, TimeUnit.SECONDS));
-            assertSame(failure, terminationFailure.getCause());
+            assertSame(failure, SchedulerTestSupport.failure(api));
             verify(endpoint).releaseCommittedItem(route);
         }
     }
@@ -332,7 +389,7 @@ class RequestSchedulerContractTest {
     }
 
     @Test
-    void admissionFailureReleasesDrainGateBeforeInvokingTerminationCallbacks() throws Exception {
+    void admissionFailureIsRecordedAndReleasesDrainGate() throws Exception {
         try (Fixture f = new Fixture(false)) {
             var context = f.context(940L);
             var future = f.requests.register(context, StrategyErrorType.BATCH_SLO_EXPIRED);
@@ -342,19 +399,11 @@ class RequestSchedulerContractTest {
             var timer = org.mockito.Mockito.spy(originalTimer);
             var failure = new IllegalStateException("expiry attachment failed");
             doThrow(failure).when(timer).attachInactivityDeadline(context);
-            var observed = f.requests.termination().handle((ignored, cause) -> {
-                assertSame(failure, cause instanceof java.util.concurrent.CompletionException ? cause.getCause() : cause);
-                assertSame(failure, org.springframework.test.util.ReflectionTestUtils.getField(f.requests, "failure"));
-                assertEquals(0, org.springframework.test.util.ReflectionTestUtils.getField(
-                        f.requests, "inFlightAdmissionHandles"),
-                        "synchronous termination callbacks must be able to wait for admission drain");
-                f.requests.awaitAdmissionMutations();
-                return failure;
-            }).toCompletableFuture();
             org.springframework.test.util.ReflectionTestUtils.setField(f.requests, "expirationTimer", timer);
             try {
                 assertSame(failure, assertThrows(IllegalStateException.class, handle::finish));
-                assertSame(failure, observed.get(3, TimeUnit.SECONDS));
+                assertSame(failure, SchedulerTestSupport.failure(f.requests));
+                f.requests.awaitAdmissionMutations();
                 assertEquals(0, org.springframework.test.util.ReflectionTestUtils.getField(
                         f.requests, "inFlightAdmissionHandles"));
             } finally {

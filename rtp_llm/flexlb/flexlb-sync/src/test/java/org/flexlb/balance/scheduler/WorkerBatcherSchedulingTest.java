@@ -229,7 +229,7 @@ class WorkerBatcherSchedulingTest {
         WorkerBatcher runtime = WorkerBatcherTestSupport.create("removal-failure", endpoint, config,
                 new EventDrivenBlock(), events);
         RequestRoute request = item(config, endpoint, 914L, 50, System.currentTimeMillis());
-        request.ctx().attachScheduler(events);
+        request.ctx().bindScheduler(events);
         var state = WorkerBatcherTestSupport.state(runtime);
         state.ownershipLock().lock();
         try {

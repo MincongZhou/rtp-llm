@@ -62,7 +62,20 @@ public final class SchedulerRuntime {
 
     private final Object schedulerLock = new Object();
     private RequestScheduler scheduler;
-    private boolean stopping;
+    private volatile boolean stopping;
+    private Throwable failure;
+
+    boolean isAccepting() { return !stopping && !requests.isClosed(); }
+
+    /** 只停收。已注册请求继续运行；shutdown 才执行整套关闭流程。 */
+    public void stopAccepting() {
+        synchronized (schedulerLock) { stopping = true; }
+    }
+
+    /** 后台清理、准入或续接失败在此汇总；停服时统一报告，不执行 Future 监听或关闭流程。 */
+    void recordFailure(Throwable cause) {
+        synchronized (schedulerLock) { failure = Failures.append(failure, cause); }
+    }
 
     void initializeScheduler(RequestScheduler scheduler) {
         synchronized (schedulerLock) {
@@ -85,10 +98,8 @@ public final class SchedulerRuntime {
     private void closeSchedulers() {
         RequestScheduler scheduler;
         synchronized (schedulerLock) {
-            stopping = true;
             if (this.scheduler == null) { return; }
             scheduler = this.scheduler;
-            scheduler.stopAccepting();
         }
         if (scheduler instanceof QueuedRequestScheduler queue) {
             queue.close();
@@ -246,11 +257,11 @@ public final class SchedulerRuntime {
         }
     }
 
+    /** Spring 停服入口：停止接收、等待请求资源结算，再关闭共享执行设施。 */
     @PreDestroy
     void shutdown() {
-        if (!requests.closeRegistration()) {
-            return;
-        }
+        stopAccepting();
+        if (!requests.closeRegistration()) { return; }
         Runnable[] steps = {
                 this::closeSchedulers,
                 this::awaitAdmissionMutations,
@@ -271,6 +282,11 @@ public final class SchedulerRuntime {
                 else if (failure != firstFailure) { firstFailure.addSuppressed(failure); }
             }
         }
+        if (requests.liveRequestCount() != 0) {
+            firstFailure = Failures.append(firstFailure,
+                    new IllegalStateException("Unsettled requests at shutdown: " + requests.liveRequestCount()));
+        }
+        synchronized (schedulerLock) { firstFailure = Failures.append(failure, firstFailure); }
         Failures.rethrow(firstFailure, "Scheduler shutdown failed");
     }
 

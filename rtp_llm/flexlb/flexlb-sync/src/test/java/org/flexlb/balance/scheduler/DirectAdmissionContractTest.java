@@ -212,11 +212,10 @@ class DirectAdmissionContractTest {
     }
 
     @Test
-    void directToQueueActivatesTheSameEndpointWithoutLosingOldReservations() throws Exception {
+    void queueActivationPreservesExistingDirectReservations() throws Exception {
         try (Fixture fixture = new Fixture(4, 2)) {
             assertTrue(fixture.scheduler.submit(fixture.context(101L)).get(2, TimeUnit.SECONDS).isSuccess());
-            fixture.scheduler.stopAccepting();
-            assertFalse(fixture.scheduler.termination().toCompletableFuture().isDone());
+
             var config = SchedulingTestConfig.newConfig();
             SchedulingTestConfig.useFifoQueue(config);
             SchedulingTestConfig.useNonBatchDispatcher(config);
@@ -235,10 +234,10 @@ class DirectAdmissionContractTest {
 
                 fixture.observe(fixture.prefill, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
                 fixture.observe(fixture.decode, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
-                fixture.scheduler.termination().toCompletableFuture().get(2, TimeUnit.SECONDS);
+                RequestProtocolTestSupport.awaitCondition(() -> fixture.requests.requests.findActive(101L) == null);
                 assertEquals(1, fixture.prefill.observedRequestCount());
                 assertNotNull(fixture.decode.reservationHandle(102L));
-                assertFalse(queue.termination().toCompletableFuture().isDone());
+
             }
         }
     }

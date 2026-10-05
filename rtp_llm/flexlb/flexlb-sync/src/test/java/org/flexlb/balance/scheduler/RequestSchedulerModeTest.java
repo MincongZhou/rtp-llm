@@ -122,7 +122,7 @@ class RequestSchedulerModeTest {
             if (outcome.equals("EXPIRED")) {
                 f.context.setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1L));
             }
-            if (outcome.equals("STOPPED")) { f.scheduler.stopAccepting(); }
+            if (outcome.equals("STOPPED")) { SchedulerTestSupport.runtime(f.scheduler).stopAccepting(); }
             var future = f.scheduler.submit(f.context);
             StrategyErrorType expected = switch (outcome) {
                 case "REJECTED" -> StrategyErrorType.NO_PREFILL_WORKER;
@@ -135,8 +135,9 @@ class RequestSchedulerModeTest {
             verify(f.router, times(outcome.equals("REJECTED") || outcome.equals("THROW") ? 1 : 0)).select(f.context, null);
             f.requests.awaitAdmissionMutations();
             assertEquals(0, f.requests.requests.liveRequestCount());
-            f.scheduler.stopAccepting();
-            f.scheduler.termination().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            SchedulerTestSupport.runtime(f.scheduler).stopAccepting();
+            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+
             if (f.queue != null) { assertEquals(0, f.queue.size()); }
         }
     }
@@ -187,7 +188,7 @@ class RequestSchedulerModeTest {
 
         @Override
         public void close() {
-            scheduler.stopAccepting();
+            SchedulerTestSupport.runtime(scheduler).stopAccepting();
             org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).closeRegistration();
             if (queue != null) { queue.close(); }
             requests.awaitAdmissionMutations();

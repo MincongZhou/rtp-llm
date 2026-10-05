@@ -80,7 +80,6 @@ class RequestOrchestratorsTest {
         runtime.shutdown();
         InOrder order = inOrder(requests, owner, dispatcher, endpoints);
         order.verify(requests).closeRegistration();
-        order.verify(owner).stopAccepting();
         order.verify(owner).close();
         order.verify(owner).awaitAdmissionMutations();
         order.verify(dispatcher).shutdownAndAwait();
@@ -97,9 +96,45 @@ class RequestOrchestratorsTest {
         var failure = new IllegalStateException("gate failed");
         when(requests.closeRegistration()).thenThrow(failure);
         var runtime = runtime(requests, endpoints);
-        try { assertSame(failure, assertThrows(IllegalStateException.class, runtime::shutdown)); }
+        try {
+            assertSame(failure, assertThrows(IllegalStateException.class, runtime::shutdown));
+        }
         finally { runtime.closeRequestExecutors(); runtime.timer().close(); }
         verifyNoInteractions(endpoints);
+    }
+
+    @Test
+    void shutdownCannotReportSuccessWithUnsettledRequests() {
+        var requests = mock(RequestRepository.class);
+        when(requests.closeRegistration()).thenReturn(true);
+        when(requests.liveRequestCount()).thenReturn(1);
+        var runtime = runtime(requests, mock(EndpointRegistry.class));
+        var failure = assertThrows(IllegalStateException.class, runtime::shutdown);
+        assertEquals("Unsettled requests at shutdown: 1", failure.getMessage());
+    }
+
+    @Test
+    void concurrentInternalFailuresAreReportedAfterResourceShutdown() throws Exception {
+        var endpoints = mock(EndpointRegistry.class);
+        var runtime = runtime(new RequestRepository(), endpoints);
+        var first = new IllegalStateException("first internal failure");
+        var second = new IllegalStateException("second internal failure");
+        var start = new CountDownLatch(1);
+        var one = CompletableFuture.runAsync(() -> {
+            RequestProtocolTestSupport.await(start);
+            runtime.recordFailure(first);
+        });
+        var two = CompletableFuture.runAsync(() -> {
+            RequestProtocolTestSupport.await(start);
+            runtime.recordFailure(second);
+        });
+        start.countDown();
+        CompletableFuture.allOf(one, two).get(3, TimeUnit.SECONDS);
+        var reported = assertThrows(IllegalStateException.class, runtime::shutdown);
+        assertTrue(reported == first || reported == second);
+        assertEquals(List.of(reported == first ? second : first), List.of(reported.getSuppressed()));
+        verify(endpoints).close();
+        assertTrue(((java.util.concurrent.ExecutorService) runtime.cleanupExecutor()).isTerminated());
     }
 
     @Test

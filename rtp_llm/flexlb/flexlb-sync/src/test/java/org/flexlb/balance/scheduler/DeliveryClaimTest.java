@@ -44,13 +44,14 @@ class DeliveryClaimTest {
             f.cancel.complete(EngineCancelChannel.CancelAck.REQUEST_CLEANED);
             assertFalse(f.settlement().isDone());
             assertTrue(f.owner.requests.isCurrent(f.context));
-            f.owner.stopAccepting();
-            assertFalse(f.owner.termination().toCompletableFuture().isDone());
+            SchedulerTestSupport.runtime(f.owner).stopAccepting();
+
             f.claim.complete(DeliveryResult.delivered());
             f.settlement().get(2, TimeUnit.SECONDS);
             f.awaitArchive();
             assertFalse(f.context.getFuture().join().isSuccess(), "late ACK cannot replace cancellation");
-            f.owner.termination().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            SchedulerTestSupport.runtime(f.owner).shutdown();
+
         }
     }
 
@@ -86,7 +87,7 @@ class DeliveryClaimTest {
         }
     }
 
-    @Test void rejectedCleanupExecutorMakesTerminationFailWithoutArchiving() throws Exception {
+    @Test void rejectedCleanupExecutorRecordsFailureWithoutArchiving() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.claim.tryStartSend());
             f.owner.runtime.cleanupExecutor().shutdown();
@@ -94,7 +95,7 @@ class DeliveryClaimTest {
             f.claim.complete(DeliveryResult.delivered());
             assertFalse(f.settlement().isDone(), "executor failure is not remote cleanup proof");
             assertTrue(f.owner.requests.isCurrent(f.context));
-            assertTrue(f.owner.termination().toCompletableFuture().isCompletedExceptionally());
+            org.junit.jupiter.api.Assertions.assertNotNull(SchedulerTestSupport.failure(f.owner));
         }
     }
 
@@ -433,7 +434,7 @@ class DeliveryClaimTest {
             f.owner.runtime.continuations().awaitIdle();
             verify(f.channel, times(1)).cancel(any(), eq(41L), any(), eq(500L));
             assertFalse(f.settlement().isDone());
-            assertTrue(f.owner.termination().toCompletableFuture().isCompletedExceptionally());
+            org.junit.jupiter.api.Assertions.assertNotNull(SchedulerTestSupport.failure(f.owner));
         }
     }
 
@@ -456,7 +457,7 @@ class DeliveryClaimTest {
                 f.owner.runtime.continuations().awaitIdle();
             }
             assertEquals(8, calls.get());
-            assertTrue(f.owner.termination().toCompletableFuture().isCompletedExceptionally());
+            org.junit.jupiter.api.Assertions.assertNotNull(SchedulerTestSupport.failure(f.owner));
             assertFalse(f.settlement().isDone());
             assertTrue(timer.retries.isEmpty());
 
@@ -597,7 +598,7 @@ class DeliveryClaimTest {
             verify(decode, times(1)).release(reservation, DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP);
         }
         public void close() {
-            owner.stopAccepting();
+            SchedulerTestSupport.runtime(owner).stopAccepting();
             ((QueuedRequestScheduler)owner).close();
             owner.runtime.timer().close();
             owner.runtime.closeRequestExecutors();

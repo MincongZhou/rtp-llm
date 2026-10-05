@@ -41,14 +41,13 @@ final class RequestContinuationExecutor implements AutoCloseable {
                 throw new IllegalStateException("request continuation executor is closed");
             }
             AbstractRequestScheduler owner = context.scheduler();
-            if (!owner.retainIfActive()) { return; }
             start = !queues.containsKey(context);
             queues.computeIfAbsent(context, ignored -> new ArrayDeque<>()).addLast(() -> {
                 try { fact.run(); }
                 catch (Throwable failure) {
                     owner.recordFailure(failure);
                     throw failure;
-                } finally { owner.release(); }
+                }
             });
         }
         if (!start) {
@@ -72,13 +71,10 @@ final class RequestContinuationExecutor implements AutoCloseable {
                     return;
                 }
             }
-            try {
-                fact.run();
-            } catch (Throwable failure) {
-                try {
-                    logFailure(context.getRequestId(), failure);
-                } catch (Throwable ignored) {
-                }
+            try { fact.run(); }
+            catch (Throwable failure) {
+                try { logFailure(context.getRequestId(), failure); }
+                catch (Throwable ignored) { }
             }
         }
     }
