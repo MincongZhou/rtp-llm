@@ -12475,3 +12475,41 @@ FlexlbServiceImpl 的 completeOnce 从四个实现/转发入口收成一个：�
 仍有一项既有条件风险：RequestContinuationExecutor 的失败通知在 fact 尚未排空时同步完成 termination；监听器若同步调用 runtime.shutdown，可能等待当前 fact 自身。QueuedRequestScheduler.closePlan 类似，持 admission handle 时通知失败。当前生产代码未发现这种 termination 监听器，但接口重入协议尚需单独明确；本轮没有扩大重构。
 
 原始日志、XML、补丁和输入哈希：/tmp/flexlb-regression-20261005-r3。可持久复核的摘要：evidence/review-regression-2026-10-05.json。750P 使用真实 loopback Mock Prefill RPC、Decode 是逻辑账本；不是 GPU 模型推理性能。
+
+
+## 2026-10-05：750P/750D 复跑与尾延迟热点
+
+在用户指定的远端 checkout / luoli_gpu 内复跑，Corretto 21.0.12.1，256 CPU，-Xms64g -Xmx64g；BATCH / FIXED_WINDOW，3000 / 10000 QPS，warmup / measurement issuance 各 10 秒，吞吐下限 98%。基线 f8b82eea4a；候选是开跑时冻结的 R4 工作区，其 238 个生产 Java 输入与 R3 完全一致。期间其他 agent 又修改了 8 个生产文件，后续变化未包含在这次测量中。本轮没有修改生产代码或放宽断言。
+
+共 14 个 JVM、28 项：24 项通过、4 项失败、0 error / skip。前四轮 JFR 对照均通过；随后诊断复跑捕获了 1 项候选 Master P99 失败、2 项两版本均出现的请求归档失败；最终无 JFR 的 ABBA 对照另有 1 项基线 Master P99 失败。JFR 仅用作诊断，验收结果独立列出。
+
+**最后无 JFR 的 ABBA 结果：**
+
+| QPS | 基线 Master P99（两轮） | 候选 Master P99（两轮） | 基线客户端 P99（两轮） | 候选客户端 P99（两轮） |
+| --- | --- | --- | --- | --- |
+| 3000 | 58 / 12 ms | 12 / 12 ms | 64.378 / 28.273 ms | 26.178 / 29.472 ms |
+| 10000 | 26 / 20 ms | 14 / 22 ms | 50.993 / 41.966 ms | 21.162 / 47.733 ms |
+
+候选这四项满足 Master <50ms、用户客户端 <50ms、吞吐 >=98%，但不能据此宣布稳定达标：同一生产快照在带诊断的 candidate-diag-b 3000 QPS 中出现 Master P99=121ms、客户端 P99=134.064ms、route-submit P99=90ms。基线无 JFR 也有 58ms。上一轮 47 / 55ms 与此次波动不支持直接把回退归因于 drain 重构；需要分别处理下面实测到的瓶颈。
+
+### 1. 共享轮转游标的锁竞争
+
+121ms 这轮的 EndpointRoundRobin.Cursor monitor 累计等待 33.960 秒（1576 次 >=1ms 的等待；是多线程累计，不能当成墙钟时间），正常候选轮约 0.153 / 0.214 秒。最慢单次等待 125.224ms，调用栈为 EndpointRoundRobin.next -> DecodeSelector.select -> DefaultRouter.select -> QueuedRequestScheduler.plan，直接落在尾延迟暴涨的时间段。Prefill 选路也争用自己的角色游标；记录的等待中 Decode 917 次、Prefill 659 次。2477 个 >=20ms 请求中仅 253 个与 GC 暂停重叠，不能用 GC 单独解释这轮长尾。
+
+默认 plannerCount 随 CPU 增至 256；每个 role/group 的游标在 monitor 内扫描全部 750 个候选并比较地址。这段代码在基线和候选中相同，但在请求堆积时会成为串行点。优先方案是按 directory 版本保留地址顺序，在锁外准备本次候选，锁内只做精确游标选择和推进；必须保留动态 eligibility 和地址环的语义。Planner 并行度应作为独立变量对照，不能因为远端 CPU 多就直接扩大到全部核心。新增提交门闩 / drain 锁没有成为这次 CPU / 阻塞样本的主要热点。
+
+### 2. 虚拟线程 carrier 的扫描开销是另一种波动
+
+candidate-a 3000 QPS 的 Master P99=30ms，7219 / 8526（84.7%）Java execution samples 落在 ForkJoinPool.scan；10000 QPS 为 7349 / 9924（74.1%）。正常候选轮未出现这一规模的扫描。750 个 WorkerBatcher 使用虚拟线程，远端默认 carrier parallelism=256。临时只改 JVM 参数 -Djdk.virtualThreadScheduler.parallelism=32，两轮 3000 QPS Master P99=13 / 12ms、客户端=30.234 / 30.012ms；10000 QPS Master=26 / 22ms、客户端=53.822 / 48.816ms。两轮没有同量级扫描采样，但仍有客户端超标，且 121ms 锁竞争轮只有 25 个 scan 样本；这项控制不能替代游标锁优化，也没有修改生产默认参数。
+
+### 3. 两版本共有的分配与暂停
+
+正常 3000 QPS 轮的 >=20ms 请求几乎全部跨越 GC 暂停。分配采样主要来自 GenerateInputPB.Builder.mergeFrom、EndpointRegistry.decodeRoutingSnapshot、DecodeSelector.select、GroupPlanner.selectWithPrediction、CostBasedPrefillStrategy.discoverAvailableEndpoints 及 RouteTimelineProjector 的队列投影。候选和基线规模相近；未看到新增状态字段引入数量级分配增长。后续应减少每请求的完整 Decode 视图 / list / 数组和投影中间对象，保留 generation pin、版本与容量复验。Protobuf 路径同时包含 Master 和 Mock Engine 网络解析，不可通过去掉必要解析制造成绩。JFR allocation weight 是统计权重；native epoll sample 和闲置 Condition park 不作为 CPU 热点。
+
+### 4. 请求归档失败：两版本共有的 inactivity timer 竞态
+
+candidate-default-c 的 10000 QPS **预热**失败，正式测量没有开始；baseline-diag-a 的 10000 QPS **测量**失败。两者都记录 IllegalStateException: terminal record retains request-owned state，随后注册表残留 1 个请求。基线诊断显示 future、delivery settlement、senderFinished 均已完成，stage=FINISHED，item / admission / cleanup 均为空，但 inactivityDeadline 仍存在。
+
+与该事实相符的流程：终态 action 先 detach / cancel 原定时器；等待 delivery settlement 期间仍是 FINALIZING 且 delivery 非空；finishAdmission 再次 attach inactivity deadline，而 inactivityDeadlineAtMs 把该阶段视作可继续追踪；finishTerminal 设置 FINISHED 后触发不变量异常，跳过 archive。应先增加受控交错回归，再禁止已持有终态 action 的请求重新安装 inactivity watch，同时保留真正尚未清理资源的超时协议。该失败已定位到具体状态与异常栈，但本轮没有实现修复，不能将性能测试整体判定通过。
+
+远端 521 个被切换输入最终逐项 SHA256 审核差异为 0，原始 API / Mock test-compile 通过。原始日志 / XML / JFR / GC / 源码哈希和执行脚本：/tmp/flexlb-perf-rerun-20261005-r4。持久摘要与逐轮结果：evidence/perf-rerun-hotspots-2026-10-05.json。
