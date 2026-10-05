@@ -12513,3 +12513,27 @@ candidate-default-c 的 10000 QPS **预热**失败，正式测量没有开始；
 与该事实相符的流程：终态 action 先 detach / cancel 原定时器；等待 delivery settlement 期间仍是 FINALIZING 且 delivery 非空；finishAdmission 再次 attach inactivity deadline，而 inactivityDeadlineAtMs 把该阶段视作可继续追踪；finishTerminal 设置 FINISHED 后触发不变量异常，跳过 archive。应先增加受控交错回归，再禁止已持有终态 action 的请求重新安装 inactivity watch，同时保留真正尚未清理资源的超时协议。该失败已定位到具体状态与异常栈，但本轮没有实现修复，不能将性能测试整体判定通过。
 
 远端 521 个被切换输入最终逐项 SHA256 审核差异为 0，原始 API / Mock test-compile 通过。原始日志 / XML / JFR / GC / 源码哈希和执行脚本：/tmp/flexlb-perf-rerun-20261005-r4。持久摘要与逐轮结果：evidence/perf-rerun-hotspots-2026-10-05.json。
+
+
+## 2026-10-05：最新工作区与 adb724b28d 的性能对照
+
+本次基线严格使用 adb724b28dc6a530dd446bf7c44d1ab154cdb12a 的归档源码；候选包含当前尚未提交的重构，最终冻结于 2026-10-05 18:01:06 CST，HEAD=d30039da7c，9 个生产文件不同。最终生产指纹为 e1d32b0ef616292f205c6254798262e3aeaac55611888d1bb025f82910c0d6cf；测完后逐项 SHA256 确认当前生产源码与该快照完全一致。本轮仅增加性能证据，没有修改生产代码。
+
+全部测试在 luoli.hn@11.163.39.110 的指定 checkout / luoli_gpu 容器执行，Corretto 21.0.12.1，256 CPU，-Xms64g -Xmx64g，750P/750D，3000 / 10000 QPS，预热 / 正式发流各 10 秒，每个 P 至少 16 个预热请求；没有 JFR、planner / carrier 并行度覆盖或断言放宽。两边原始 E2E 性能测试文件相同，仅加入版本、PID 和 JVM 参数打印。
+
+R5 先完成基线 A、候选 A、候选 B、基线 B 的 ABBA，每轮分别执行 BATCH / FIXED_WINDOW 和 NON_BATCH / SINGLE。期间主工作区 SchedulerRuntime 又修改了一处关闭异常通知；随后 R6 重新冻结当前代码并补跑候选 A / B。下表比较 R5 的两轮指定 commit 基线与 R6 的两轮最终最新候选；它不应被描述成同一版候选的完整 ABBA。R5 中间候选结果全部保留。
+
+| 模式 / QPS | 基线 Master P99（两轮） | 最新 Master P99（两轮） | 基线客户端 P99（两轮） | 最新客户端 P99（两轮） |
+| --- | --- | --- | --- | --- |
+| BATCH / 3000 | 12 / 12 ms | 12 / 12 ms | 29.251 / 29.824 ms | 29.252 / 29.695 ms |
+| BATCH / 10000 | 26 / 19 ms | 21 / 22 ms | 54.749 / 45.630 ms | 43.776 / 48.430 ms |
+| NON_BATCH / 3000 | 1 / <1 ms | <1 / <1 ms | 4.508 / 4.561 ms | 0.877 / 1.746 ms |
+| NON_BATCH / 10000 | 4 / 1 ms | 3 / 3 ms | 28.353 / 1.366 ms | 28.835 / 25.929 ms |
+
+最终最新候选 8 项全部通过，Master 和客户端 P99 均 <50ms，实际客户端 / Master 吞吐均 >=目标的 98%。BATCH 的客户端吞吐约 2996.8 / 9989.1–9989.2 QPS，NON_BATCH 约 2999.5–2999.6 / 9994.5–9994.6 QPS。BATCH 与基线基本处于同一性能量级；两次重复不足以证明持续改善。NON_BATCH 10000 QPS 的基线客户端波动明显，不能只挑 1.366ms 一轮代表基线。既有测试客户端门槛是 250ms，因此基线 54.749ms 虽然测试通过，仍未达到用户 50ms 目标。
+
+**不能删除的失败证据：**R5 初始候选 A 的 BATCH / 10000 QPS 出现 Master P99=463ms、客户端 P99=473.324ms、route-submit P99=448ms，客户端 250ms 断言失败。它的第二轮为 Master 17ms、客户端 47.079ms。之后更新只涉及 shutdown 的失败通知，不能据后续通过宣称选路长尾已修复；本轮没有该失败 JVM 的 JFR，不能把阶段耗时直接归因于某个锁或重构。需要将本轮满足门槛与长期稳定性分别判断。
+
+共 12 个 JVM / 24 项：23 通过、1 失败、0 error / skip。最终最新 8 项通过；基线 8 项通过；中间候选 8 项中有上述 1 项失败。本轮未出现此前的注册表残留失败，但不代表该竞态已修复。远端切换涉及的 522 项原始输入逐项恢复，独立 SHA256 审核差异 0，恢复后的 API / Mock test-compile 通过。
+
+逐轮测量、SLO 检查、测试失败、源码哈希和日志摘要：evidence/latest-vs-adb724b-performance-2026-10-05.json。原始日志 / XML / 脚本 / 快照：/tmp/flexlb-latest-vs-adb-20261005-r5 与 /tmp/flexlb-latest-vs-adb-20261005-r6。
