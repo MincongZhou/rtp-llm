@@ -12449,3 +12449,29 @@ FlexlbServiceImpl 的 completeOnce 从四个实现/转发入口收成一个：�
 - Full common/cache/grpc/sync: 1,888 tests passed. Eight API classes: 116 passed. Seven LoadClient classes: 46 passed. All have zero failures/errors/skips. Changed benchmark callers plus SnapshotBench compiled; no performance benchmark was run locally.
 - All three reviews passed. Exact state identities, locks, argument-evaluation order, default values, cleanup and real request/transport interfaces are preserved. Removed public Java helpers have no remaining callers in the repository. Other C++ working changes were hash-checked and preserved.
 - Evidence: /tmp/flexlb-overloads271/{methods.jsonl,methods-after.jsonl,removed-methods.json,updated-calls.json,candidate.patch,full-test-summary.json,api-mock-test-summary.json,tool-compile.log}.
+
+
+## 2026-10-05：代码 review 与 UT / 远端性能回归
+
+受测基线为 f8b82eea4a，候选为冻结的 R3 工作区，包含其他 agent 尚未提交的 Scheduler drain 重构。三名 sub agent 分别复核设计、并发和测试；本轮独立修复已提交 fe5bb30b64，没有打包其他 agent 的重构。生产源码冻结后未变化，随后只修正性能测试夹具。
+
+- 修复 REQUEST_FENCED 被误当作 Decode 资源清理证明：现在等待精确 victim terminal；只有 REQUEST_CLEANED 可替代该终态。新用例证明旧代码错误地提前提交，修复后通过，并覆盖 FENCED 超时及迟到 terminal。
+- 修复 admission 失败与 drain 的发布顺序：先记录 failure，finally 释放 gate / obligation，随后异常完成 termination。既能防止关闭线程漏报失败，也能让同步监听器等待已释放的门闩。旧顺序回归失败，修复后通过。
+- 修复并发重构遗留的四处编译引用和一个 mock context.isOpen 默认 false 导致的 UT 挂起。测试失败快速给出超时，没有放宽行为断言。
+- 分模块功能回归合计 2,477 项执行通过，1 项既有条件基准跳过；Common/Cache/gRPC/Sync/API 在本地执行，Mock 全部 400 项在指定远端执行。本地 Mock 的吞吐锚点 401 tok/s 失败；远端同一测试基线 510、候选 514 tok/s 均通过。独立五文件修复另跑 70 项定向测试通过。没有执行 C++ UT。
+- Sync 性能夹具原来 mock WorkerBatcher，包含每次约 4.7 KB Mockito 分配；替换成 new 对象仍因已 mock 的类插桩保留 24 bytes/read。最终通过生产入口构造真实 PrefillEndpoint / WorkerBatcher，不 mock 被测类；在计时外显式捕获等待快照。两版本 3 项性能测试全通过，depth=0/1/32/128/512 读取均 0 bytes/read；原耗时和分配断言保留。等待快照是历史事实，不要求它一直等于实时队列深度。
+
+远端 luoli.hn@11.163.39.110 的指定 checkout、luoli_gpu 容器，Java 21，256 CPU，-Xms64g -Xmx64g，750P/750D。每项 warmup / measurement 各 10 秒，预热每个 P 16 请求，3k / 10k QPS；基线 A、候选 A、候选 B、基线 B 共八个 JVM / 十六组 API 测试。吞吐均满足 98% 门槛。所有远端改写的 521 项输入均恢复，并验证原版 API / Mock 编译。
+
+| 模式 / QPS | 基线 Master P99（两轮） | 当前 Master P99（两轮） | 当前客户端 P99（两轮） |
+| --- | --- | --- | --- |
+| BATCH / 3000 | 12 / 12 ms | 47 / 55 ms | 51.976 / 77.826 ms |
+| BATCH / 10000 | 257 / 1113 ms | 23 / 27 ms | 51.090 / 61.313 ms |
+| NON_BATCH / 3000 | <1 / <1 ms | <1 / <1 ms | 4.404 / 1.084 ms |
+| NON_BATCH / 10000 | 32 / 2 ms | 3 / 1 ms | 15.994 / 1.612 ms |
+
+不能宣布性能全部达标：候选 BATCH 3000 QPS 一轮 Master P99 超过 50ms，BATCH 客户端 P99 两档均未达到用户 50ms 目标。候选低负载超标的 route_submit P99 为 30 / 35ms，而基线为 1ms；它是 serviceStart→routeSubmitted 的耗时段，包含排队、计算和暂停，不能据此断言某个函数是 CPU 热点。基线高负载也有更大长尾；GC 最长暂停不能单独解释所有尾延迟。后续应对 BATCH 3000 QPS 的提交阶段采函数 CPU / 阻塞 / 暂停数据，再选择改动，不调整断言来通过。
+
+仍有一项既有条件风险：RequestContinuationExecutor 的失败通知在 fact 尚未排空时同步完成 termination；监听器若同步调用 runtime.shutdown，可能等待当前 fact 自身。QueuedRequestScheduler.closePlan 类似，持 admission handle 时通知失败。当前生产代码未发现这种 termination 监听器，但接口重入协议尚需单独明确；本轮没有扩大重构。
+
+原始日志、XML、补丁和输入哈希：/tmp/flexlb-regression-20261005-r3。可持久复核的摘要：evidence/review-regression-2026-10-05.json。750P 使用真实 loopback Mock Prefill RPC、Decode 是逻辑账本；不是 GPU 模型推理性能。

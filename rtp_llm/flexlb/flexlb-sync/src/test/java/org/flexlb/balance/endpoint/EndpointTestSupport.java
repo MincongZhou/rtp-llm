@@ -50,7 +50,7 @@ public final class EndpointTestSupport {
                 org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "runtime");
     }
 
-    static PrefillEndpoint prefill(WorkerStatus status, org.flexlb.config.FlexlbConfig config, DeliveryStrategy delivery,
+    public static PrefillEndpoint prefill(WorkerStatus status, org.flexlb.config.FlexlbConfig config, DeliveryStrategy delivery,
             org.flexlb.balance.scheduler.RequestRepository repository, BatchSchedulerReporter reporter) {
         var endpoint = new PrefillEndpoint(status, config, delivery, reporter,
                 new org.flexlb.balance.scheduler.PlacementAvailability());

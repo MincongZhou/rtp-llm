@@ -30,7 +30,6 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /** Route-time queue capture regression on the final Prefill runtime boundary. */
 @Tag("performance-regression")
@@ -85,7 +84,7 @@ class WorkerBatcherPerformanceTest {
 
     @Test
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    void timeoutDiagnosticsReadDoesNotGrowWithQueueDepth() throws Exception {
+    void timeoutDiagnosticsReadDoesNotGrowWithQueueDepth() throws Throwable {
         var allocationBean = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean
                 && bean.isThreadAllocatedMemorySupported() ? bean : null;
         if (allocationBean != null) { allocationBean.setThreadAllocatedMemoryEnabled(true); }
@@ -94,6 +93,14 @@ class WorkerBatcherPerformanceTest {
         for (int depth : QUEUE_DEPTHS) {
             WorkerBatcher runtime = runtimeWithDepth(depth);
             try {
+                if (depth > 0) {
+                    var capture = MethodHandles.privateLookupIn(WorkerBatcher.class, MethodHandles.lookup())
+                            .findVirtual(WorkerBatcher.class, "recordQueueWait",
+                                    MethodType.methodType(void.class, RequestRoute.class, String.class));
+                    RequestRoute head = WorkerBatcherTestSupport.capture(runtime).items().getFirst();
+                    capture.invokeExact(runtime, head, "Prefill capacity exhausted");
+                    assertEquals(depth, runtime.getLatestQueueWaitSnapshot().get("queueDepth"));
+                }
                 long checksum = 0;
                 for (int warmup = 0; warmup < operations; warmup++) {
                     checksum += runtime.getLatestQueueWaitSnapshot().size();
@@ -218,12 +225,15 @@ class WorkerBatcherPerformanceTest {
         FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.useSingleDecision(config);
-        PrefillEndpoint endpoint = stablePrefillEndpoint();
+        WorkerStatus status = WorkerStatus.createDiscovered(RoleType.PREFILL,
+                "perf", "127.0.0.1", 8080, 8090, "perf-site");
         BlockingDeliveryStrategy delivery = new BlockingDeliveryStrategy();
-        endpoint = org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(
-                config, endpoint.getStatus(), delivery, mock(AbstractRequestScheduler.class));
+        AbstractRequestScheduler scheduler = mock(AbstractRequestScheduler.class);
+        PrefillEndpoint endpoint = org.flexlb.balance.endpoint.EndpointTestSupport.prefill(
+                status, config, delivery, SchedulerTestSupport.repository(scheduler),
+                mock(org.flexlb.service.monitor.BatchSchedulerReporter.class));
+        endpoint.enableQueueRuntime(QueueExecutionSettings.capture(config));
         WorkerBatcher runtime = org.flexlb.balance.endpoint.EndpointTestSupport.batcher(endpoint);
-        runtime.start();
         long now = System.currentTimeMillis();
         List<RequestRoute> items = new ArrayList<>(depth);
         for (int index = 0; index < depth; index++) {
@@ -236,6 +246,7 @@ class WorkerBatcherPerformanceTest {
                     256L + (index % 32)));
         }
         for (RequestRoute item : items) {
+            SchedulerTestSupport.bindOwner(item.ctx(), scheduler);
             assertTrue(runtime.offer(item));
         }
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -270,24 +281,6 @@ class WorkerBatcherPerformanceTest {
                 null,
                 null,
                 enqueuedAtMs);
-    }
-
-    private static PrefillEndpoint stablePrefillEndpoint() {
-        PrefillTimePredictor.Evaluator evaluator =
-                mock(PrefillTimePredictor.Evaluator.class);
-        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
-        when(predictor.evaluator()).thenReturn(evaluator);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getPredictor()).thenReturn(predictor);
-        WorkerStatus status = WorkerStatus.createDiscovered(
-                RoleType.PREFILL,
-                "perf",
-                "127.0.0.1",
-                8080,
-                8090,
-                "perf-site");
-        when(endpoint.getStatus()).thenReturn(status);
-        return endpoint;
     }
 
     private static final class BlockingDeliveryStrategy
