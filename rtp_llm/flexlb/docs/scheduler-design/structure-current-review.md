@@ -12537,3 +12537,28 @@ R5 先完成基线 A、候选 A、候选 B、基线 B 的 ABBA，每轮分别执
 共 12 个 JVM / 24 项：23 通过、1 失败、0 error / skip。最终最新 8 项通过；基线 8 项通过；中间候选 8 项中有上述 1 项失败。本轮未出现此前的注册表残留失败，但不代表该竞态已修复。远端切换涉及的 522 项原始输入逐项恢复，独立 SHA256 审核差异 0，恢复后的 API / Mock test-compile 通过。
 
 逐轮测量、SLO 检查、测试失败、源码哈希和日志摘要：evidence/latest-vs-adb724b-performance-2026-10-05.json。原始日志 / XML / 脚本 / 快照：/tmp/flexlb-latest-vs-adb-20261005-r5 与 /tmp/flexlb-latest-vs-adb-20261005-r6。
+
+
+## 2026-10-05：仅分析最新版本的性能热点
+
+按照用户最新要求，以下只讨论当前工作区；238 个生产输入与 R6 最终快照、测量结束后的当前源码逐项 SHA256 相同，生产指纹 e1d32b0ef616292f205c6254798262e3aeaac55611888d1bb025f82910c0d6cf。没有修改生产代码。R7 在指定远端 checkout / luoli_gpu、Corretto 21.0.12.1、256 CPU、-Xms64g -Xmx64g、750P/750D、BATCH/FIXED_WINDOW、3000/10000 QPS 下采集 JFR、GC/safepoint、宿主 vmstat 和 Java pidstat。每轮预热 / 正式发流各 10 秒；JFR 阶段包含 runTraffic 的准备和完成等待，因此阶段墙钟可能超过 10 秒。
+
+| 最新代码配置 | 3000 QPS Master / 客户端 P99，两轮 | 10000 QPS Master / 客户端 P99，两轮 | 10000 QPS 游标锁累计等待，两轮 |
+| --- | --- | --- | --- |
+| 默认：256 planner / 默认 256 carrier | 30/36.123；12/30.479 ms | 19/45.675；21/41.303 ms | 9.223 / 14.295 秒 |
+| 仅 carrier=32，planner 仍 256 | 43/65.067；12/28.115 ms | 第一轮预热失败，无正式数据；1321/1322.343 ms | 第一轮无正式数据；1788.834 秒 |
+| 仅 planner=32，carrier 仍默认 256 | 12/27.533；13/26.466 ms | 18/40.806；20/53.348 ms | 0.486 / 0.365 秒 |
+
+**主机干扰与锁积压必须一起判断。**carrier32 第二轮 10000 QPS 的客户端吞吐只有 8844.1 QPS，route-submit P99=1301ms；同一测量窗口内，其他 UID 58367 的 Java 进程分别最高占用 209.46 和 183.45 个 CPU 核，宿主运行队列峰值 546。测试 JVM 在容器内以 UID 0 运行。JFR 同时捕获 58544 次 >=1ms 的 EndpointRoundRobin.Cursor monitor 等待，累计 1788.834 秒，最慢单次 664.138ms；其中 Prefill 49609 次、Decode 8935 次。74912 个 >=20ms 请求中只有 4842 个与 GC 暂停重叠。共享游标持锁扫描 750 个候选、256 个规划线程竞争同一 role/group 游标，是在 CPU 干扰下放大选路积压的明确位置；不能将这轮恶化直接归因于 carrier32 参数本身。累计锁等待不是墙钟耗时，单次锁等待分位数也不是请求分位数。
+
+**虚拟线程扫描是独立的 CPU 开销。**默认最新代码 A 轮的 Java execution samples 中，ForkJoinPool.scan 为 5917/7952（74.4%，3000 QPS）和 7265/9965（72.9%，10000 QPS）；B 轮为 7/3527 和 29/9212。不能把 idle Condition park 或 native epoll 当作 CPU 热点。只改 carrier32 虽降低此扫描比例，却没有阻止上述选路积压，因此不能作为单独修复。
+
+**planner32 缩小了锁等待，但尚未证明稳定达标。**两轮 10000 QPS 的游标累计等待为 0.486/0.365 秒，Master P99=18/20ms；客户端为 40.806/53.348ms，后一轮仍超过用户 50ms 目标。该轮 GC 最大暂停 74.765ms。各轮宿主负载不同，不能把等待量减少的倍数当作严格的参数因果效果；这些带 JFR 的结果也不能替代无 profiler 的验收。
+
+最新代码正常轮的路由 CPU 主要落在 Prefill 投影/候选评估、完整 Decode 视图和 protobuf 编解码。统计分配权重较大的具体位置是 GenerateInputPB.Builder.mergeFrom、GroupPlanner.selectWithPrediction、ProjectedQueue.create、decodeRoutingSnapshot 和 DecodeSelector.select；protobuf 样本同时包含 Master 和 Mock，不能通过跳过必要解析制造性能改善。正常 3000 QPS 的 >=20ms 请求几乎全部跨越 GC；64g heap 并不保证单次暂停低于 50ms。
+
+代码优化顺序：1）将候选过滤、地址顺序准备移出 EndpointRoundRobin 的共享锁，锁内只查找合格后继与推进游标，保留动态 eligibility 和地址环公平性；2）在监控宿主负载的条件下独立验证 planner 并行度，避免默认按全部 CPU 放大串行点争用；3）减少每请求完整 Decode 快照、投影队列和中间数组的分配。暂不修改 carrier 默认值。下一轮性能验收需要标记外部 Java 负载重叠，保留被干扰的失败结果。
+
+另一个不能忽略的正确性失败：carrier32 第一轮 10000 QPS 在预热期间出现 terminal record retains request-owned state，注册表残留 1 个请求，未进入正式测量。异常栈为 BalanceContext.finishTerminal -> AbstractRequestScheduler.commitTerminalRecord -> RequestContinuationExecutor；不能将它记作性能通过。仅凭本次异常栈不能断言残留字段；此前定位过的 inactivity timer 安装竞态应以受控 UT 核实。
+
+本节最新代码共 6 个 JVM / 12 项，既有断言 10 通过、2 失败；11 个正式测量中 3 个不满足用户 P99/吞吐目标，另 1 项预热失败。两次切换均逐项恢复原始 522 个输入，恢复后 API+Mock test-compile 通过。逐轮指标、JFR 热点、GC、宿主干扰和边界说明：evidence/latest-performance-hotspots-2026-10-05.json；原始证据 / 脚本 / 录制位于 /tmp/flexlb-tail-cause-20261005-r7。
