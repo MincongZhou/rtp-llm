@@ -47,7 +47,7 @@ class RequestSchedulerContractTest {
                     () -> f.requests.requests.register(request, null, new BalanceContext.RequestFuture((a, b, c, d) -> false)));
             assertSame(originalFuture, request.getFuture());
             assertNull(request.scheduler());
-            assertNull(f.requests.requestSlot(900));
+            assertNull(f.requests.findRequestContext(900));
 
             var future = f.requests.register(request, StrategyErrorType.BATCH_SLO_EXPIRED);
             try (var admission = f.requests.claimAdmissionHandle(900, future); var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {

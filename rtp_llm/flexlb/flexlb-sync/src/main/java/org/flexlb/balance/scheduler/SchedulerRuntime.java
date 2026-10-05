@@ -170,7 +170,7 @@ public final class SchedulerRuntime {
 
     private void reportSchedulerInflight() {
         try {
-            reporter.reportSchedulerInflight(requests.liveRequestCount(), requests.oldestLiveSlotAgeMs());
+            reporter.reportSchedulerInflight(requests.liveRequestCount(), requests.oldestLiveRequestAgeMs());
         } catch (RuntimeException failure) {
             warnIsolated(
                     "Failed to report scheduler inflight metrics", failure);

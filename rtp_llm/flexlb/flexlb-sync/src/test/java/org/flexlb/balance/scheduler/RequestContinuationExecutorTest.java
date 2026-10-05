@@ -24,7 +24,7 @@ class RequestContinuationExecutorTest {
         AtomicReference<Thread> worker = new AtomicReference<>();
         AtomicReference<String> observedContext = new AtomicReference<>();
         try {
-            executor.submit(slot(993000L), () -> {
+            executor.submit(requestContext(993000L), () -> {
                 worker.set(Thread.currentThread());
                 observedContext.set(inherited.get());
                 ran.countDown();
@@ -41,31 +41,31 @@ class RequestContinuationExecutorTest {
     }
 
     @Test
-    void exactSlotSerializesFactsWhileOtherSlotsCanProgressAndCloseDrains() throws Exception {
-        BalanceContext blockedSlot = slot(993001L);
-        BalanceContext independentSlot = slot(993002L);
+    void sameRequestSerializesFactsWhileOtherRequestsCanProgressAndCloseDrains() throws Exception {
+        BalanceContext blockedContext = requestContext(993001L);
+        BalanceContext independentContext = requestContext(993002L);
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        CountDownLatch sameSlotFinished = new CountDownLatch(1);
+        CountDownLatch sameRequestFinished = new CountDownLatch(1);
         CountDownLatch independentFinished = new CountDownLatch(1);
         RequestContinuationExecutor executor = new RequestContinuationExecutor();
         Thread closer = null;
         try {
-            executor.submit(blockedSlot, () -> {
+            executor.submit(blockedContext, () -> {
                 started.countDown();
                 try { assertTrue(release.await(5, TimeUnit.SECONDS)); }
                 catch (InterruptedException error) { throw new AssertionError(error); }
             });
             assertTrue(started.await(5, TimeUnit.SECONDS));
-            executor.submit(blockedSlot, sameSlotFinished::countDown);
-            executor.submit(independentSlot, independentFinished::countDown);
+            executor.submit(blockedContext, sameRequestFinished::countDown);
+            executor.submit(independentContext, independentFinished::countDown);
             assertTrue(independentFinished.await(5, TimeUnit.SECONDS));
-            assertFalse(sameSlotFinished.await(100, TimeUnit.MILLISECONDS));
+            assertFalse(sameRequestFinished.await(100, TimeUnit.MILLISECONDS));
             closer = new Thread(executor::close);
             closer.start();
             assertTrue(closer.isAlive());
             release.countDown();
-            assertTrue(sameSlotFinished.await(5, TimeUnit.SECONDS));
+            assertTrue(sameRequestFinished.await(5, TimeUnit.SECONDS));
             closer.join(5_000);
             assertFalse(closer.isAlive());
         } finally {
@@ -83,7 +83,7 @@ class RequestContinuationExecutorTest {
         CountDownLatch ran = new CountDownLatch(1);
         AtomicReference<String> threadName = new AtomicReference<>();
         try {
-            executor.submit(slot(993003L), () -> {
+            executor.submit(requestContext(993003L), () -> {
                 threadName.set(Thread.currentThread().getName());
                 ran.countDown();
             });
@@ -99,9 +99,9 @@ class RequestContinuationExecutorTest {
         RequestContinuationExecutor executor = new RequestContinuationExecutor();
         CountDownLatch later = new CountDownLatch(1);
         try {
-            BalanceContext slot = slot(993004L);
-            executor.submit(slot, () -> { throw new IllegalStateException("isolated fact"); });
-            executor.submit(slot, later::countDown);
+            BalanceContext requestContext = requestContext(993004L);
+            executor.submit(requestContext, () -> { throw new IllegalStateException("isolated fact"); });
+            executor.submit(requestContext, later::countDown);
             assertTrue(later.await(5, TimeUnit.SECONDS));
             executor.close();
         } finally {
@@ -117,7 +117,7 @@ class RequestContinuationExecutorTest {
         if (recovery) {
             ((ExecutorService) ReflectionTestUtils.getField(executor, "workers")).shutdown();
         }
-        BalanceContext context = slot(993005L);
+        BalanceContext context = requestContext(993005L);
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         CountDownLatch nestedEntered = new CountDownLatch(1);
@@ -180,7 +180,7 @@ class RequestContinuationExecutorTest {
         if (recovery) {
             ((ExecutorService) ReflectionTestUtils.getField(executor, "workers")).shutdown();
         }
-        BalanceContext context = slot(993006L);
+        BalanceContext context = requestContext(993006L);
         var observed = new java.util.concurrent.CopyOnWriteArrayList<Integer>();
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
@@ -212,7 +212,7 @@ class RequestContinuationExecutorTest {
         }
     }
 
-    private static BalanceContext slot(long requestId) {
+    private static BalanceContext requestContext(long requestId) {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         BalanceContext context = RequestProtocolTestSupport.context(config, requestId);
         var owner = org.mockito.Mockito.mock(AbstractRequestScheduler.class);

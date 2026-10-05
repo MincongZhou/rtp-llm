@@ -289,7 +289,7 @@ public class EvictionManager {
                 if (incoming != null) {
                     endpoint.release(incoming, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
                 }
-                Failures.rethrow(failure, "request slot cleanup failed");
+                Failures.rethrow(failure, "request cleanup failed");
             }
         }
     }

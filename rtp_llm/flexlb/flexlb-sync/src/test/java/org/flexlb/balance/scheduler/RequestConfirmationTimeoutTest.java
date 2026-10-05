@@ -84,14 +84,14 @@ class RequestConfirmationTimeoutTest {
             }
             var context = RequestProtocolTestSupport.context(config, REQUEST_ID);
             var future = RequestProtocolTestSupport.register(requests, context);
-            BalanceContext slot = requests.requestSlot(REQUEST_ID);
+            BalanceContext requestContext = requests.findRequestContext(REQUEST_ID);
             ServerStatus prefillMetadata = new ServerStatus();
             prefillMetadata.setRole(RoleType.PREFILL);
             prefillMetadata.setServerIp("127.0.0.1");
             prefillMetadata.setGrpcPort(8081);
             context.setFuture(future);
             RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), prefillMetadata,
-                    null, prefill, decode, reservation, slot.createdAtMs());
+                    null, prefill, decode, reservation, requestContext.createdAtMs());
             AtomicReference<PrefillState.RouteReservation> routeReservation = new AtomicReference<>();
             try (var mutation = requests.claimAdmissionHandle(REQUEST_ID, future); var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(mutation);
                  var pin = prefill.tryPinGeneration()) {
@@ -134,8 +134,8 @@ class RequestConfirmationTimeoutTest {
             assertEquals(1, decode.routingView().engineCapacityUsed());
 
             if (waiting != ConfirmationWait.AUTOMATIC_TIMER) {
-                RequestProtocolTestSupport.expireInactiveRequest(requests, slot,
-                        RequestProtocolTestSupport.<Long>inspect(requests, slot, "inactivityExpiresAtMsLocked"));
+                RequestProtocolTestSupport.expireInactiveRequest(requests, requestContext,
+                        RequestProtocolTestSupport.<Long>inspect(requests, requestContext, "inactivityExpiresAtMsLocked"));
             }
 
             // AUTOMATIC_TIMER relies only on ExpirationTimer; no manual expiry entry point runs.

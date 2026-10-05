@@ -153,7 +153,7 @@ class DirectAdmissionContractTest {
     }
 
     @Test
-    void decodeTerminalBetweenAcceptedPreparationAndSlotBindingCannotPublishASuccessfulRoute() throws Exception {
+    void decodeTerminalBetweenAcceptedPreparationAndContextBindingCannotPublishASuccessfulRoute() throws Exception {
         try (Fixture fixture = new Fixture()) {
             AtomicBoolean raced = new AtomicBoolean();
             doAnswer(call -> {
@@ -335,10 +335,10 @@ class DirectAdmissionContractTest {
         }
 
         private void assertItemNotBound(long requestId) {
-            BalanceContext slot = requests.requestSlot(requestId);
-            assertNotNull(slot);
-            synchronized (slot) {
-                assertNull(slot.activeItem(), "this Engine observation must precede item binding");
+            BalanceContext requestContext = requests.findRequestContext(requestId);
+            assertNotNull(requestContext);
+            synchronized (requestContext) {
+                assertNull(requestContext.activeItem(), "this Engine observation must precede item binding");
             }
         }
 

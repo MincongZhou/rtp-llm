@@ -49,7 +49,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Executable documentation for the RequestSlot delivery lock boundary. */
+/** Executable documentation for the BalanceContext delivery lock boundary. */
 class RequestDeliveryLockContractTest {
 
     private FlexlbConfig config;
@@ -123,10 +123,10 @@ class RequestDeliveryLockContractTest {
     }
 
     @Test
-    void itemPublicationDoesNotOwnTheExactSlotMonitor()
+    void itemPublicationDoesNotOwnTheExactContextMonitor()
             throws Exception {
         Registered registered = registerItem(101L);
-        BalanceContext slot = lifecycle.requestSlot(registered.item().requestId());
+        BalanceContext requestContext = lifecycle.findRequestContext(registered.item().requestId());
         AdmissionHandle admission =
                 lifecycle.claimAdmissionHandle(
                         registered.item().requestId(), registered.future());
@@ -138,17 +138,17 @@ class RequestDeliveryLockContractTest {
         ExecutorService owner = Executors.newSingleThreadExecutor();
         Thread contender = new Thread(() -> {
             contenderStarted.countDown();
-            synchronized (slot) {
+            synchronized (requestContext) {
                 contenderEntered.countDown();
             }
-        }, "commit-inflight-slot-contender");
+        }, "commit-inflight-context-contender");
 
         try {
             Future<Boolean> committed = owner.submit(() ->
                     (lifecycle.commitRoute(
                             registered.item(), RequestProtocolTestSupport.publication(() -> {
                                 actionEntered.countDown();
-                                assertFalse(Thread.holdsLock(slot));
+                                assertFalse(Thread.holdsLock(requestContext));
                                 await(releaseAction);
                                 return true;
                             })) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
@@ -157,9 +157,9 @@ class RequestDeliveryLockContractTest {
             contender.start();
             assertTrue(contenderStarted.await(5, TimeUnit.SECONDS));
             assertTrue(contenderEntered.await(5, TimeUnit.SECONDS),
-                    "slot operations must proceed during endpoint publication");
-            synchronized (slot) {
-                assertSame(registered.item(), slot.activeItem());
+                    "context operations must proceed during endpoint publication");
+            synchronized (requestContext) {
+                assertSame(registered.item(), requestContext.activeItem());
             }
             assertFalse(RequestProtocolTestSupport.prepareMember(lifecycle, registered.item()),
                     "ROUTING cannot be claimed during queue publication");
@@ -190,9 +190,9 @@ class RequestDeliveryLockContractTest {
     }
 
     @Test
-    void declinedPublicationClearsTheProvisionalSlotBinding() {
+    void declinedPublicationClearsTheProvisionalContextBinding() {
         Registered registered = registerItem(111L);
-        BalanceContext slot = lifecycle.requestSlot(registered.item().requestId());
+        BalanceContext requestContext = lifecycle.findRequestContext(registered.item().requestId());
 
         try (AdmissionHandle admission =
                      lifecycle.claimAdmissionHandle(
@@ -201,8 +201,8 @@ class RequestDeliveryLockContractTest {
             assertNotNull(admission);
             assertFalse((lifecycle.commitRoute(
                     registered.item(), RequestProtocolTestSupport.publication(() -> false)) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
-            synchronized (slot) {
-                assertNull(slot.activeItem());
+            synchronized (requestContext) {
+                assertNull(requestContext.activeItem());
             }
         }
     }
@@ -210,7 +210,7 @@ class RequestDeliveryLockContractTest {
     @Test
     void throwingPublicationPreservesTheFailureAndClearsTheBinding() {
         Registered registered = registerItem(121L);
-        BalanceContext slot = lifecycle.requestSlot(registered.item().requestId());
+        BalanceContext requestContext = lifecycle.findRequestContext(registered.item().requestId());
         IllegalStateException expected =
                 new IllegalStateException("queue publication failed");
 
@@ -226,8 +226,8 @@ class RequestDeliveryLockContractTest {
                                 throw expected;
                             })));
             assertSame(expected, actual);
-            synchronized (slot) {
-                assertNull(slot.activeItem());
+            synchronized (requestContext) {
+                assertNull(requestContext.activeItem());
             }
         }
     }
@@ -254,7 +254,7 @@ class RequestDeliveryLockContractTest {
     }
 
     @Test
-    void cancellationEntersTheSlotButWaitsForPublicationResolution()
+    void cancellationEntersTheContextButWaitsForPublicationResolution()
             throws Exception {
         Registered registered = registerItem(141L);
         CountDownLatch publicationEntered = new CountDownLatch(1);
@@ -348,7 +348,7 @@ class RequestDeliveryLockContractTest {
     }
 
     @Test
-    void deliveryClaimKeepsEndpointHandoffAndSlotClaimAtomic()
+    void deliveryClaimKeepsEndpointHandoffAndContextClaimAtomic()
             throws Exception {
         Registered registered = registerItem(201L);
         try (AdmissionHandle admission =
@@ -359,7 +359,7 @@ class RequestDeliveryLockContractTest {
             assertTrue((lifecycle.commitRoute(
                     registered.item(), RequestProtocolTestSupport.publication(() -> true)) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
         }
-        BalanceContext slot = lifecycle.requestSlot(registered.item().requestId());
+        BalanceContext requestContext = lifecycle.findRequestContext(registered.item().requestId());
         CountDownLatch transferEntered = new CountDownLatch(1);
         CountDownLatch releaseTransfer = new CountDownLatch(1);
         CountDownLatch contenderStarted = new CountDownLatch(1);
@@ -367,17 +367,17 @@ class RequestDeliveryLockContractTest {
         ExecutorService owner = Executors.newSingleThreadExecutor();
         Thread contender = new Thread(() -> {
             contenderStarted.countDown();
-            synchronized (slot) {
+            synchronized (requestContext) {
                 contenderEntered.countDown();
             }
-        }, "try-commit-slot-contender");
+        }, "try-commit-context-contender");
 
         try {
             Future<DeliveryClaim> committed = owner.submit(() ->
                     RequestProtocolTestSupport.claimRouteWithoutPrediction(lifecycle,
                             registered.item(),
                             () -> {
-                                assertTrue(Thread.holdsLock(slot));
+                                assertTrue(Thread.holdsLock(requestContext));
                                 transferEntered.countDown();
                                 await(releaseTransfer);
                                 return true;
@@ -391,7 +391,7 @@ class RequestDeliveryLockContractTest {
 
             assertEquals(Thread.State.BLOCKED, contender.getState());
             assertEquals(1L, contenderEntered.getCount(),
-                    "another slot operation must not enter during endpoint transfer");
+                    "another context operation must not enter during endpoint transfer");
 
             releaseTransfer.countDown();
             DeliveryClaim claim = committed.get(5, TimeUnit.SECONDS);
@@ -411,7 +411,7 @@ class RequestDeliveryLockContractTest {
     }
 
     @Test
-    void failedEndpointTransferLeavesTheSlotUnclaimed() {
+    void failedEndpointTransferLeavesTheContextUnclaimed() {
         Registered rejected = registerItem(202L);
         bind(lifecycle, rejected);
 
@@ -451,7 +451,7 @@ class RequestDeliveryLockContractTest {
                 snapshot.deliveryClaimKind());
         assertEquals(701L, snapshot.batchId());
         assertTrue(((Long) org.springframework.test.util.ReflectionTestUtils.getField(
-                lifecycle.requestSlot(registered.item().requestId()), "batchEnqueueStartedAtMs")) > 0L);
+                lifecycle.findRequestContext(registered.item().requestId()), "batchEnqueueStartedAtMs")) > 0L);
     }
 
     @Test
@@ -479,7 +479,7 @@ class RequestDeliveryLockContractTest {
         DeliveryClaim claim = RequestProtocolTestSupport.claimBatch(
                 lifecycle, registered.item(), 703L, () -> true);
         assertNotNull(claim);
-        BalanceContext original = lifecycle.requestSlot(207L);
+        BalanceContext original = lifecycle.findRequestContext(207L);
 
         lifecycle.onPrefillStatus(endpoint, RoleType.PDFUSION,
                 List.of(PrefillState.WorkerStatusFact.terminal(
@@ -536,10 +536,10 @@ class RequestDeliveryLockContractTest {
         } else {
             lifecycle.publishRoute(claim, precedingWork, 30_000L);
         }
-        BalanceContext slot = lifecycle.requestSlot(208L);
-        synchronized (slot) {
-            assertTrue(slot.decodeAccepted());
-            assertTrue(slot.decisionDeadlineAtMs().isEmpty(), "accepted Decode needs no observation deadline");
+        BalanceContext requestContext = lifecycle.findRequestContext(208L);
+        synchronized (requestContext) {
+            assertTrue(requestContext.decodeAccepted());
+            assertTrue(requestContext.decisionDeadlineAtMs().isEmpty(), "accepted Decode needs no observation deadline");
         }
         if (batch) {
             claim.complete(DeliveryResult.delivered());

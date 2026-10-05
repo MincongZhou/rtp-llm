@@ -67,8 +67,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         this.requestReporter = runtime.requestReporter();
     }
 
-    public boolean isCurrentSlot(BalanceContext exact) { return exact != null && exact.scheduler() == this && requests.isCurrent(exact); }
-    BalanceContext requestSlot(long requestId) {
+    public boolean isCurrentContext(BalanceContext exact) { return exact != null && exact.scheduler() == this && requests.isCurrent(exact); }
+    BalanceContext findRequestContext(long requestId) {
         BalanceContext exact = requests.findActive(requestId);
         return exact != null && exact.scheduler() == this ? exact : null;
     }
@@ -171,19 +171,19 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
         boolean transferred = false;
         try {
-            BalanceContext slot = requestSlot(victim.requestId());
-            if (slot == null) {
+            BalanceContext requestContext = findRequestContext(victim.requestId());
+            if (requestContext == null) {
                 return null;
             }
-            synchronized (slot) {
-                RequestRoute item = slot.item();
+            synchronized (requestContext) {
+                RequestRoute item = requestContext.item();
                 if (item == null || item.priority() >= incomingPriority
                         || item.decodeEp() != endpoint || !Objects.equals(item.decodeReservation(), victim)
-                        || !ownsPreparedDeliveryLocked(slot, item) || slot.admission() != null
+                        || !ownsPreparedDeliveryLocked(requestContext, item) || requestContext.admission() != null
                         || item.requestExpired(System.currentTimeMillis())) {
                     return null;
                 }
-                AdmissionHandle claim = slot.beginWithdrawal(item, (operation, response) -> finishAdmission(slot, operation, response));
+                AdmissionHandle claim = requestContext.beginWithdrawal(item, (operation, response) -> finishAdmission(requestContext, operation, response));
                 transferred = claim != null;
                 return claim;
             }
@@ -199,7 +199,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     public void onPrefillStatus(PrefillEndpoint source, RoleType role,
                                 List<PrefillState.WorkerStatusFact> facts) {
         forEachEndpointFact("Prefill status", facts, fact -> {
-            BalanceContext context = requestSlot(fact.item().requestId());
+            BalanceContext context = findRequestContext(fact.item().requestId());
             if (context != null) {
                 submitContinuation(context, context.acceptPrefillStatus(source, role, fact, System.currentTimeMillis()));
             }
@@ -208,7 +208,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     public void onDecodeStatus(DecodeEndpoint source, List<DecodeEndpoint.WorkerStatusFact> facts) {
         forEachEndpointFact("Decode status", facts, fact -> {
-            BalanceContext context = requestSlot(fact.reservation().requestId());
+            BalanceContext context = findRequestContext(fact.reservation().requestId());
             if (context != null) {
                 submitContinuation(context, context.acceptDecodeStatus(source, fact, System.currentTimeMillis()));
             }
@@ -252,7 +252,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             return;
         }
         forEachEndpointFact("Prefill retirement", items, exact -> {
-            BalanceContext context = requestSlot(exact.requestId());
+            BalanceContext context = findRequestContext(exact.requestId());
             if (context != null) {
                 DeliveryClaim delivery = context.delivery();
                 if (delivery != null && delivery.item == exact) { delivery.observeRetirement(source); }
@@ -268,7 +268,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             return;
         }
         forEachEndpointFact("Decode retirement", reservations, exact -> {
-            BalanceContext context = requestSlot(exact.requestId());
+            BalanceContext context = findRequestContext(exact.requestId());
             if (context != null) {
                 DeliveryClaim delivery = context.delivery();
                 if (delivery != null && Objects.equals(delivery.item.decodeReservation(), exact)) { delivery.observeRetirement(source); }
@@ -323,12 +323,12 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         if (requests.isClosed()) {
             return false;
         }
-        BalanceContext slot = requestSlot(requestId);
-        if (slot == null || !slot.ownsFuture(future)) {
+        BalanceContext requestContext = findRequestContext(requestId);
+        if (requestContext == null || !requestContext.ownsFuture(future)) {
             return false;
         }
-        synchronized (slot) {
-            return isCurrentSlot(slot) && slot.isOpen();
+        synchronized (requestContext) {
+            return isCurrentContext(requestContext) && requestContext.isOpen();
         }
     }
 
@@ -338,13 +338,13 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
         boolean transferred = false;
         try {
-            BalanceContext slot = requestSlot(requestId);
-            if (slot == null || !slot.ownsFuture(future)) {
+            BalanceContext requestContext = findRequestContext(requestId);
+            if (requestContext == null || !requestContext.ownsFuture(future)) {
                 return null;
             }
             AdmissionHandle handle;
-            synchronized (slot) {
-                handle = isCurrentSlot(slot) ? slot.beginAdmission((operation, response) -> finishAdmission(slot, operation, response)) : null;
+            synchronized (requestContext) {
+                handle = isCurrentContext(requestContext) ? requestContext.beginAdmission((operation, response) -> finishAdmission(requestContext, operation, response)) : null;
             }
             transferred = handle != null;
             return handle;
@@ -410,7 +410,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     public Optional<PreemptionRegistration> tryClaim(long requestId, long reservationToken, long attemptToken, String detail) {
-        BalanceContext entry = requestSlot(requestId);
+        BalanceContext entry = findRequestContext(requestId);
         if (entry == null) {
             return Optional.empty();
         }
@@ -420,7 +420,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     public Optional<CancelTarget> findCancelTarget(long requestId, long reservationToken) {
-        BalanceContext entry = requestSlot(requestId);
+        BalanceContext entry = findRequestContext(requestId);
         if (entry == null) {
             return Optional.empty();
         }
@@ -432,8 +432,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     public RequestState cancelRequest(long requestId, long expectedBatchId, CancelReason reason) {
         Objects.requireNonNull(reason, "reason");
-        BalanceContext slot = requestSlot(requestId);
-        return slot == null ? requests.getRequestState(requestId, expectedBatchId) : cancelRequest(slot, expectedBatchId, reason);
+        BalanceContext requestContext = findRequestContext(requestId);
+        return requestContext == null ? requests.getRequestState(requestId, expectedBatchId) : cancelRequest(requestContext, expectedBatchId, reason);
     }
 
     private static CancelTarget cancelTarget(RequestRoute item) {
@@ -444,67 +444,67 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     /**
      * Retain registered IDs, including terminal records, during endpoint orphan cleanup.
-     * Called under endpoint locks: never acquire a Slot lock here. Read the current
+     * Called under endpoint locks: never acquire a context lock here. Read the current
      * directory rather than a snapshot, which could miss a newly registered request.
      */
 
 
     public void onQueuedItemExpired(RequestRoute exact) {
-        BalanceContext slot = entryFor(exact);
-        if (slot != null) {
-            cancelRequest(slot, 0L, CancelReason.DEADLINE_EXCEEDED);
+        BalanceContext requestContext = entryFor(exact);
+        if (requestContext != null) {
+            cancelRequest(requestContext, 0L, CancelReason.DEADLINE_EXCEEDED);
         }
     }
 
     void onQueuedItemControl(RequestRoute exact) {
-        BalanceContext slot = entryFor(exact);
-        if (slot != null) {
-            processQueuedControl(slot, exact);
+        BalanceContext requestContext = entryFor(exact);
+        if (requestContext != null) {
+            processQueuedControl(requestContext, exact);
         }
     }
 
     public void onGlobalControl(long requestId, CompletableFuture<Response> exactFuture) {
-        BalanceContext slot = requestSlot(requestId);
-        if (slot != null && slot.ownsFuture(exactFuture)) {
-            processGlobalControl(slot);
+        BalanceContext requestContext = findRequestContext(requestId);
+        if (requestContext != null && requestContext.ownsFuture(exactFuture)) {
+            processGlobalControl(requestContext);
         }
     }
 
     public boolean settleGlobalQueueClose(long requestId, CompletableFuture<Response> exactFuture) {
-        BalanceContext slot = requestSlot(requestId);
-        if (slot == null || !slot.ownsFuture(exactFuture)) {
+        BalanceContext requestContext = findRequestContext(requestId);
+        if (requestContext == null || !requestContext.ownsFuture(exactFuture)) {
             return false;
         }
         try {
-            processGlobalControl(slot);
+            processGlobalControl(requestContext);
         } finally {
-            executeFinalization(slot.claimShutdownAction(() -> requirePublicationPermitLocked(slot, PublicationKind.TERMINAL)));
+            executeFinalization(requestContext.claimShutdownAction(() -> requirePublicationPermitLocked(requestContext, PublicationKind.TERMINAL)));
         }
         return true;
     }
 
     public boolean canRestoreGlobalQueue(long requestId, CompletableFuture<Response> exactFuture) {
-        BalanceContext slot = requestSlot(requestId);
-        return slot != null && slot.ownsFuture(exactFuture) && slot.canRestoreGlobalQueue();
+        BalanceContext requestContext = findRequestContext(requestId);
+        return requestContext != null && requestContext.ownsFuture(exactFuture) && requestContext.canRestoreGlobalQueue();
     }
 
     public boolean hasPendingGlobalControl(long requestId, CompletableFuture<Response> exactFuture) {
-        BalanceContext slot = requestSlot(requestId);
-        return slot != null && slot.ownsFuture(exactFuture) && slot.hasPendingGlobalControl();
+        BalanceContext requestContext = findRequestContext(requestId);
+        return requestContext != null && requestContext.ownsFuture(exactFuture) && requestContext.hasPendingGlobalControl();
     }
 
     public void onQueueOfferFailure(RequestRoute exact, Throwable error) {
-        BalanceContext slot = entryFor(exact);
-        if (slot != null) {
-            processQueuedControl(slot, exact);
-            recordSchedulingFailure(slot, StrategyErrorType.DISPATCH_FAILED, "Worker scheduling queue rejected request: " + (error == null ? "endpoint publication failed" : error.getMessage()));
+        BalanceContext requestContext = entryFor(exact);
+        if (requestContext != null) {
+            processQueuedControl(requestContext, exact);
+            recordSchedulingFailure(requestContext, StrategyErrorType.DISPATCH_FAILED, "Worker scheduling queue rejected request: " + (error == null ? "endpoint publication failed" : error.getMessage()));
         }
     }
 
     private BalanceContext entryFor(RequestRoute item) {
         BalanceContext entry = item.ctx();
         synchronized (entry) {
-            return isCurrentSlot(entry) && entry.ownsActiveItem(item) ? entry : null;
+            return isCurrentContext(entry) && entry.ownsActiveItem(item) ? entry : null;
         }
     }
 
@@ -516,8 +516,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     public boolean publishDecisionResponseAsync(long requestId, CompletableFuture<Response> future, Response response) {
-        BalanceContext slot = requestSlot(requestId);
-        return slot != null && slot.ownsFuture(future) && terminateLocallyAndPublishResponse(slot, response);
+        BalanceContext requestContext = findRequestContext(requestId);
+        return requestContext != null && requestContext.ownsFuture(future) && terminateLocallyAndPublishResponse(requestContext, response);
     }
 
 
@@ -526,8 +526,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             throw new IllegalStateException("admission must close before terminal shutdown");
         }
         List<TerminalAction> actions = new ArrayList<>();
-        for (BalanceContext slot : ownedRequests()) {
-            TerminalAction action = slot.claimShutdownAction(() -> requirePublicationPermitLocked(slot, PublicationKind.TERMINAL));
+        for (BalanceContext requestContext : ownedRequests()) {
+            TerminalAction action = requestContext.claimShutdownAction(() -> requirePublicationPermitLocked(requestContext, PublicationKind.TERMINAL));
             if (action != null) {
                 actions.add(action);
             }
@@ -557,7 +557,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
         BalanceContext ctx = exact.ctx();
         synchronized (ctx) {
-            if (!isCurrentSlot(ctx) || !ctx.bindRoute(exact)) {
+            if (!isCurrentContext(ctx) || !ctx.bindRoute(exact)) {
                 return PlacementResult.Status.CLOSED;
             }
 
@@ -637,7 +637,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         } finally {
             exitAdmissionHandleGate();
         }
-        Failures.rethrow(failure, "request slot cleanup failed");
+        Failures.rethrow(failure, "request cleanup failed");
     }
 
 
@@ -691,7 +691,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
      * Queue publication makes an exact item claimable even while admission still pins its resources.
      */
     private boolean ownsPreparedDeliveryLocked(BalanceContext ctx, RequestRoute exact) {
-        return isCurrentSlot(ctx) && ctx.ownsPreparedDeliveryLocked(exact);
+        return isCurrentContext(ctx) && ctx.ownsPreparedDeliveryLocked(exact);
     }
 
     public void setDeliveryPrediction(DeliveryClaim claim, WorkSnapshot work, long predictedMs) {
@@ -767,7 +767,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                          DeliveryResult.Status source, SelectedPublication response) {
         Throwable failure = Failures.run(null, response == null ? null : () -> completionPublisher.submit(response));
         failure = Failures.run(failure, () -> cleanUpRequest(ctx, exact, source));
-        Failures.rethrow(failure, "request slot cleanup failed");
+        Failures.rethrow(failure, "request cleanup failed");
     }
 
     private static String detailOf(Throwable cause) {
@@ -784,7 +784,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         ExpirationTimer.releaseDecisionDeadline(obsolete);
         Throwable failure = Failures.run(null, () -> expirationTimer.attachDecisionDeadline(ctx));
         failure = Failures.run(failure, () -> execute(ctx, work));
-        Failures.rethrow(failure, "request slot cleanup failed");
+        Failures.rethrow(failure, "request cleanup failed");
     }
 
     private TerminalAction acceptPrefillRetirement(BalanceContext ctx, PrefillEndpoint source, RequestRoute exact) {
@@ -915,7 +915,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         if (next == null) { return false; }
         Runnable work;
         synchronized (ctx) {
-            if (!isCurrentSlot(ctx) || !ctx.advancePreemption(claim, next)) { return false; }
+            if (!isCurrentContext(ctx) || !ctx.advancePreemption(claim, next)) { return false; }
             work = ctx.hasCleanup() ? finalizationEffects(ctx.tryFinishCleanupLocked(), null)
                     : switch (next) {
                         case NOT_FOUND_STALE -> ctx.processPendingEventsUnderPreemptionLocked(claim, false, claim);
@@ -933,7 +933,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         boolean cleanupPending;
         RequestRoute localControl;
         synchronized (ctx) {
-            if (!isCurrentSlot(ctx) || !ctx.ownsResourceTrackingLocked() || ctx.preemption() != claim || !claim.isReleasable()) { return false; }
+            if (!isCurrentContext(ctx) || !ctx.ownsResourceTrackingLocked() || ctx.preemption() != claim || !claim.isReleasable()) { return false; }
             ctx.detachPreemptionOwnerLocked(claim);
             cleanupPending = ctx.hasCleanup();
             work = cleanupPending ? null : ctx.processPendingEventsUnderPreemptionLocked(claim, false, claim);
@@ -948,7 +948,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         BalanceContext ctx = claim.owner;
         Runnable work;
         synchronized (ctx) {
-            if (!isCurrentSlot(ctx) || !ctx.ownsResourceTrackingLocked() || ctx.preemption() != claim
+            if (!isCurrentContext(ctx) || !ctx.ownsResourceTrackingLocked() || ctx.preemption() != claim
                     || !claim.canCompletePreemption() || !claim.tryFinish()) { return false; }
             work = ctx.finishPreemptedRequestLocked(claim, detail, false);
         }
@@ -986,13 +986,13 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     private void publishTerminal(TerminalAction action) {
         if (action.publication() != null && action.response() != null) {
-            completionPublisher.submit(BalanceContext.selectPublication(action.slot(), action.publication(),
+            completionPublisher.submit(BalanceContext.selectPublication(action.requestContext(), action.publication(),
                     ResponseCompletion.RESPONSE, action.response(), null, false));
         }
     }
 
     private PublicationPermit finishTerminal(TerminalAction action) {
-        BalanceContext entry = action.slot();
+        BalanceContext entry = action.requestContext();
         entry.requireCleanupOwner(action);
         Throwable cleanupFailure = null;
         cleanupFailure = Failures.run(cleanupFailure, () -> action.terminalResources().release());
@@ -1026,7 +1026,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     private static void execute(BalanceContext ctx, Runnable effect) {
         if (effect == null) { return; }
-        ctx.requireOutsideSlotLock("request effects");
+        ctx.requireOutsideContextLock("request effects");
         effect.run();
     }
 
@@ -1035,8 +1035,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return () -> {
             Throwable failure = Failures.run(null, () -> executeFinalization(action));
             failure = Failures.run(failure, signal == null ? null
-                    : () -> signal.signalTerminal(new VictimTerminal(action.slot().getRequestId())));
-            Failures.rethrow(failure, "request slot cleanup failed");
+                    : () -> signal.signalTerminal(new VictimTerminal(action.requestContext().getRequestId())));
+            Failures.rethrow(failure, "request cleanup failed");
         };
     }
 
@@ -1045,7 +1045,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             Throwable failure = Failures.run(null, () -> completionPublisher.submitDelivery(delivery));
             failure = Failures.run(failure, signal == null ? null
                     : () -> signal.signalTerminal(new VictimTerminal(ctx.getRequestId())));
-            Failures.rethrow(failure, "request slot cleanup failed");
+            Failures.rethrow(failure, "request cleanup failed");
         };
     }
 
@@ -1060,7 +1060,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     boolean completeExternal(BalanceContext ctx, ResponseCompletion completion, Response response, Throwable error, boolean interrupt) {
-        ctx.requireOutsideSlotLock("external Future completion");
+        ctx.requireOutsideContextLock("external Future completion");
         if (completion == ResponseCompletion.CANCELLATION) {
             Boolean queued = cancelQueuedExternal(ctx, interrupt);
             if (queued != null) {
@@ -1146,7 +1146,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     PublicationPermit requirePublicationPermitLocked(BalanceContext ctx, PublicationKind kind) {
         PublicationPermit permit = completionPublisher.tryReservePublication(ctx, kind);
-        if (permit == null || permit.slot() != ctx) {
+        if (permit == null || permit.requestContext() != ctx) {
             if (permit != null) {
                 permit.abandonIfUnclaimed();
             }
@@ -1181,7 +1181,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 : releasePrefill ? PrefillAdmissionResources.PrefillRelease.COMMITTED : PrefillAdmissionResources.PrefillRelease.NONE;
         var settlement = PrefillAdmissionResources.settle(exact,
                 new PrefillAdmissionResources.ReleasePlan(prefill, decodeReason, null), false, false);
-        Failures.rethrow(settlement.failure(), "request slot cleanup failed");
+        Failures.rethrow(settlement.failure(), "request cleanup failed");
     }
 
     private static DecodeEndpoint.ReleaseReason provenReleaseReason(RequestRoute exact, DecodeEndpoint.ReleaseReason fallback) {
@@ -1192,7 +1192,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     // ── 派发失败：分别结算 Prefill 与 Decode ──
     private void cleanUpRequest(BalanceContext ctx, RequestRoute exact, DeliveryResult.Status source) {
-        ctx.requireOutsideSlotLock("request cleanup");
+        ctx.requireOutsideContextLock("request cleanup");
         DeliveryClaim delivery = ctx.delivery();
         if (delivery != null) {
             delivery.abandon(ctx.cancellationReason() == null ? CancelReason.CLIENT_CANCELLED : ctx.cancellationReason());
@@ -1244,7 +1244,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         } catch (Throwable problem) {
             error = Failures.append(error, problem);
         }
-        Failures.rethrow(error, "request slot cleanup failed");
+        Failures.rethrow(error, "request cleanup failed");
     }
 
     void resumeCleanup(BalanceContext ctx) {

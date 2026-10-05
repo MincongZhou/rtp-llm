@@ -77,19 +77,19 @@ final class RequestProtocolTestSupport {
     /**
      * Seed cancellation in state-only fixtures without exposing an internal production operation.
      */
-    static boolean recordCancellation(AbstractRequestScheduler scheduler, BalanceContext slot, CancelReason reason, String message) {
-        return Boolean.TRUE.equals(ReflectionTestUtils.invokeMethod(slot, "recordCancellationLocked", reason, message));
+    static boolean recordCancellation(AbstractRequestScheduler scheduler, BalanceContext requestContext, CancelReason reason, String message) {
+        return Boolean.TRUE.equals(ReflectionTestUtils.invokeMethod(requestContext, "recordCancellationLocked", reason, message));
     }
 
     /**
      * Inspect a private decision in state-only fixtures without widening the production API.
      */
-    static <T> T inspect(AbstractRequestScheduler scheduler, BalanceContext slot, String decision, Object... arguments) {
-        synchronized (slot) {
+    static <T> T inspect(AbstractRequestScheduler scheduler, BalanceContext requestContext, String decision, Object... arguments) {
+        synchronized (requestContext) {
             boolean requestDecision = java.util.Arrays.stream(BalanceContext.class.getDeclaredMethods())
                     .anyMatch(method -> method.getName().equals(decision));
-            return requestDecision ? ReflectionTestUtils.invokeMethod(slot, decision, arguments)
-                    : ReflectionTestUtils.invokeMethod(scheduler, decision, prepend(slot, arguments));
+            return requestDecision ? ReflectionTestUtils.invokeMethod(requestContext, decision, arguments)
+                    : ReflectionTestUtils.invokeMethod(scheduler, decision, prepend(requestContext, arguments));
         }
     }
 
@@ -166,7 +166,7 @@ final class RequestProtocolTestSupport {
 
     static void observePrefill(AbstractRequestScheduler scheduler, PrefillEndpoint source,
             RoleType role, PrefillState.WorkerStatusFact fact) {
-        observePrefill(scheduler, scheduler.requestSlot(fact.item().requestId()), source, role, fact);
+        observePrefill(scheduler, scheduler.findRequestContext(fact.item().requestId()), source, role, fact);
     }
 
     static void observePrefill(AbstractRequestScheduler scheduler, BalanceContext context,
@@ -177,7 +177,7 @@ final class RequestProtocolTestSupport {
 
     static void observeDecode(AbstractRequestScheduler scheduler, DecodeEndpoint source,
             DecodeEndpoint.WorkerStatusFact fact) {
-        observeDecode(scheduler, scheduler.requestSlot(fact.reservation().requestId()), source, fact);
+        observeDecode(scheduler, scheduler.findRequestContext(fact.reservation().requestId()), source, fact);
     }
 
     static void observeDecode(AbstractRequestScheduler scheduler, BalanceContext context,
@@ -202,11 +202,11 @@ final class RequestProtocolTestSupport {
         return all;
     }
 
-    static TerminalAction claimTerminal(AbstractRequestScheduler scheduler, BalanceContext slot,
+    static TerminalAction claimTerminal(AbstractRequestScheduler scheduler, BalanceContext requestContext,
             TerminalOutcome outcome, Response response, boolean publish) {
-        return slot.claimFinalizationLocked(null, outcome, response, publish,
+        return requestContext.claimFinalizationLocked(null, outcome, response, publish,
                 () -> ReflectionTestUtils.invokeMethod(scheduler, "requirePublicationPermitLocked",
-                        slot, BalanceContext.PublicationKind.TERMINAL));
+                        requestContext, BalanceContext.PublicationKind.TERMINAL));
     }
 
     private RequestProtocolTestSupport() {
@@ -272,22 +272,22 @@ final class RequestProtocolTestSupport {
     }
 
     // State-only fixtures deliberately seed a phase without executing publication or timers.
-    static void startRouteDelivery(AbstractRequestScheduler scheduler, BalanceContext slot) {
-        assertNotNull(scheduler.claimDelivery(slot.activeItem(), DeliveryClaimKind.ROUTE_DECISION, 0L, RequestProtocolTestSupport.handoff(() -> true)));
+    static void startRouteDelivery(AbstractRequestScheduler scheduler, BalanceContext requestContext) {
+        assertNotNull(scheduler.claimDelivery(requestContext.activeItem(), DeliveryClaimKind.ROUTE_DECISION, 0L, RequestProtocolTestSupport.handoff(() -> true)));
     }
 
-    static void startBatchDelivery(AbstractRequestScheduler scheduler, BalanceContext slot, long batchId) {
-        assertNotNull(scheduler.claimDelivery(slot.activeItem(), DeliveryClaimKind.BATCH_ENQUEUE, batchId, RequestProtocolTestSupport.handoff(() -> true)));
+    static void startBatchDelivery(AbstractRequestScheduler scheduler, BalanceContext requestContext, long batchId) {
+        assertNotNull(scheduler.claimDelivery(requestContext.activeItem(), DeliveryClaimKind.BATCH_ENQUEUE, batchId, RequestProtocolTestSupport.handoff(() -> true)));
     }
 
-    static void markAcknowledged(BalanceContext slot) {
-        assertTrue(Thread.holdsLock(slot));
-        org.springframework.test.util.ReflectionTestUtils.setField(slot, "deliveryAcknowledged", true);
-        org.springframework.test.util.ReflectionTestUtils.setField(slot, "stage", BalanceContext.RequestStage.RESULT_PENDING);
+    static void markAcknowledged(BalanceContext requestContext) {
+        assertTrue(Thread.holdsLock(requestContext));
+        org.springframework.test.util.ReflectionTestUtils.setField(requestContext, "deliveryAcknowledged", true);
+        org.springframework.test.util.ReflectionTestUtils.setField(requestContext, "stage", BalanceContext.RequestStage.RESULT_PENDING);
     }
 
-    static Runnable acknowledge(AbstractRequestScheduler scheduler, BalanceContext slot) {
-        return ReflectionTestUtils.invokeMethod(slot, "acknowledgeDeliveryLocked", (Object) null);
+    static Runnable acknowledge(AbstractRequestScheduler scheduler, BalanceContext requestContext) {
+        return ReflectionTestUtils.invokeMethod(requestContext, "acknowledgeDeliveryLocked", (Object) null);
     }
 
     static boolean prepareMember(AbstractRequestScheduler registry, RequestRoute item) {

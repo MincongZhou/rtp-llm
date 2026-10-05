@@ -1154,7 +1154,7 @@ class PrefillEndpointTest {
         PrefillEndpoint slowEndpoint = newFixedWindowEndpoint(60_000);
         try {
             assertTrue(EndpointTestSupport.offer(
-                    slowEndpoint, createPriorityScheduledRequest(slowEndpoint, 1L, 70)));
+                    slowEndpoint, createPriorityRequestRoute(slowEndpoint, 1L, 70)));
             assertTrue(EndpointTestSupport.offer(
                     slowEndpoint,
                     createRequestRoute(slowEndpoint, 2L, 300, 0)));
@@ -1541,7 +1541,7 @@ class PrefillEndpointTest {
         return created;
     }
 
-    private RequestRoute createPriorityScheduledRequest(
+    private RequestRoute createPriorityRequestRoute(
             PrefillEndpoint owner, long requestId, int priority) {
         long now = System.currentTimeMillis();
         Request request = new Request();

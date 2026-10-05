@@ -225,9 +225,9 @@ class RequestAdmissionResourceLeakTest {
     }
 
     private RequestRoute activeItem(long requestId) {
-        BalanceContext slot = lifecycle.requestSlot(requestId);
-        synchronized (slot) {
-            return slot.activeItem();
+        BalanceContext requestContext = lifecycle.findRequestContext(requestId);
+        synchronized (requestContext) {
+            return requestContext.activeItem();
         }
     }
 

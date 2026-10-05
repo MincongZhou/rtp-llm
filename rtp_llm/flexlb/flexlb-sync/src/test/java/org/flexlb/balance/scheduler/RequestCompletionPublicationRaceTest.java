@@ -289,14 +289,14 @@ class RequestCompletionPublicationRaceTest {
         try {
             BalanceContext context = RequestProtocolTestSupport.context(config, 501L);
             CompletableFuture<Response> future = RequestProtocolTestSupport.register(registry, context);
-            BalanceContext slot = registry.requestSlot(501L);
+            BalanceContext requestContext = registry.findRequestContext(501L);
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
             when(prefill.getIp()).thenReturn("prefill");
             DecodeEndpoint decode = mock(DecodeEndpoint.class);
             var reservation = new DecodeEndpoint.ReservationHandle(1L, 501L, 1L);
             context.setFuture(future);
             RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null,
-                    prefill, decode, reservation, slot.createdAtMs());
+                    prefill, decode, reservation, requestContext.createdAtMs());
             RequestProtocolTestSupport.bind(registry,
                     new RequestProtocolTestSupport.Registered(item, future));
             DeliveryClaim claim = RequestProtocolTestSupport.claimBatch(
@@ -304,13 +304,13 @@ class RequestCompletionPublicationRaceTest {
             assertNotNull(claim);
 
             doAnswer(invocation -> {
-                assertFalse(Thread.holdsLock(slot));
+                assertFalse(Thread.holdsLock(requestContext));
                 reportingEntered.countDown();
                 await(resumeReporting);
                 return null;
             }).when(reporter).reportLatency(org.mockito.ArgumentMatchers.eq(BatchSchedulerReporter.Latency.DISPATCH_ACK), anyString(), anyString(), anyLong());
             doAnswer(invocation -> {
-                assertFalse(Thread.holdsLock(slot));
+                assertFalse(Thread.holdsLock(requestContext));
                 cleanupEntered.countDown();
                 await(resumeCleanup);
                 return DecodeEndpoint.ReservationReleaseResult.RELEASED;
@@ -320,24 +320,24 @@ class RequestCompletionPublicationRaceTest {
             assertTrue(claim.tryStartSend());
             var completions = new java.util.concurrent.atomic.AtomicInteger();
             CompletableFuture<Void> callback = future.thenAccept(response -> {
-                assertFalse(Thread.holdsLock(slot), "frontend callbacks must not hold the context lock");
+                assertFalse(Thread.holdsLock(requestContext), "frontend callbacks must not hold the context lock");
                 completions.incrementAndGet();
             });
 
             Future<?> acknowledgement = operations.submit(() -> claim.complete(DeliveryResult.delivered()));
             assertTrue(reportingEntered.await(2L, TimeUnit.SECONDS));
-            assertEquals(RequestState.Phase.ACKNOWLEDGED, slot.snapshot().state());
+            assertEquals(RequestState.Phase.ACKNOWLEDGED, requestContext.snapshot().state());
             assertFalse(future.isDone());
 
             long handoffAtMs = (long) org.springframework.test.util.ReflectionTestUtils
-                    .getField(slot, "batchEnqueueStartedAtMs");
+                    .getField(requestContext, "batchEnqueueStartedAtMs");
             Future<?> expiry = operations.submit(() ->
-                    RequestProtocolTestSupport.expireInactiveRequest(registry, slot, handoffAtMs + timeoutMs));
+                    RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, handoffAtMs + timeoutMs));
             assertTrue(cleanupEntered.await(2L, TimeUnit.SECONDS));
-            assertEquals(RequestState.Phase.TIMED_OUT, slot.snapshot().state(),
+            assertEquals(RequestState.Phase.TIMED_OUT, requestContext.snapshot().state(),
                     "selected terminal is visible before endpoint cleanup completes");
-            assertEquals(BalanceContext.RequestStage.FINALIZING, slot.stage());
-            assertSame(slot, registry.requestSlot(501L));
+            assertEquals(BalanceContext.RequestStage.FINALIZING, requestContext.stage());
+            assertSame(requestContext, registry.findRequestContext(501L));
             assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                     registry.register(RequestProtocolTestSupport.context(config, 501L), StrategyErrorType.BATCH_SLO_EXPIRED).join().getCode());
             resumeReporting.countDown();
@@ -350,8 +350,8 @@ class RequestCompletionPublicationRaceTest {
             assertFalse(barrier.get(2L, TimeUnit.SECONDS).isSuccess());
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess(),
                     "an obsolete success permit cannot win after TTL claims cleanup");
-            assertSame(slot, registry.requestSlot(501L));
-            assertEquals(BalanceContext.RequestStage.FINALIZING, slot.stage());
+            assertSame(requestContext, registry.findRequestContext(501L));
+            assertEquals(BalanceContext.RequestStage.FINALIZING, requestContext.stage());
 
             resumeCleanup.countDown();
             expiry.get(2L, TimeUnit.SECONDS);
@@ -362,9 +362,9 @@ class RequestCompletionPublicationRaceTest {
             assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
             assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
                     expired.getAdmissionRejectReason());
-            assertEquals(RequestState.Phase.TIMED_OUT, slot.snapshot().state());
-            assertEquals(BalanceContext.RequestStage.FINISHED, slot.stage());
-            assertNull(registry.requestSlot(501L));
+            assertEquals(RequestState.Phase.TIMED_OUT, requestContext.snapshot().state());
+            assertEquals(BalanceContext.RequestStage.FINISHED, requestContext.stage());
+            assertNull(registry.findRequestContext(501L));
             assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(501L, 0L).state());
             assertEquals(1, completions.get());
             verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP);
@@ -387,20 +387,20 @@ class RequestCompletionPublicationRaceTest {
         Fixture fixture = fixture();
         Response success = new Response();
         success.setSuccess(true);
-        RequestCompletionPublisher.SelectedPublication publishSuccess = BalanceContext.selectPublication(fixture.slot(), fixture.delivery().publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, success, null, false);
-        assertFalse(fixture.slot().future().isDone());
-        CompletableFuture<Void> callback = fixture.slot().future().thenAccept(response ->
-                assertFalse(Thread.holdsLock(fixture.slot())));
-        synchronized (fixture.slot()) {
-            RequestProtocolTestSupport.recordCancellation(fixture.scheduler(), fixture.slot(), CancelReason.DEADLINE_EXCEEDED, "request inactive");
-            TerminalAction terminal = RequestProtocolTestSupport.claimTerminal(fixture.scheduler(), fixture.slot(), TerminalOutcome.timeout("request inactive"), new Response(), true);
+        RequestCompletionPublisher.SelectedPublication publishSuccess = BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, success, null, false);
+        assertFalse(fixture.requestContext().future().isDone());
+        CompletableFuture<Void> callback = fixture.requestContext().future().thenAccept(response ->
+                assertFalse(Thread.holdsLock(fixture.requestContext())));
+        synchronized (fixture.requestContext()) {
+            RequestProtocolTestSupport.recordCancellation(fixture.scheduler(), fixture.requestContext(), CancelReason.DEADLINE_EXCEEDED, "request inactive");
+            TerminalAction terminal = RequestProtocolTestSupport.claimTerminal(fixture.scheduler(), fixture.requestContext(), TerminalOutcome.timeout("request inactive"), new Response(), true);
             assertNotNull(terminal);
             assertNull(terminal.publication(), "an already selected delivery owns the frontend result");
-            fixture.scheduler().commitTerminalRecord(fixture.slot(), terminal);
-            assertEquals(RequestState.Phase.TIMED_OUT, fixture.slot().snapshot().state());
+            fixture.scheduler().commitTerminalRecord(fixture.requestContext(), terminal);
+            assertEquals(RequestState.Phase.TIMED_OUT, fixture.requestContext().snapshot().state());
         }
         assertTrue(publishSuccess.complete());
-        assertSame(success, fixture.slot().future().join());
+        assertSame(success, fixture.requestContext().future().join());
         callback.join();
     }
 
@@ -409,13 +409,13 @@ class RequestCompletionPublicationRaceTest {
         Fixture fixture = fixture();
         Response success = new Response();
         success.setSuccess(true);
-        RequestCompletionPublisher.SelectedPublication selected = BalanceContext.selectPublication(fixture.slot(), fixture.delivery().publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, success, null, false);
+        RequestCompletionPublisher.SelectedPublication selected = BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, success, null, false);
 
-        assertFalse(fixture.slot().future().cancel(false));
-        assertFalse(fixture.slot().future().isDone());
-        assertEquals(RequestState.Phase.ACKNOWLEDGED, fixture.slot().snapshot().state());
+        assertFalse(fixture.requestContext().future().cancel(false));
+        assertFalse(fixture.requestContext().future().isDone());
+        assertEquals(RequestState.Phase.ACKNOWLEDGED, fixture.requestContext().snapshot().state());
         assertTrue(selected.complete());
-        assertSame(success, fixture.slot().future().join());
+        assertSame(success, fixture.requestContext().future().join());
     }
 
     @ParameterizedTest
@@ -425,55 +425,55 @@ class RequestCompletionPublicationRaceTest {
         Response failure = new Response();
         failure.setSuccess(false);
         TerminalAction terminal;
-        synchronized (fixture.slot()) {
+        synchronized (fixture.requestContext()) {
             // ACKNOWLEDGED records the Engine fact, not a selected frontend result.
-            terminal = RequestProtocolTestSupport.claimTerminal(fixture.scheduler(), fixture.slot(), TerminalOutcome.fail("worker failed before response publication"), failure, failure != null);
+            terminal = RequestProtocolTestSupport.claimTerminal(fixture.scheduler(), fixture.requestContext(), TerminalOutcome.fail("worker failed before response publication"), failure, failure != null);
             assertNotNull(terminal.publication());
-            fixture.scheduler().commitTerminalRecord(fixture.slot(), terminal);
+            fixture.scheduler().commitTerminalRecord(fixture.requestContext(), terminal);
         }
         Response success = new Response();
         success.setSuccess(true);
-        assertFalse(BalanceContext.selectPublication(fixture.slot(), fixture.delivery().publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, success, null, false).complete());
-        assertFalse(fixture.slot().future().isDone());
-        CompletableFuture<Void> callback = fixture.slot().future().handle((response, error) -> {
-            assertFalse(Thread.holdsLock(fixture.slot()));
+        assertFalse(BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, success, null, false).complete());
+        assertFalse(fixture.requestContext().future().isDone());
+        CompletableFuture<Void> callback = fixture.requestContext().future().handle((response, error) -> {
+            assertFalse(Thread.holdsLock(fixture.requestContext()));
             return null;
         });
         RequestCompletionPublisher.SelectedPublication publication = switch (form) {
-            case RESPONSE -> BalanceContext.selectPublication(fixture.slot(), terminal.publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, failure, null, false);
-            case FAILURE -> BalanceContext.selectPublication(fixture.slot(), terminal.publication(), RequestCompletionPublisher.ResponseCompletion.FAILURE, null, new IllegalStateException("worker failed"), false);
-            case CANCELLATION -> BalanceContext.selectPublication(fixture.slot(), terminal.publication(), RequestCompletionPublisher.ResponseCompletion.CANCELLATION, null, null, false);
+            case RESPONSE -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, failure, null, false);
+            case FAILURE -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), RequestCompletionPublisher.ResponseCompletion.FAILURE, null, new IllegalStateException("worker failed"), false);
+            case CANCELLATION -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), RequestCompletionPublisher.ResponseCompletion.CANCELLATION, null, null, false);
         };
         assertTrue(publication.complete());
         callback.join();
-        assertTrue(fixture.slot().future().isDone());
+        assertTrue(fixture.requestContext().future().isDone());
         if (form == TerminalForm.RESPONSE) {
-            assertSame(failure, fixture.slot().future().join());
+            assertSame(failure, fixture.requestContext().future().join());
         } else {
-            assertTrue(fixture.slot().future().isCompletedExceptionally());
-            assertEquals(form == TerminalForm.CANCELLATION, fixture.slot().future().isCancelled());
+            assertTrue(fixture.requestContext().future().isCompletedExceptionally());
+            assertEquals(form == TerminalForm.CANCELLATION, fixture.requestContext().future().isCancelled());
         }
     }
 
     @ParameterizedTest
     @EnumSource(TerminalForm.class)
-    void externalFutureOperationUnderSlotLockLeavesRequestUnchanged(TerminalForm form) {
-        BalanceContext slot = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 702L);
-        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(RequestCompletionPublisher.class), slot, mock(ExpirationTimer.class));
-        synchronized (slot) {
+    void externalFutureOperationUnderContextLockLeavesRequestUnchanged(TerminalForm form) {
+        BalanceContext requestContext = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 702L);
+        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(RequestCompletionPublisher.class), requestContext, mock(ExpirationTimer.class));
+        synchronized (requestContext) {
             assertThrows(IllegalStateException.class, () -> {
                 switch (form) {
                     case RESPONSE ->
-                        slot.future().complete(new Response());
+                        requestContext.future().complete(new Response());
                     case FAILURE ->
-                        slot.future().completeExceptionally(new IllegalStateException("failure"));
+                        requestContext.future().completeExceptionally(new IllegalStateException("failure"));
                     case CANCELLATION ->
-                        slot.future().cancel(false);
+                        requestContext.future().cancel(false);
                 }
             });
-            assertTrue(slot.isOpen());
-            assertEquals(RequestState.Phase.QUEUED, slot.snapshot().state());
-            assertFalse(slot.future().isDone());
+            assertTrue(requestContext.isOpen());
+            assertEquals(RequestState.Phase.QUEUED, requestContext.snapshot().state());
+            assertFalse(requestContext.future().isDone());
         }
     }
 
@@ -481,33 +481,31 @@ class RequestCompletionPublicationRaceTest {
         RequestCompletionPublisher publisher = mock(RequestCompletionPublisher.class);
         var config = SchedulingTestConfig.batchConfig();
         BalanceContext context = RequestProtocolTestSupport.context(config, 701L);
-        BalanceContext slot = context;
-        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(publisher, slot, mock(ExpirationTimer.class));
-        when(publisher.tryReservePublication(eq(slot), any())).thenAnswer(invocation -> new RequestCompletionPublisher.PublicationPermit(publisher, slot, invocation.getArgument(1)));
-        context.setFuture(slot.future());
-        RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null, null, null, null, slot.createdAtMs());
+        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(publisher, context, mock(ExpirationTimer.class));
+        when(publisher.tryReservePublication(eq(context), any())).thenAnswer(invocation -> new RequestCompletionPublisher.PublicationPermit(publisher, context, invocation.getArgument(1)));
+        RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null, null, null, null, context.createdAtMs());
         BalanceContext.DeliveryPublication delivery;
         AdmissionHandle admission;
-        synchronized (slot) {
-            admission = RequestProtocolTestSupport.beginAdmission(requestOwner, slot);
+        synchronized (context) {
+            admission = RequestProtocolTestSupport.beginAdmission(requestOwner, context);
             assertNotNull(admission);
         }
         assertEquals(org.flexlb.balance.PlacementResult.Status.SUCCESS, requestOwner.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
         admission.finish();
         Runnable acknowledgement;
-        synchronized (slot) {
-            RequestProtocolTestSupport.startBatchDelivery(requestOwner, slot, 801L);
-            acknowledgement = RequestProtocolTestSupport.acknowledge(requestOwner, slot);
+        synchronized (context) {
+            RequestProtocolTestSupport.startBatchDelivery(requestOwner, context, 801L);
+            acknowledgement = RequestProtocolTestSupport.acknowledge(requestOwner, context);
         }
         acknowledgement.run();
         var captured = org.mockito.ArgumentCaptor.forClass(BalanceContext.DeliveryPublication.class);
         org.mockito.Mockito.verify(publisher).submitDelivery(captured.capture());
         delivery = captured.getValue();
         assertNotNull(delivery);
-        return new Fixture(requestOwner, slot, delivery);
+        return new Fixture(requestOwner, context, delivery);
     }
 
     private enum TerminalForm { RESPONSE, FAILURE, CANCELLATION }
 
-    private record Fixture(AbstractRequestScheduler scheduler, BalanceContext slot, BalanceContext.DeliveryPublication delivery) { }
+    private record Fixture(AbstractRequestScheduler scheduler, BalanceContext requestContext, BalanceContext.DeliveryPublication delivery) { }
 }

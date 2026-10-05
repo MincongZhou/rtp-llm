@@ -75,9 +75,9 @@ class DeliverySettlementTest {
         prefill = mock(PrefillEndpoint.class);
         when(prefill.releaseCommittedItem(any())).thenAnswer(invocation -> {
             RequestRoute item = invocation.getArgument(0);
-            BalanceContext slot = registry.requestSlot(item.requestId());
-            assertTrue(slot == null || !Thread.holdsLock(slot),
-                    "endpoint accounting must run outside the Slot monitor");
+            BalanceContext requestContext = registry.findRequestContext(item.requestId());
+            assertTrue(requestContext == null || !Thread.holdsLock(requestContext),
+                    "endpoint accounting must run outside the context monitor");
             return ledger.prefill.terminalizeCommittedItem(item);
         });
         doAnswer(invocation -> {
@@ -102,10 +102,10 @@ class DeliverySettlementTest {
         reject(member);
         assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(1, 1);
-        assertTrue(registry.requests.isCurrent(member.slot()));
+        assertTrue(registry.requests.isCurrent(member.requestContext()));
         cleaned(member);
         assertOccupancy(0, 0);
-        assertFalse(registry.requests.isCurrent(member.slot()));
+        assertFalse(registry.requests.isCurrent(member.requestContext()));
         verify(member.item().decodeEp()).release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP);
         verify(member.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.NOT_SENT));
     }
@@ -201,7 +201,7 @@ class DeliverySettlementTest {
         registry.onPrefillStatus(prefill, RoleType.PREFILL, ledger.finish(50L, old.item()));
         registry.runtime.continuations().awaitIdle();
         assertOccupancy(1, 1);
-        assertSame(replacement.slot(), registry.requests.findActive(50L));
+        assertSame(replacement.requestContext(), registry.requests.findActive(50L));
         assertFalse(replacement.item().future().isDone());
     }
 
@@ -214,7 +214,7 @@ class DeliverySettlementTest {
         cleaned(member);
         assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(1, 1);
-        assertTrue(registry.requests.isCurrent(member.slot()));
+        assertTrue(registry.requests.isCurrent(member.requestContext()));
         org.junit.jupiter.api.Assertions.assertNotNull(SchedulerTestSupport.failure(registry));
         verify(prefill, after(150).times(1)).releaseCommittedItem(member.item());
     }
@@ -224,7 +224,7 @@ class DeliverySettlementTest {
         Member member = member(80L, 80L);
         ledger.commit(80L, List.of(member.item()));
         when(member.item().decodeEp().settleFailedRequest(member.item().decodeReservation(), DeliveryResult.Status.NOT_SENT))
-                .thenAnswer(invocation -> { assertFalse(Thread.holdsLock(member.slot())); return true; });
+                .thenAnswer(invocation -> { assertFalse(Thread.holdsLock(member.requestContext())); return true; });
         member.claim().complete(DeliveryResult.notSent(new IllegalStateException("serialization failed")));
         member.claim().settlement().toCompletableFuture().get(2, TimeUnit.SECONDS);
         registry.runtime.continuations().awaitIdle();
@@ -248,7 +248,7 @@ class DeliverySettlementTest {
     void rejectionCannotFinishPreemptionBeforeCleanupProof(PreemptionCancelPhase phase) throws Exception {
         Member member = member(90L, 90L);
         ledger.commit(90L, List.of(member.item()));
-        PreemptionRegistration preemption = member.slot().tryInstallPreemption(90L, 91L, "priority victim");
+        PreemptionRegistration preemption = member.requestContext().tryInstallPreemption(90L, 91L, "priority victim");
         assertTrue(registry.updatePreemption(preemption, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         if (phase != PreemptionCancelPhase.CANCEL_IN_FLIGHT) { assertTrue(registry.updatePreemption(preemption, phase)); }
         reject(member);
@@ -275,7 +275,7 @@ class DeliverySettlementTest {
             RequestProtocolTestSupport.awaitCondition(() -> cancellations.containsKey(member.item().requestId()));
             cancellations.get(member.item().requestId()).complete(EngineCancelChannel.CancelAck.REQUEST_CLEANED);
             assertTrue(cleanupEntered.await(2, TimeUnit.SECONDS));
-            assertTrue(registry.requests.isCurrent(member.slot()));
+            assertTrue(registry.requests.isCurrent(member.requestContext()));
         } finally {
             releaseCleanup.countDown();
             callback.shutdownNow();
@@ -309,7 +309,7 @@ class DeliverySettlementTest {
             assertEquals(decodeEnded ? 0 : 1, decode.routingView().engineCapacityUsed());
             if (index == 0 && order.charAt(index) == 'A') {
                 assertOccupancy(1, 1);
-                assertTrue(registry.requests.isCurrent(member.slot()), "ACK alone cannot archive execution ownership");
+                assertTrue(registry.requests.isCurrent(member.requestContext()), "ACK alone cannot archive execution ownership");
             }
         }
         var response = member.item().future().get(5, TimeUnit.SECONDS);
@@ -318,7 +318,7 @@ class DeliverySettlementTest {
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
         assertEquals(0, decode.routingView().inflightExpectedKv());
-        assertFalse(registry.requests.isCurrent(member.slot()));
+        assertFalse(registry.requests.isCurrent(member.requestContext()));
         assertTrue(cancellations.isEmpty(), "normal completion must not start Engine cancel");
         DeliverySettlementTestSupport.decodeStatus(decode, 70L, true);
         registry.onPrefillStatus(prefill, RoleType.PREFILL, ledger.finish(70L, member.item()));
@@ -342,7 +342,7 @@ class DeliverySettlementTest {
         var claim = RequestProtocolTestSupport.claimBatch(registry, item, batchId, () -> true);
         assertNotNull(claim);
         assertTrue(claim.tryStartSend());
-        return new Member(item, registry.requestSlot(id), claim);
+        return new Member(item, registry.findRequestContext(id), claim);
     }
 
     private void cleaned(Member member) throws Exception {
@@ -357,7 +357,7 @@ class DeliverySettlementTest {
     }
 
     private void decodeFinished(Member member) {
-        RequestProtocolTestSupport.observeDecode(registry, member.slot(), member.item().decodeEp(), DecodeEndpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 601L));
+        RequestProtocolTestSupport.observeDecode(registry, member.requestContext(), member.item().decodeEp(), DecodeEndpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 601L));
     }
 
     private void assertOccupancy(int batches, int members) {
@@ -374,5 +374,5 @@ class DeliverySettlementTest {
         }
     }
 
-    private record Member(RequestRoute item, BalanceContext slot, BalanceContext.DeliveryClaim claim) { }
+    private record Member(RequestRoute item, BalanceContext requestContext, BalanceContext.DeliveryClaim claim) { }
 }

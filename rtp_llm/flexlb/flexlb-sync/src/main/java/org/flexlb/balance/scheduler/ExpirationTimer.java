@@ -34,7 +34,7 @@ final class ExpirationTimer implements AutoCloseable {
                     requestDeadline == null ? null : requestDeadline::cancel);
             failure = Failures.run(failure,
                     detachedDecisionDeadline == null ? null : detachedDecisionDeadline::cancel);
-            Failures.rethrow(failure, "request slot cleanup failed");
+            Failures.rethrow(failure, "request cleanup failed");
         }
     }
 
@@ -59,7 +59,7 @@ final class ExpirationTimer implements AutoCloseable {
         }
 
         /**
-         * Publish only after the exact slot has stored this capability.
+         * Publish only after the exact context has stored this capability.
          */
         final synchronized boolean publishAfterInstall() {
             return switch (state) {
@@ -167,26 +167,26 @@ final class ExpirationTimer implements AutoCloseable {
     /**
      * Register one absolute request deadline.
      *
-     * @return its exact slot-owned capability, or null when the slot rejected
+     * @return its exact context-owned capability, or null when the context rejected
      *         installation because another lifecycle transition already won
      */
     RequestDeadline attachRequestDeadline(BalanceContext context, long deadlineAtMs) {
         return register(context, new RequestDeadline(), delayUntil(deadlineAtMs),
-                BalanceContext::installRequestDeadline, (slot, exact) -> slot.scheduler().onSchedulingDeadline(slot, exact));
+                BalanceContext::installRequestDeadline, (requestContext, exact) -> requestContext.scheduler().onSchedulingDeadline(requestContext, exact));
     }
 
     // ── 可见性期限：计划、注册、触发与取消 ──
-    void attachDecisionDeadline(BalanceContext slot) {
-        OptionalLong deadline = slot.decisionDeadlineAtMs();
+    void attachDecisionDeadline(BalanceContext requestContext) {
+        OptionalLong deadline = requestContext.decisionDeadlineAtMs();
         if (deadline.isPresent()) {
-            registerDecisionDeadline(slot, deadline.getAsLong());
+            registerDecisionDeadline(requestContext, deadline.getAsLong());
         }
     }
 
     /**
      * Register one exact stage deadline from the current delivery evidence.
      *
-     * @return its exact slot-owned capability, or null when the slot rejected
+     * @return its exact context-owned capability, or null when the context rejected
      *         installation because another lifecycle transition already won
      */
     DecisionDeadline registerDecisionDeadline(BalanceContext context, long deadlineAtMs) {
@@ -216,8 +216,8 @@ final class ExpirationTimer implements AutoCloseable {
                 this::inactivityDeadlineExpired);
     }
 
-    private void inactivityDeadlineExpired(BalanceContext slot, InactivityDeadline exact) {
-        slot.scheduler().enqueueInactivityDeadline(slot, exact, clock.getAsLong(), () -> attachInactivityDeadline(slot));
+    private void inactivityDeadlineExpired(BalanceContext requestContext, InactivityDeadline exact) {
+        requestContext.scheduler().enqueueInactivityDeadline(requestContext, exact, clock.getAsLong(), () -> attachInactivityDeadline(requestContext));
     }
 
     // ── 精确句柄：注册协议、调度与取消 ──
@@ -333,16 +333,16 @@ final class ExpirationTimer implements AutoCloseable {
     }
 
     private Throwable detachAllDeadlines() {
-        List<BalanceContext> exactSlots;
+        List<BalanceContext> exactContexts;
         try {
-            exactSlots = requests.snapshotActive();
+            exactContexts = requests.snapshotActive();
         } catch (RuntimeException | Error snapshotFailure) {
             return snapshotFailure;
         }
         Throwable failure = null;
-        for (BalanceContext exactSlot : exactSlots) {
+        for (BalanceContext exactContext : exactContexts) {
             failure = Failures.run(failure,
-                    () -> exactSlot.detachDeadlines().release());
+                    () -> exactContext.detachDeadlines().release());
         }
         return failure;
     }

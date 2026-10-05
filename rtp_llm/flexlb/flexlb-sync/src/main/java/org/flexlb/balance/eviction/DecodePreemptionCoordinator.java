@@ -353,7 +353,7 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
         TERMINAL
     }
 
-    /** Exact opaque slot claim paired with its immutable endpoint victim. */
+    /** Exact opaque request claim paired with its immutable endpoint victim. */
     private static final class ClaimedVictim {
         private final DecodeEndpoint.ReservationHandle reservation;
         private final CancelTarget target;

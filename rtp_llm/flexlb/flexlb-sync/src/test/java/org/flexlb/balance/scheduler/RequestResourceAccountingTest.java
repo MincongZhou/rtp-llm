@@ -182,7 +182,7 @@ class RequestResourceAccountingTest {
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
             assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().dispatch());
-            // Endpoint ownership can advance before its notification reaches the slot.
+            // Endpoint ownership can advance before its notification reaches the context.
             f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.requests).liveRequestCount());
             assertEquals(0, f.prefill.ownershipStats().locallyOwnedRequests());
@@ -443,7 +443,7 @@ class RequestResourceAccountingTest {
             item.ctx().delivery().settlement().toCompletableFuture().get(2, TimeUnit.SECONDS);
             requests.runtime.continuations().awaitIdle();
         }
-        void expire() { RequestProtocolTestSupport.expireInactiveRequest(requests, requests.requestSlot(ID), System.currentTimeMillis() + TTL + 1); }
+        void expire() { RequestProtocolTestSupport.expireInactiveRequest(requests, requests.findRequestContext(ID), System.currentTimeMillis() + TTL + 1); }
         void decodeStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished, long freeKv) {
             applyStatus(decode, status(RoleType.DECODE, version++, running, finished, freeKv));
         }

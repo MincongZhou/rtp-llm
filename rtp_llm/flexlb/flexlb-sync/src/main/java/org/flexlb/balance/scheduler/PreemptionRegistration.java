@@ -77,7 +77,7 @@ public final class PreemptionRegistration {
         return true;
     }
 
-    /** Record protocol completion once; resource cleanup and terminal notification still belong to the slot. */
+    /** Record protocol completion once; resource cleanup and terminal notification still belong to the request context. */
     boolean tryFinish() {
         if (finished) {
             return false;

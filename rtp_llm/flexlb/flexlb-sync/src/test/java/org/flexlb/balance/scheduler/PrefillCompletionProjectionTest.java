@@ -34,7 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Prefill status must carry stage completion through the real endpoint and slot reducers. */
+/** Prefill status must carry stage completion through the real endpoint and context reducers. */
 class PrefillCompletionProjectionTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -114,9 +114,9 @@ class PrefillCompletionProjectionTest {
             task.setPhase(TaskPhase.RUNNING);
             applyStatus(prefill, status(2L, Map.of("101", task), Map.of()));
             requests.runtime.continuations().awaitIdle();
-            BalanceContext slot = requests.requestSlot(101L);
-            synchronized (slot) {
-                assertTrue(slot.decisionDeadlineAtMs().isEmpty(), "running Prefill is positive Engine evidence");
+            BalanceContext requestContext = requests.findRequestContext(101L);
+            synchronized (requestContext) {
+                assertTrue(requestContext.decisionDeadlineAtMs().isEmpty(), "running Prefill is positive Engine evidence");
             }
             if (decodeAlreadyAccepted) {
                 applyStatus(decode, decodeStatus(2L, Map.of("101", task)));
@@ -126,9 +126,9 @@ class PrefillCompletionProjectionTest {
             applyStatus(prefill, status(3L, Map.of(), Map.of("101", task)));
             requests.runtime.continuations().awaitIdle();
             assertEquals(0L, prefill.observedRequestCount());
-            synchronized (slot) {
-                assertTrue(slot.isLiveGeneration(), "Prefill completion must retain the Decode lifecycle");
-                assertTrue(slot.decisionDeadlineAtMs().isEmpty());
+            synchronized (requestContext) {
+                assertTrue(requestContext.isLiveGeneration(), "Prefill completion must retain the Decode lifecycle");
+                assertTrue(requestContext.decisionDeadlineAtMs().isEmpty());
             }
             assertEquals(decodeAlreadyAccepted ? 0L : 32L, decode.routingView().inflightExpectedKv(),
                     "missing Decode acceptance must retain this request's reservation");

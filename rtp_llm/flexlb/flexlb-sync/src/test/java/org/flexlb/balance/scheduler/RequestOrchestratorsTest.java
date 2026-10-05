@@ -179,7 +179,7 @@ class RequestOrchestratorsTest {
         prefill.put("p1", failingPrefill);
         prefill.put("p2", healthyPrefill);
         when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount()).thenReturn(7);
-        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).oldestLiveSlotAgeMs()).thenReturn(19L);
+        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).oldestLiveRequestAgeMs()).thenReturn(19L);
         when(registry.snapshotPrefillEndpoints()).thenReturn(prefill);
         when(registry.snapshotDecodeEndpoints()).thenReturn(Map.of("d1", decode));
         doThrow(new RuntimeException("metrics unavailable")).when(failingPrefill).reportBatchMetrics(reporter);

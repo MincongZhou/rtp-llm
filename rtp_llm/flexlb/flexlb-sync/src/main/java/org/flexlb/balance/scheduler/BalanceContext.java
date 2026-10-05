@@ -327,7 +327,7 @@ public class BalanceContext {
     private TerminalAction terminalAction;
 
     public synchronized DeliveryClaim delivery() { return delivery; }
-    boolean hasTerminalAction() { requireSlotLock("terminal action lookup"); return terminalAction != null; }
+    boolean hasTerminalAction() { requireContextLock("terminal action lookup"); return terminalAction != null; }
 
     private long batchId;
 
@@ -461,19 +461,19 @@ public class BalanceContext {
     }
 
     boolean ownsActiveGenerationLocked() {
-        this.requireSlotLock("active generation lookup");
+        this.requireContextLock("active generation lookup");
         return this.stage.isActive() && this.finalOutcome == null;
     }
 
     /** FINALIZING 仍可能接受结算证据，不能把“已有最终结果”当作“无需再追踪资源”。 */
     boolean ownsResourceTrackingLocked() {
-        this.requireSlotLock("resource tracking lookup");
+        this.requireContextLock("resource tracking lookup");
         return (this.stage.isActive()
                 || this.stage == RequestStage.FINALIZING && (this.cleanup != null || delivery != null));
     }
 
     private void beginFinalizationLocked(TerminalOutcome outcome) {
-        this.requireSlotLock("begin finalization");
+        this.requireContextLock("begin finalization");
         if (this.finalOutcome != null) { return; }
         this.advanceStageLocked(RequestStage.FINALIZING);
         this.finalOutcome = Objects.requireNonNull(outcome, "outcome");
@@ -483,7 +483,7 @@ public class BalanceContext {
     }
 
     private void assertInvariantLocked() {
-        this.requireSlotLock("request slot invariant");
+        this.requireContextLock("request context invariant");
         if (this.stage == RequestStage.QUEUED && this.item != null && admission == null || this.stage == RequestStage.READY_TO_DELIVER && this.item == null || this.stage == RequestStage.DELIVERING && (this.item == null || this.deliveryClaimKind() == DeliveryClaimKind.NONE)) {
             throw new IllegalStateException("request stage has inconsistent route for " + this.getRequestId());
         }
@@ -522,17 +522,17 @@ public class BalanceContext {
     }
 
     boolean ownsPrefillFactLocked(PrefillEndpoint source, RequestRoute expected) {
-        this.requireSlotLock("Prefill fact ownership lookup");
+        this.requireContextLock("Prefill fact ownership lookup");
         return this.ownsResourceTrackingLocked() && this.item == expected && expected.prefillEp() == source;
     }
 
     boolean ownsDecodeFactLocked(DecodeEndpoint source, DecodeEndpoint.ReservationHandle reservation) {
-        this.requireSlotLock("Decode fact ownership lookup");
+        this.requireContextLock("Decode fact ownership lookup");
         return this.ownsResourceTrackingLocked() && this.item != null && this.item.decodeEp() == source && reservation.equals(this.item.decodeReservation());
     }
 
     DecisionDeadline markDecodeAcceptedLocked() {
-        this.requireSlotLock("Decode acceptance");
+        this.requireContextLock("Decode acceptance");
         if (!this.ownsActiveGenerationLocked()) {
             return null;
         }
@@ -548,7 +548,7 @@ public class BalanceContext {
     }
 
     boolean queuedLocalControlLocked() {
-        this.requireSlotLock("queued control ownership");
+        this.requireContextLock("queued control ownership");
         return queueOwner() != null && this.stage == RequestStage.READY_TO_DELIVER && admission == null && this.item != null && this.item.prefillEp() != null && this.cancellationReason != null && preemption == null && this.deliveryClaimKind() == DeliveryClaimKind.NONE;
     }
 
@@ -572,12 +572,12 @@ public class BalanceContext {
     }
 
     StrategyErrorType cancellationErrorTypeLocked(CancelReason reason) {
-        this.requireSlotLock("cancellation error lookup");
+        this.requireContextLock("cancellation error lookup");
         return reason == CancelReason.DEADLINE_EXCEEDED ? StrategyErrorType.BATCH_SLO_EXPIRED : StrategyErrorType.REQUEST_CANCELLED;
     }
 
     boolean canClaimLocalTerminalLocked(boolean queuedExternalCancel) {
-        this.requireSlotLock("local terminal eligibility");
+        this.requireContextLock("local terminal eligibility");
         return this.ownsActiveGenerationLocked() && (!this.future().isDone() || queuedExternalCancel && this.future().isCancelled()) && admission == null && preemption == null && !this.decodeAccepted && !this.deliveryAcknowledged && !this.deliveryClaimKind().isClaimed();
     }
 
@@ -621,7 +621,7 @@ public class BalanceContext {
     }
 
     boolean consumeInactivityDeadlineLocked(InactivityDeadline exact) {
-        this.requireSlotLock("request inactivity check");
+        this.requireContextLock("request inactivity check");
         if (this.inactivityDeadline != exact || !this.ownsResourceTrackingLocked()) {
             return false;
         }
@@ -646,7 +646,7 @@ public class BalanceContext {
      * 真实的 Prefill/Decode 证据优先于预测；返回的旧定时器交给调用方在锁外取消。
      */
     DecisionDeadline updateDeliveryPredictionLocked(WorkSnapshot precedingWork, long unstartedWorkMs, long nowMs) {
-        this.requireSlotLock("delivery prediction consumption");
+        this.requireContextLock("delivery prediction consumption");
         Objects.requireNonNull(precedingWork, "precedingWork");
         if (unstartedWorkMs < 0L) {
             throw new IllegalArgumentException("unstarted work must be non-negative");
@@ -728,7 +728,7 @@ public class BalanceContext {
     }
 
     void markAwaitingConfirmationLocked(String message) {
-        this.requireSlotLock("delivery confirmation wait");
+        this.requireContextLock("delivery confirmation wait");
         if (!this.ownsActiveGenerationLocked() || this.cancellationReason != null || this.decodeAccepted || this.prefillObserved && this.prefillCompletedAtMs == 0L) {
             return;
         }
@@ -737,7 +737,7 @@ public class BalanceContext {
     }
 
     void reconcileDecisionEvidenceLocked() {
-        this.requireSlotLock("decision evidence reconciliation");
+        this.requireContextLock("decision evidence reconciliation");
         if (!this.ownsActiveGenerationLocked() || (!this.prefillObserved && !this.decodeAccepted && this.prefillCompletedAtMs == 0L) || this.needsDecisionConfirmationLocked() || this.cancellationReason != null) {
             return;
         }
@@ -747,7 +747,7 @@ public class BalanceContext {
     }
 
     DecisionDeadline detachObsoleteDecisionDeadlineLocked() {
-        this.requireSlotLock("decision deadline reconciliation");
+        this.requireContextLock("decision deadline reconciliation");
         if (this.decisionDeadline == null || this.decisionExpiresAtMs.equals(OptionalLong.of(this.decisionDeadline.deadlineAtMs()))) {
             return null;
         }
@@ -784,7 +784,7 @@ public class BalanceContext {
     }
 
     void retainPreemptionTerminalLocked(PreemptionRegistration exact, DeferredTerminal candidate) {
-        this.requireSlotLock("preemption terminal evidence");
+        this.requireContextLock("preemption terminal evidence");
         DeferredTerminal previous = exact.pendingTerminal();
         if (previous == null || !previous.authoritativeWorker() && candidate.authoritativeWorker()) {
             exact.storeTerminal(candidate);
@@ -792,7 +792,7 @@ public class BalanceContext {
     }
 
     void detachPreemptionOwnerLocked(PreemptionRegistration exact) {
-        this.requireSlotLock("preemption detach");
+        this.requireContextLock("preemption detach");
         if (exact != null && preemption == exact) {
             this.preemption = null;
             this.assertInvariantLocked();
@@ -801,7 +801,7 @@ public class BalanceContext {
 
     void requireCleanupOwner(TerminalAction action) {
         synchronized (this) {
-            if (this.stage != RequestStage.FINALIZING || action.slot() != this || action.item() != this.item) {
+            if (this.stage != RequestStage.FINALIZING || action.requestContext() != this || action.item() != this.item) {
                 throw new IllegalStateException("cleanup does not own request " + this.getRequestId());
             }
         }
@@ -809,7 +809,7 @@ public class BalanceContext {
 
     ResponseResult claimPublicationResultLocked(PublicationKind kind,
             ResponseCompletion completion, Response response, Throwable failure, boolean interrupt) {
-        this.requireSlotLock("frontend result selection");
+        this.requireContextLock("frontend result selection");
         if (this.future().isDone()) { return null; }
         ResponseResult selected = this.selectedResponse;
         if (selected != null) {
@@ -827,20 +827,20 @@ public class BalanceContext {
         return this.selectedResponse;
     }
 
-    void requireSlotLock(String operation) {
+    void requireContextLock(String operation) {
         if (!Thread.holdsLock(this)) {
-            throw new IllegalStateException(operation + " requires slot lock for request " + this.getRequestId());
+            throw new IllegalStateException(operation + " requires context lock for request " + this.getRequestId());
         }
     }
 
-    void requireOutsideSlotLock(String operation) {
+    void requireOutsideContextLock(String operation) {
         if (Thread.holdsLock(this)) {
             throw new IllegalStateException(operation + " must run outside the BalanceContext lock");
         }
     }
 
     private void advanceStageLocked(RequestStage next) {
-        this.requireSlotLock("request stage transition");
+        this.requireContextLock("request stage transition");
         boolean allowed = switch(this.stage) {
             case QUEUED ->
                 next == RequestStage.ROUTING || next == RequestStage.FINALIZING;
@@ -1118,8 +1118,8 @@ public class BalanceContext {
     }
 
     static SelectedPublication selectPublication(BalanceContext ctx, PublicationPermit permit, ResponseCompletion completion, Response response, Throwable failure, boolean mayInterruptIfRunning) {
-        ctx.requireOutsideSlotLock("response selection");
-        if (permit.slot != ctx || completion != ResponseCompletion.RESPONSE && permit.kind != PublicationKind.TERMINAL) {
+        ctx.requireOutsideContextLock("response selection");
+        if (permit.requestContext != ctx || completion != ResponseCompletion.RESPONSE && permit.kind != PublicationKind.TERMINAL) {
             throw new IllegalArgumentException("incompatible publication permit");
         }
         permit.claim();
@@ -1265,7 +1265,7 @@ public class BalanceContext {
      * 本方法不直接清理 Endpoint，也不直接完成 Future。
      */
     TerminalAction claimFinalizationLocked(DeferredTerminal event, TerminalOutcome transition, Response response, boolean requestPublication, Supplier<PublicationPermit> publication) {
-        this.requireSlotLock("terminal claim");
+        this.requireContextLock("terminal claim");
         if (transition == null) {
             throw new IllegalStateException("terminal transition is required for request " + this.getRequestId());
         }
@@ -1298,7 +1298,7 @@ public class BalanceContext {
     }
     /** 投递失败可先发布错误，再在 FINALIZING 中等待资源结算；不得据此立即归档请求。 */
     SelectedPublication selectDeliveryFailureLocked(RequestRoute exact, DeliveryResult.Status source, String detail, Supplier<PublicationPermit> publication) {
-        this.requireSlotLock("request failure");
+        this.requireContextLock("request failure");
         if (!this.ownsActiveItem(exact) || this.cleanup != null) {
             return null;
         }
@@ -1344,8 +1344,8 @@ public class BalanceContext {
 
     synchronized AdmissionHandle admission() { return admission; }
     synchronized PreemptionRegistration preemption() { return preemption; }
-    boolean hasCleanup() { requireSlotLock("cleanup lookup"); return cleanup != null; }
-    DeliveryResult.Status cleanupSource() { requireSlotLock("cleanup lookup"); return cleanup.source; }
+    boolean hasCleanup() { requireContextLock("cleanup lookup"); return cleanup != null; }
+    DeliveryResult.Status cleanupSource() { requireContextLock("cleanup lookup"); return cleanup.source; }
 
     synchronized AdmissionHandle beginAdmission(BiConsumer<AdmissionHandle, Response> completion) {
         if (stage != RequestStage.QUEUED || !isOpen() || item != null || admission != null || preemption != null) {
@@ -1358,7 +1358,7 @@ public class BalanceContext {
     }
 
     AdmissionHandle beginWithdrawal(RequestRoute exact, BiConsumer<AdmissionHandle, Response> completion) {
-        requireSlotLock("route withdrawal");
+        requireContextLock("route withdrawal");
         if (!ownsPreparedDeliveryLocked(exact) || admission != null) { return null; }
         admission = new AdmissionHandle(this, completion);
         admission.withdrawingRoute = exact;
@@ -1368,7 +1368,7 @@ public class BalanceContext {
     }
 
     void detachWithdrawnRoute(AdmissionHandle operation, RequestRoute exact) {
-        requireSlotLock("route withdrawal");
+        requireContextLock("route withdrawal");
         if (admission != operation || item != exact) {
             throw new IllegalStateException("route withdrawal lost its owner: " + getRequestId());
         }
@@ -1379,7 +1379,7 @@ public class BalanceContext {
     }
 
     boolean bindRoute(RequestRoute exact) {
-        requireSlotLock("route binding");
+        requireContextLock("route binding");
         if (stage != RequestStage.ROUTING || !isOpen() || item != null || admission == null || exact.requestId() != getRequestId()) {
             return false;
         }
@@ -1389,7 +1389,7 @@ public class BalanceContext {
     }
 
     void rejectRoutePublication(RequestRoute exact) {
-        requireSlotLock("route publication rollback");
+        requireContextLock("route publication rollback");
         if (stage != RequestStage.ROUTING || item != exact || admission == null) {
             throw new IllegalStateException("request item publication ownership changed for " + getRequestId());
         }
@@ -1398,7 +1398,7 @@ public class BalanceContext {
     }
 
     void confirmRoutePublication(RequestRoute exact) {
-        requireSlotLock("route publication confirmation");
+        requireContextLock("route publication confirmation");
         if (item != exact || stage != RequestStage.ROUTING) {
             throw new IllegalStateException("route publication lost its owner for " + getRequestId());
         }
@@ -1407,7 +1407,7 @@ public class BalanceContext {
     }
 
     RequestRoute finishAdmission(AdmissionHandle exact) {
-        requireSlotLock("admission completion");
+        requireContextLock("admission completion");
         if (admission != exact) { return null; }
         admission = null;
         exact.withdrawingRoute = null;
@@ -1421,7 +1421,7 @@ public class BalanceContext {
     record AdmissionResult(boolean inactive, DeferredTerminal terminal, PendingPrefillRetirement retirement) { }
 
     AdmissionResult consumeAdmissionFacts(AdmissionHandle exact) {
-        requireSlotLock("admission settlement");
+        requireContextLock("admission settlement");
         AdmissionResult result = new AdmissionResult(exact.inactivityExpired, exact.observedTerminal, exact.prefillRetirement);
         exact.inactivityExpired = false;
         exact.observedTerminal = null;
@@ -1430,12 +1430,12 @@ public class BalanceContext {
     }
 
     void retainAdmissionExpiry() {
-        requireSlotLock("admission expiry");
+        requireContextLock("admission expiry");
         admission.inactivityExpired = true;
     }
 
     boolean retainCleanupFacts(boolean inactive, DeferredTerminal terminal) {
-        requireSlotLock("cleanup evidence");
+        requireContextLock("cleanup evidence");
         if (cleanup == null) { return false; }
         cleanup.expired |= inactive;
         if (terminal != null && terminal.decodeTerminalAlreadyApplied()) {
@@ -1445,7 +1445,7 @@ public class BalanceContext {
     }
 
     boolean ownsPreparedDeliveryLocked(RequestRoute exact) {
-        requireSlotLock("delivery eligibility");
+        requireContextLock("delivery eligibility");
         return stage == RequestStage.READY_TO_DELIVER && item == exact && isOpen() && preemption == null
                 && (admission == null || admission.withdrawingRoute == null) && deliveryClaimKind() == DeliveryClaimKind.NONE;
     }
@@ -1453,7 +1453,7 @@ public class BalanceContext {
     DeliveryClaim beginDelivery(RequestRoute exact, DeliveryClaimKind kind, long correlationId, long nowMs,
                                 BiConsumer<DeliveryClaim, DeliveryResult> completion,
                                 java.util.function.Consumer<DeliveryClaim> cleanupStarter) {
-        requireSlotLock("delivery claim");
+        requireContextLock("delivery claim");
         DeliveryClaim claim = new DeliveryClaim(exact, kind, completion, cleanupStarter);
         delivery = claim;
         advanceStageLocked(RequestStage.DELIVERING);
@@ -1466,18 +1466,18 @@ public class BalanceContext {
     }
 
     boolean acceptDeliveryClaim(DeliveryClaim claim) {
-        requireSlotLock("delivery result");
+        requireContextLock("delivery result");
         return delivery == claim;
     }
 
     void confirmDelivery() {
-        requireSlotLock("delivery confirmation");
+        requireContextLock("delivery confirmation");
         if (stage == RequestStage.DELIVERING) { advanceStageLocked(RequestStage.RESULT_PENDING); }
     }
 
     /** 锁内记录 ACK 并移交调度定时器；返回的发布任务和定时器取消由调用方执行。 */
     DeliveryPublication acknowledgeDelivery(PublicationPermit permit, long nowMs) {
-        requireSlotLock("delivery acknowledgement");
+        requireContextLock("delivery acknowledgement");
         Response response = buildSuccessResponse(item.routeResponse(), deliveryClaimKind() == DeliveryClaimKind.BATCH_ENQUEUE);
         deliveryAcknowledged = true;
         detail = deliveryClaimKind() == DeliveryClaimKind.BATCH_ENQUEUE ? "batch enqueue acknowledged" : "route decision delivered";
@@ -1489,19 +1489,19 @@ public class BalanceContext {
     }
 
     void observeWorker(long nowMs) {
-        requireSlotLock("worker observation");
+        requireContextLock("worker observation");
         lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, nowMs);
     }
 
     boolean consumeRequestDeadline(RequestDeadline exact) {
-        requireSlotLock("scheduling deadline");
+        requireContextLock("scheduling deadline");
         if (requestDeadline != exact) { return false; }
         requestDeadline = null;
         return true;
     }
 
     boolean advancePreemption(PreemptionRegistration exact, PreemptionCancelPhase next) {
-        requireSlotLock("preemption progress");
+        requireContextLock("preemption progress");
         if (!ownsResourceTrackingLocked() || preemption != exact
                 || next == PreemptionCancelPhase.CANCEL_IN_FLIGHT && cancellationReason != null
                 || !exact.advanceTo(next)) { return false; }
@@ -1514,8 +1514,8 @@ public class BalanceContext {
 
     /** 终态 action 的本地清理完成后提交 FINISHED；此前仍保留 route 以匹配迟到事件。 */
     RequestState finishTerminal(TerminalAction action) {
-        requireSlotLock("terminal commit");
-        if (stage != RequestStage.FINALIZING || action.slot() != this || item != action.item()) {
+        requireContextLock("terminal commit");
+        if (stage != RequestStage.FINALIZING || action.requestContext() != this || item != action.item()) {
             if (action.publication() != null) { action.publication().abandonIfUnclaimed(); }
             throw new IllegalStateException("terminal context identity changed: request_id=" + getRequestId());
         }
@@ -1527,7 +1527,7 @@ public class BalanceContext {
     }
 
     void selectQueuedCancellation(boolean interrupt) {
-        requireSlotLock("queued cancellation");
+        requireContextLock("queued cancellation");
         if (selectedResponse != null || cancellationReason == null) {
             throw new IllegalStateException("queued cancellation has no response ownership");
         }
@@ -1535,14 +1535,14 @@ public class BalanceContext {
     }
 
     void recordCleanupSettlement(boolean prefill, boolean decode, boolean finishPreemption) {
-        requireSlotLock("cleanup settlement");
+        requireContextLock("cleanup settlement");
         cleanup.prefillSettled |= prefill;
         cleanup.decodeSettled |= decode;
         if (finishPreemption && preemption != null) { preemption.tryFinish(); }
     }
 
     boolean expireCleanup(long nowMs) {
-        requireSlotLock("cleanup expiry");
+        requireContextLock("cleanup expiry");
         if (cleanup == null) { return false; }
         if (ownsResourceTrackingLocked() && requestInactiveLocked(nowMs)) { cleanup.expired = true; }
         return cleanup.expired;
@@ -1553,7 +1553,7 @@ public class BalanceContext {
                        RequestDeadline requestDeadline, DecisionDeadline decisionDeadline) { }
 
     CleanupPass beginCleanup(RequestRoute exact) {
-        requireSlotLock("cleanup pass");
+        requireContextLock("cleanup pass");
         CleanupProgress progress = item == exact ? cleanup : null;
         if (progress != null && admission != null) { return null; }
         if (progress != null && (progress.phase == CleanupProgress.Phase.RUNNING || progress.phase == CleanupProgress.Phase.RUN_AGAIN)) {
@@ -1575,7 +1575,7 @@ public class BalanceContext {
     enum CleanupNext { STALE, TRY_FINISH, REPEAT }
 
     CleanupNext finishCleanup(CleanupPass pass, boolean prefillDone, boolean decodeDone) {
-        requireSlotLock("cleanup pass completion");
+        requireContextLock("cleanup pass completion");
         CleanupProgress progress = pass.progress();
         if (progress == null || cleanup != progress) { return CleanupNext.STALE; }
         progress.phase = progress.phase == CleanupProgress.Phase.RUN_AGAIN ? CleanupProgress.Phase.PENDING : CleanupProgress.Phase.WAITING;
@@ -1616,14 +1616,14 @@ public class BalanceContext {
     DecisionDeadline decisionDeadline() { return decisionDeadline; }
 
     TerminalAction tryFinishCleanupLocked() {
-        this.requireSlotLock("cleanup completion");
+        this.requireContextLock("cleanup completion");
         if (!this.hasCleanup()) {
             return null;
         }
         return this.claimFinalizationLocked(null, Objects.requireNonNull(this.finalOutcome, "delivery failure terminal"), null, false, null);
     }
     TerminalAction tryTerminateCancellationLocked(Supplier<PublicationPermit> publication) {
-        this.requireSlotLock("local cancellation termination");
+        this.requireContextLock("local cancellation termination");
         if (!this.ownsActiveGenerationLocked() || this.admission() != null || this.cancellationReason() == null) {
             return null;
         }
@@ -1635,7 +1635,7 @@ public class BalanceContext {
         return this.claimFinalizationLocked(null, TerminalOutcome.cancellation(this.cancellationReason(), message), Response.copyOf(this.cancellationResponse()), true, publication);
     }
     TerminalAction decideRequestEndLocked(DeferredTerminal event, Supplier<PublicationPermit> publication) {
-        this.requireSlotLock("request completion");
+        this.requireContextLock("request completion");
         Objects.requireNonNull(event, "request end event");
         if (this.hasCleanup()) {
             return tryFinishCleanupLocked();
@@ -1706,7 +1706,7 @@ public class BalanceContext {
     }
 
     boolean recordCancellationLocked(CancelReason reason, String message) {
-        this.requireSlotLock("record cancellation");
+        this.requireContextLock("record cancellation");
         Objects.requireNonNull(reason, "reason");
         if (!this.ownsActiveGenerationLocked() || this.cancellationReason() != null) {
             return false;
@@ -1766,7 +1766,7 @@ public class BalanceContext {
     }
 
     private Runnable applyPrefillStatusLocked(RoleType role, PrefillState.WorkerStatusFact fact, long nowMs) {
-        this.requireSlotLock("Prefill fact reduction");
+        this.requireContextLock("Prefill fact reduction");
         this.observeWorker(nowMs);
         boolean cleaning = this.hasCleanup();
         if (cleaning && fact.kind() != PrefillState.WorkerStatusFact.Kind.ACTIVE) {
@@ -1860,7 +1860,7 @@ public class BalanceContext {
      * 返回的执行任务由调用方在 context 锁外运行。
      */
     Runnable settleAdmissionLocked(AdmissionHandle operation, Response failure) {
-        this.requireSlotLock("admission settlement");
+        this.requireContextLock("admission settlement");
         CancelReason pendingCancellation = this.cancellationReason();
         AdmissionResult retained = this.consumeAdmissionFacts(operation);
         boolean inactive = retained.inactive();
@@ -1906,7 +1906,7 @@ public class BalanceContext {
     }
 
     TerminalAction claimPrefillRetirementLocked(PendingPrefillRetirement pending) {
-        this.requireSlotLock("Prefill retirement");
+        this.requireContextLock("Prefill retirement");
         if (pending == null || !this.ownsPrefillFactLocked(pending.source(), pending.item()) || this.decodeAccepted() || this.preemption() != null || this.deliveryClaimKind().isClaimed()) {
             return null;
         }
@@ -1945,7 +1945,7 @@ public class BalanceContext {
      * Worker 权威终态也可用于 FINALIZING 的资源结算；旧 route 的事件不影响当前请求。
      */
     Runnable processRequestEndLocked(RequestRoute expected, DeferredTerminal event) {
-        this.requireSlotLock("request end");
+        this.requireContextLock("request end");
         boolean workerProof = event.authoritativeWorker();
         if (expected == null || !this.ownsResourceTrackingLocked() || this.item() != expected || !workerProof && !this.ownsActiveItem(expected)) {
             return null;
@@ -2017,7 +2017,7 @@ public class BalanceContext {
     }
 
     Runnable acknowledgeDeliveryLocked(PreemptionRegistration signal) {
-        this.requireSlotLock("delivery acknowledgement");
+        this.requireContextLock("delivery acknowledgement");
         if (this.item() == null || !this.ownsActiveItem(this.item())) {
             return null;
         }
@@ -2115,6 +2115,6 @@ record DeferredTerminal(Kind kind, StrategyErrorType errorType, String detail, W
  * 一次终态执行任务：领取时存入 context.terminalAction 防止重复领取，随后交给 Scheduler。
  * 包含精确路由、定时器和可选发布许可；不是可重新计算或任意重试的普通结果对象。
  */
-record TerminalAction(BalanceContext slot, RequestRoute item, DeliveryClaimKind deliveryKind, boolean endpointsSettled, PreemptionRegistration preemption, ExpirationTimer.DetachedDeadlines terminalResources, DeferredTerminal event, Response response, RequestCompletionPublisher.PublicationPermit publication) {
+record TerminalAction(BalanceContext requestContext, RequestRoute item, DeliveryClaimKind deliveryKind, boolean endpointsSettled, PreemptionRegistration preemption, ExpirationTimer.DetachedDeadlines terminalResources, DeferredTerminal event, Response response, RequestCompletionPublisher.PublicationPermit publication) {
 
 }

@@ -386,9 +386,9 @@ class RequestSchedulerTest {
             assertTrue(coordinator.trySubmitRegistered(context));
             assertTrue(planning.await(5, TimeUnit.SECONDS));
             if (deadline) {
-                BalanceContext slot = lifecycle.requestSlot(990001L);
-                var exact = (ExpirationTimer.RequestDeadline) org.springframework.test.util.ReflectionTestUtils.getField(slot, "requestDeadline");
-                lifecycle.onSchedulingDeadline(slot, exact);
+                BalanceContext requestContext = lifecycle.findRequestContext(990001L);
+                var exact = (ExpirationTimer.RequestDeadline) org.springframework.test.util.ReflectionTestUtils.getField(requestContext, "requestDeadline");
+                lifecycle.onSchedulingDeadline(requestContext, exact);
             } else {
                 lifecycle.cancelRequest(990001L, 0L, CancelReason.CLIENT_CANCELLED);
             }

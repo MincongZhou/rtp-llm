@@ -313,7 +313,7 @@ class PreemptionPhasesE2ETest {
                     .setMaxEngineRequests(1L);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
-            // Isolate the request-slot contract with enough KV for the full
+            // Isolate the request-context contract with enough KV for the full
             // prompt plus output reservation.
             h.config.getRouter().getRoles().getDecode().getAvailability()
                     .setMaxKvUsagePercent(100);

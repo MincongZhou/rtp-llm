@@ -93,7 +93,7 @@ public final class RequestRepository {
         }
         return queued;
     }
-    public long oldestLiveSlotAgeMs() {
+    public long oldestLiveRequestAgeMs() {
         long oldest = Long.MAX_VALUE;
         for (BalanceContext context : activeRequests.values()) {
             oldest = Math.min(oldest, context.createdAtMs());

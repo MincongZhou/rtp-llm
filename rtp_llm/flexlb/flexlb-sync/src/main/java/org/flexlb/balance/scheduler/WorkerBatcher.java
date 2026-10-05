@@ -490,7 +490,7 @@ public final class WorkerBatcher {
         return removed;
     }
 
-    /** A control producer only wakes this generation; the worker settles the exact slot. */
+    /** A control producer only wakes this generation; the worker settles the exact context. */
     public boolean signalControl(RequestRoute exact) {
         requireExactEndpoint(exact, "control item");
         queueLock.lock();

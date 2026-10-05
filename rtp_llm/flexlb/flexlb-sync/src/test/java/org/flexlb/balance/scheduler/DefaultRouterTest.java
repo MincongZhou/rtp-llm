@@ -263,13 +263,13 @@ class DefaultRouterTest {
             when(((DecodeEndpoint) decode.endpoint).isAcceptedByEngine(reservation)).thenReturn(true);
             assertTrue(scheduler(router(), context).submit(context).get(2L, TimeUnit.SECONDS).isSuccess());
             assertTrue(context.getFuture().get(2L, TimeUnit.SECONDS).isSuccess());
-            BalanceContext slot = requests.requestSlot(9L);
-            synchronized (slot) {
-                assertTrue(slot.decodeAccepted());
-                assertTrue(slot.isLiveGeneration());
-                assertEquals(RequestState.Phase.ACKNOWLEDGED, slot.snapshot().state());
+            BalanceContext requestContext = requests.findRequestContext(9L);
+            synchronized (requestContext) {
+                assertTrue(requestContext.decodeAccepted());
+                assertTrue(requestContext.isLiveGeneration());
+                assertEquals(RequestState.Phase.ACKNOWLEDGED, requestContext.snapshot().state());
             }
-            RequestProtocolTestSupport.expireInactiveRequest(requests, slot, System.currentTimeMillis() + context.getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
+            RequestProtocolTestSupport.expireInactiveRequest(requests, requestContext, System.currentTimeMillis() + context.getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
             assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).getRequestState(9L, 0L).state());
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).liveRequestCount());
             verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);

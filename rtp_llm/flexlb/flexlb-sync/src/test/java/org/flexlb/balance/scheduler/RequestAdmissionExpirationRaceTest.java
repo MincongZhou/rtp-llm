@@ -45,11 +45,11 @@ class RequestAdmissionExpirationRaceTest {
         try {
             var context = RequestProtocolTestSupport.context(config, 302L);
             var future = RequestProtocolTestSupport.register(registry, context);
-            var slot = registry.requestSlot(302L);
+            var requestContext = registry.findRequestContext(302L);
             var prefill = mock(PrefillEndpoint.class);
             context.setFuture(future);
             var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null,
-                    prefill, null, null, slot.createdAtMs());
+                    prefill, null, null, requestContext.createdAtMs());
             var cleanupFailure = new IllegalStateException("Prefill cleanup failed");
             doThrow(cleanupFailure).when(prefill).settleFailedRequest(item);
             try (var admission = registry.claimAdmissionHandle(302L, future); var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
@@ -67,7 +67,7 @@ class RequestAdmissionExpirationRaceTest {
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
             RequestProtocolTestSupport.awaitCondition(() -> org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).liveRequestCount() == 0);
             verify(prefill).releaseCommittedItem(item);
-            assertEquals(RequestState.Phase.FAILED, slot.snapshot().state());
+            assertEquals(RequestState.Phase.FAILED, requestContext.snapshot().state());
             assertTimeoutPreemptively(Duration.ofSeconds(2),
                     () -> assertTrue(RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)));
         } finally {
@@ -101,10 +101,10 @@ class RequestAdmissionExpirationRaceTest {
             prefillStatus.setServerIp("127.0.0.1");
             prefillStatus.setGrpcPort(8081);
             var future = RequestProtocolTestSupport.register(registry, context);
-            BalanceContext slot = registry.requestSlot(requestId);
+            BalanceContext requestContext = registry.findRequestContext(requestId);
             context.setFuture(future);
             var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), prefillStatus, null,
-                    prefill, decode, reservation, slot.createdAtMs());
+                    prefill, decode, reservation, requestContext.createdAtMs());
 
             try (var admission = registry.claimAdmissionHandle(requestId, future); var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
@@ -120,16 +120,16 @@ class RequestAdmissionExpirationRaceTest {
                             "failure publication must not wait for admission cleanup");
                     assertEquals(RequestState.Phase.FAILED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(requestId, 0L).state());
                 }
-                assertFalse(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).removeExactTerminal(org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(registry, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(slot.getRequestId(), 0L)), Long.MAX_VALUE));
-                RequestProtocolTestSupport.expireInactiveRequest(registry, slot, slot.createdAtMs() + 300L);
-                synchronized (slot) {
-                    assertTrue(slot.inactivityDeadlineAtMs().isEmpty(),
+                assertFalse(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).removeExactTerminal(org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(registry, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(requestContext.getRequestId(), 0L)), Long.MAX_VALUE));
+                RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, requestContext.createdAtMs() + 300L);
+                synchronized (requestContext) {
+                    assertTrue(requestContext.inactivityDeadlineAtMs().isEmpty(),
                             "the fired deadline stays disarmed until the admission is completed");
                 }
                 RequestProtocolTestSupport.observeDecode(registry, decode,
                         DecodeEndpoint.WorkerStatusFact.active(reservation));
-                synchronized (slot) {
-                    slot.acceptDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
+                synchronized (requestContext) {
+                    requestContext.acceptDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
                 }
             }
 

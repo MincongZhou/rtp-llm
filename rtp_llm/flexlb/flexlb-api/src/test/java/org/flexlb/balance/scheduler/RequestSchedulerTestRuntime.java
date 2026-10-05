@@ -113,20 +113,20 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         return placementAvailability;
     }
 
-    /** Return the canonical request future retained by the exact test slot. */
+    /** Return the canonical request future retained by the exact test context. */
     public CompletableFuture<Response> requestFuture(long requestId) {
-        BalanceContext slot = requests.findActive(requestId);
-        return slot == null ? null : slot.future();
+        BalanceContext requestContext = requests.findActive(requestId);
+        return requestContext == null ? null : requestContext.future();
     }
 
-    /** Return the exact item currently owned by a fixture request slot. */
+    /** Return the exact item currently owned by a fixture request context. */
     public RequestRoute activeItem(long requestId) {
-        BalanceContext slot = requests.findActive(requestId);
-        if (slot == null) {
+        BalanceContext requestContext = requests.findActive(requestId);
+        if (requestContext == null) {
             return null;
         }
-        synchronized (slot) {
-            return slot.activeItem();
+        synchronized (requestContext) {
+            return requestContext.activeItem();
         }
     }
 

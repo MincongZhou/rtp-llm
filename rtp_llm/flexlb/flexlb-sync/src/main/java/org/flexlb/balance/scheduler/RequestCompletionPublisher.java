@@ -31,13 +31,13 @@ final class RequestCompletionPublisher implements AutoCloseable {
 
     /**
      * Invocation-local proof that one exact lifecycle edge owns one frontend
-     * publication. The capability is never stored in a slot or registry.
+     * publication. The capability is never stored in a request context or repository.
      */
     static final class PublicationPermit {
 
         private final RequestCompletionPublisher publisher;
 
-        final BalanceContext slot;
+        final BalanceContext requestContext;
 
         final PublicationKind kind;
 
@@ -45,14 +45,14 @@ final class RequestCompletionPublisher implements AutoCloseable {
 
         private final AtomicBoolean closed = new AtomicBoolean();
 
-        PublicationPermit(RequestCompletionPublisher publisher, BalanceContext slot, PublicationKind kind) {
+        PublicationPermit(RequestCompletionPublisher publisher, BalanceContext requestContext, PublicationKind kind) {
             this.publisher = Objects.requireNonNull(publisher, "publisher");
-            this.slot = slot;
+            this.requestContext = requestContext;
             this.kind = kind;
         }
 
-        BalanceContext slot() {
-            return slot;
+        BalanceContext requestContext() {
+            return requestContext;
         }
 
         void closePublication() {
@@ -72,7 +72,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
 
         void claim() {
             if (!claimed.compareAndSet(false, true)) {
-                throw new IllegalStateException("publication permit already consumed for request " + slot.getRequestId());
+                throw new IllegalStateException("publication permit already consumed for request " + requestContext.getRequestId());
             }
         }
     }
@@ -131,7 +131,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
                 0L,
                 TimeUnit.MILLISECONDS,
                 // Queue completions so a busy publisher never runs client callbacks
-                // inline on a decision thread. Slot owns request lifetime; the
+                // inline on a decision thread. BalanceContext owns request lifetime; the
                 // publisher owns only these in-flight frontend completions.
                 new LinkedBlockingQueue<>(),
                 Thread.ofPlatform().daemon().name("request-completion-publisher-", 0).factory(),
@@ -140,12 +140,12 @@ final class RequestCompletionPublisher implements AutoCloseable {
     }
 
     // ── 发布许可：记录实际尚未结束的回包 ──
-    RequestCompletionPublisher.PublicationPermit tryReservePublication(BalanceContext exactSlot, BalanceContext.PublicationKind kind) {
+    RequestCompletionPublisher.PublicationPermit tryReservePublication(BalanceContext exactContext, BalanceContext.PublicationKind kind) {
         synchronized (lifecycleMonitor) {
             if (closeCompletion != null) {
                 return null;
             }
-            var permit = new PublicationPermit(this, exactSlot, kind);
+            var permit = new PublicationPermit(this, exactContext, kind);
             publications.add(permit);
             return permit;
         }
@@ -187,7 +187,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
                 } catch (Throwable failure) {
                     Logger.error("Delivery ACK reporting failed request_id={}", delivery.item().requestId(), failure);
                 }
-                publishNow(BalanceContext.selectPublication(delivery.publication().slot(), delivery.publication(),
+                publishNow(BalanceContext.selectPublication(delivery.publication().requestContext(), delivery.publication(),
                         ResponseCompletion.RESPONSE, delivery.response(), null, false));
             });
         } catch (RuntimeException | Error failure) {
@@ -201,7 +201,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
      */
     void submit(RequestCompletionPublisher.SelectedPublication publication) {
         RequestCompletionPublisher.PublicationPermit permit = publication.permit();
-        permit.slot().requireOutsideSlotLock("response submission");
+        permit.requestContext().requireOutsideContextLock("response submission");
         try {
             requireOwnedPermit(permit);
             enqueue(() -> publishNow(publication));
@@ -228,7 +228,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
         RequestCompletionPublisher.PublicationPermit permit = publication.permit();
         boolean outermost = false;
         try {
-            permit.slot().requireOutsideSlotLock("response completion");
+            permit.requestContext().requireOutsideContextLock("response completion");
             requireOwnedPermit(permit);
             outermost = publicationActive.get() == null;
             if (outermost) {

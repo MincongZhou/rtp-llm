@@ -31,7 +31,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 /**
- * Cleanup must finish while a business operation holds the Slot monitor and needs
+ * Cleanup must finish while a business operation holds the context monitor and needs
  * the endpoint lock. A child JVM contains any regression to a non-interruptible deadlock.
  */
 class EndpointCleanupDeadlockTest {
@@ -64,7 +64,7 @@ class EndpointCleanupDeadlockTest {
     }
 
     @Test
-    void timerCloseDoesNotHoldRegistrationLockWhileWaitingForSlot() throws Exception {
+    void timerCloseDoesNotHoldRegistrationLockWhileWaitingForContext() throws Exception {
         verifyCompletion("timer-close");
     }
 
@@ -107,37 +107,37 @@ class EndpointCleanupDeadlockTest {
             when(service.loadBalanceConfig()).thenReturn(config);
             AbstractRequestScheduler registry = mock(AbstractRequestScheduler.class);
             ExpirationTimer timer = new ExpirationTimer(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry));
-            BalanceContext slot = RequestProtocolTestSupport.context(config, 992L);
-            AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(RequestCompletionPublisher.class), slot, timer);
+            BalanceContext requestContext = RequestProtocolTestSupport.context(config, 992L);
+            AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(RequestCompletionPublisher.class), requestContext, timer);
 
-            CountDownLatch slotHeld = new CountDownLatch(1);
-            CountDownLatch closeReachesSlots = new CountDownLatch(1);
+            CountDownLatch contextHeld = new CountDownLatch(1);
+            CountDownLatch closeReachesContexts = new CountDownLatch(1);
             AtomicReference<Throwable> failure = new AtomicReference<>();
             doAnswer(call -> {
-                closeReachesSlots.countDown();
-                return java.util.List.of(slot);
+                closeReachesContexts.countDown();
+                return java.util.List.of(requestContext);
             }).when(SchedulerTestSupport.repository(registry)).snapshotActive();
             Thread holder = new Thread(() -> {
                 try {
-                    synchronized (slot) {
-                        slotHeld.countDown();
-                        assertTrue(closeReachesSlots.await(5, TimeUnit.SECONDS));
-                        // close() is about to acquire Slot. Registration must remain available
-                        // to reject this late request; holding it while waiting for Slot deadlocks.
-                        assertThrows(java.util.concurrent.RejectedExecutionException.class, () -> timer.attachRequestDeadline(slot, Long.MAX_VALUE));
+                    synchronized (requestContext) {
+                        contextHeld.countDown();
+                        assertTrue(closeReachesContexts.await(5, TimeUnit.SECONDS));
+                        // close() is about to acquire Context. Registration must remain available
+                        // to reject this late request; holding it while waiting for Context deadlocks.
+                        assertThrows(java.util.concurrent.RejectedExecutionException.class, () -> timer.attachRequestDeadline(requestContext, Long.MAX_VALUE));
                     }
                 } catch (Throwable error) {
                     failure.set(error);
                 }
-            }, "slot-checks-timer-registration");
+            }, "context-checks-timer-registration");
             Thread closer = new Thread(() -> {
                 try {
-                    assertTrue(slotHeld.await(5, TimeUnit.SECONDS));
+                    assertTrue(contextHeld.await(5, TimeUnit.SECONDS));
                     timer.close();
                 } catch (Throwable error) {
                     failure.set(error);
                 }
-            }, "timer-close-waits-for-slot");
+            }, "timer-close-waits-for-context");
             holder.setDaemon(true);
             closer.setDaemon(true);
             holder.start();
@@ -147,7 +147,7 @@ class EndpointCleanupDeadlockTest {
             if (failure.get() != null) {
                 throw new AssertionError(failure.get());
             }
-            assertFalse(holder.isAlive() || closer.isAlive(), "Slot / timer registration lock cycle");
+            assertFalse(holder.isAlive() || closer.isAlive(), "Context / timer registration lock cycle");
         }
 
         private static void run(String kind) throws Exception {
@@ -164,8 +164,8 @@ class EndpointCleanupDeadlockTest {
             long id = 991L;
             var context = RequestProtocolTestSupport.context(config, id);
             var future = RequestProtocolTestSupport.register(registry, context);
-            BalanceContext slot = registry.requestSlot(id);
-            CountDownLatch slotHeld = new CountDownLatch(1);
+            BalanceContext requestContext = registry.findRequestContext(id);
+            CountDownLatch contextHeld = new CountDownLatch(1);
             CountDownLatch endpointHeld = new CountDownLatch(1);
             AtomicReference<Throwable> failure = new AtomicReference<>();
             LongPredicate ownership = requestId -> {
@@ -193,8 +193,8 @@ class EndpointCleanupDeadlockTest {
                 sweep = () -> assertEquals(0, endpoint.evictExpiredRequests(-1L, ownership));
                 if (kind.equals("decode-rejection")) {
                     doAnswer(invocation -> {
-                        assertFalse(Thread.holdsLock(slot), "reservation release must not hold the Slot monitor");
-                        slotHeld.countDown();
+                        assertFalse(Thread.holdsLock(requestContext), "reservation release must not hold the context monitor");
+                        contextHeld.countDown();
                         assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
                         return invocation.callRealMethod();
                     }).when(endpoint).release(reservation, DecodeEndpoint.ReleaseReason.NOT_SENT);
@@ -202,8 +202,8 @@ class EndpointCleanupDeadlockTest {
                 if (kind.equals("decode-terminal")) {
                     claim.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
                     doAnswer(invocation -> {
-                        assertFalse(Thread.holdsLock(slot), "Worker cleanup must not retain Slot");
-                        slotHeld.countDown();
+                        assertFalse(Thread.holdsLock(requestContext), "Worker cleanup must not retain Context");
+                        contextHeld.countDown();
                         assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
                         return invocation.callRealMethod();
                     }).when(endpoint).release(reservation, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
@@ -212,7 +212,7 @@ class EndpointCleanupDeadlockTest {
                     case "decode-rejection" ->
                         () -> claim.complete(org.flexlb.balance.delivery.DeliveryResult.notSent(new IllegalStateException("not sent")));
                     case "decode-terminal" ->
-                        () -> RequestProtocolTestSupport.observeDecode(registry, slot, endpoint, DecodeEndpoint.WorkerStatusFact.terminal(reservation, 0L));
+                        () -> RequestProtocolTestSupport.observeDecode(registry, requestContext, endpoint, DecodeEndpoint.WorkerStatusFact.terminal(reservation, 0L));
                     default ->
                         () -> registry.setDeliveryPrediction(claim, new org.flexlb.balance.projection.WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
                 };
@@ -223,15 +223,15 @@ class EndpointCleanupDeadlockTest {
                 endpointOperation = fixture::reserveNextBatch;
             }
             // Reproduce the production lock order, without mocking either lock or ownership check.
-            // The slot monitor is held explicitly to isolate the inversion from admission setup.
+            // The context monitor is held explicitly to isolate the inversion from admission setup.
             Thread holder = new Thread(() -> {
                 try {
                     if (kind.equals("decode-rejection") || kind.equals("decode-terminal")) {
-                        // Reservation release and cleanup can contend for the endpoint without holding Slot.
+                        // Reservation release and cleanup can contend for the endpoint without holding Context.
                         endpointOperation.run();
                     } else {
-                        synchronized (slot) {
-                            slotHeld.countDown();
+                        synchronized (requestContext) {
+                            contextHeld.countDown();
                             assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
                             endpointOperation.run();
                         }
@@ -239,15 +239,15 @@ class EndpointCleanupDeadlockTest {
                 } catch (Throwable e) {
                     failure.set(e);
                 }
-            }, "slot-waits-for-endpoint");
+            }, "context-waits-for-endpoint");
             Thread cleaner = new Thread(() -> {
                 try {
-                    assertTrue(slotHeld.await(5, TimeUnit.SECONDS));
+                    assertTrue(contextHeld.await(5, TimeUnit.SECONDS));
                     sweep.run();
                 } catch (Throwable e) {
                     failure.set(e);
                 }
-            }, "cleanup-waits-for-slot");
+            }, "cleanup-waits-for-context");
             holder.setDaemon(true);
             cleaner.setDaemon(true);
             holder.start();

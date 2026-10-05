@@ -50,7 +50,7 @@ import static org.mockito.Mockito.when;
 /**
  * Canonical request-generation ownership tests, independent of the facade.
  */
-class RequestRegistryTest {
+class RequestContextLifecycleTest {
 
     private FlexlbConfig config;
 
@@ -210,7 +210,7 @@ class RequestRegistryTest {
         lifecycle.cancelRequest(800L, 0L, CancelReason.CLIENT_CANCELLED);
         lifecycle.onGlobalControl(800L, canonical);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), canonical.join().getCode());
-        assertNull(lifecycle.requestSlot(800L));
+        assertNull(lifecycle.findRequestContext(800L));
         assertEquals(RequestState.Phase.CANCELLED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(800L, 0L).state());
         assertNull(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(801L, 0L));
     }
@@ -226,7 +226,7 @@ class RequestRegistryTest {
         assertSame(original, old.getFuture());
         CompletableFuture<Response> replacement = RequestProtocolTestSupport.register(lifecycle, context(802L));
         assertFalse(replacement.isDone());
-        assertSame(replacement, lifecycle.requestSlot(802L).getFuture());
+        assertSame(replacement, lifecycle.findRequestContext(802L).getFuture());
     }
 
     @Test
@@ -237,12 +237,12 @@ class RequestRegistryTest {
         assertFalse(canonical.isDone());
         assertTrue(duplicate.isDone());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), duplicate.join().getCode());
-        assertSame(canonical, lifecycle.requestSlot(101L).future());
+        assertSame(canonical, lifecycle.findRequestContext(101L).future());
         assertEquals(1, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
     }
 
     @Test
-    void successfulExternalCompletionBeforeDeliveryCannotStrandTheSlot() {
+    void successfulExternalCompletionBeforeDeliveryCannotStrandTheRequest() {
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(10001L));
         Response success = new Response();
         success.setSuccess(true);
@@ -257,16 +257,16 @@ class RequestRegistryTest {
         QueuedRequestScheduler queue = (QueuedRequestScheduler) lifecycle;
         org.mockito.Mockito.doNothing().when(queue).signalControl(org.mockito.ArgumentMatchers.any());
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(10003L));
-        BalanceContext slot = lifecycle.requestSlot(10003L);
+        BalanceContext requestContext = lifecycle.findRequestContext(10003L);
         AdmissionHandle admission = lifecycle.claimAdmissionHandle(10003L, future);
         assertNotNull(admission);
         assertTrue(future.cancel(false));
         assertTrue(future.isCancelled());
-        assertEquals(RequestState.Phase.CANCEL_REQUESTED, slot.snapshot().state());
+        assertEquals(RequestState.Phase.CANCEL_REQUESTED, requestContext.snapshot().state());
         admission.finish();
-        assertEquals(RequestState.Phase.CANCELLED, slot.snapshot().state());
+        assertEquals(RequestState.Phase.CANCELLED, requestContext.snapshot().state());
         assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
-        verify(queue).signalControl(slot);
+        verify(queue).signalControl(requestContext);
     }
 
     @ParameterizedTest
@@ -382,7 +382,7 @@ class RequestRegistryTest {
     @Test
     void globalCloseConsumesAnAcceptedInactivityFactBeforeShutdownFailure() throws Exception {
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(10002L));
-        BalanceContext context = lifecycle.requestSlot(10002L);
+        BalanceContext context = lifecycle.findRequestContext(10002L);
         lifecycle.enqueueInactivityDeadline(context, RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(context, "inactivityDeadline"), Long.MAX_VALUE, () -> {
         });
         lifecycle.settleGlobalQueueClose(10002L, future);
@@ -399,7 +399,7 @@ class RequestRegistryTest {
         awaitCondition(() -> org.springframework.test.util.ReflectionTestUtils.getField(future, "target") == null);
         RequestState terminal = org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(103L, 0L);
         assertEquals(RequestState.Phase.CANCELLED, terminal.state());
-        assertNull(lifecycle.requestSlot(103L));
+        assertNull(lifecycle.findRequestContext(103L));
         assertSame(terminal, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(103L, 0L));
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), RequestProtocolTestSupport.register(lifecycle, context(103L)).join().getCode());
     }
@@ -433,7 +433,7 @@ class RequestRegistryTest {
         assertEquals(RequestState.Phase.CANCEL_REQUESTED,
                 lifecycle.cancelRequest(1002L, 0L, CancelReason.CLIENT_CANCELLED).state());
         assertFalse(future.isDone());
-        verify(queue).signalControl(lifecycle.requestSlot(1002L));
+        verify(queue).signalControl(lifecycle.findRequestContext(1002L));
 
         lifecycle.onGlobalControl(1002L, future);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
@@ -445,13 +445,13 @@ class RequestRegistryTest {
     @Test
     void publicQueriesOwnTheirLockAndPrivateDecisionsStillRequireIt() {
         RequestProtocolTestSupport.register(lifecycle, context(102L));
-        BalanceContext slot = lifecycle.requestSlot(102L);
-        assertNull(slot.activeItem());
-        assertTrue(slot.isOpen());
-        assertTrue(slot.isLiveGeneration());
-        IllegalStateException failure = assertThrows(IllegalStateException.class, () -> org.springframework.test.util.ReflectionTestUtils.invokeMethod(slot, "recordCancellationLocked", CancelReason.CLIENT_CANCELLED, "client cancelled"));
-        assertTrue(failure.getMessage().contains("requires slot lock"));
-        assertEquals(RequestState.Phase.QUEUED, slot.snapshot().state());
+        BalanceContext requestContext = lifecycle.findRequestContext(102L);
+        assertNull(requestContext.activeItem());
+        assertTrue(requestContext.isOpen());
+        assertTrue(requestContext.isLiveGeneration());
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () -> org.springframework.test.util.ReflectionTestUtils.invokeMethod(requestContext, "recordCancellationLocked", CancelReason.CLIENT_CANCELLED, "client cancelled"));
+        assertTrue(failure.getMessage().contains("requires context lock"));
+        assertEquals(RequestState.Phase.QUEUED, requestContext.snapshot().state());
     }
 
     @Test
@@ -502,7 +502,7 @@ class RequestRegistryTest {
             other.onQueueOfferFailure(item, new IllegalStateException("foreign queue failure"));
             other.onQueuedItemPreempted(item, item);
             assertEquals(BalanceContext.RequestStage.READY_TO_DELIVER, item.ctx().stage());
-            assertEquals(BalanceContext.RequestStage.QUEUED, other.requestSlot(806L).stage());
+            assertEquals(BalanceContext.RequestStage.QUEUED, other.findRequestContext(806L).stage());
             assertFalse(registered.future().isDone());
             assertFalse(otherFuture.isDone());
             assertNotNull(lifecycle.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 41L, RequestProtocolTestSupport.handoff(() -> true)));
@@ -517,15 +517,15 @@ class RequestRegistryTest {
     @Test
     void failedPublicationKeepsSchedulingStageAndAllowsExactRetry() {
         Registered registered = registerItem(706L);
-        BalanceContext slot = lifecycle.requestSlot(706L);
+        BalanceContext requestContext = lifecycle.findRequestContext(706L);
         try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(706L, registered.future()); var admissionCompletion6 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(PlacementResult.Status.BLOCKED, lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> false)));
-            assertEquals("ROUTING", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(slot, "stage")));
-            assertNull(slot.activeItem());
-            assertEquals(RequestState.Phase.QUEUED, slot.snapshot().state());
+            assertEquals("ROUTING", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(requestContext, "stage")));
+            assertNull(requestContext.activeItem());
+            assertEquals(RequestState.Phase.QUEUED, requestContext.snapshot().state());
             assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> true)));
-            assertEquals("READY_TO_DELIVER", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(slot, "stage")));
+            assertEquals("READY_TO_DELIVER", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(requestContext, "stage")));
         }
     }
 
@@ -570,14 +570,14 @@ class RequestRegistryTest {
             cleanupThread.set(Thread.currentThread());
             return true;
         });
-        BalanceContext slot = lifecycle.requestSlot(708L);
+        BalanceContext requestContext = lifecycle.findRequestContext(708L);
         RequestContinuationExecutor continuations = (RequestContinuationExecutor) org.springframework.test.util.ReflectionTestUtils.getField(lifecycle, "continuations");
-        lifecycle.enqueueInactivityDeadline(slot, RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(slot, "inactivityDeadline"), Long.MAX_VALUE, () -> {
+        lifecycle.enqueueInactivityDeadline(requestContext, RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(requestContext, "inactivityDeadline"), Long.MAX_VALUE, () -> {
         });
         assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
         assertNotNull(cleanupThread.get());
         assertNotEquals(Thread.currentThread(), cleanupThread.get());
-        assertEquals(RequestState.Phase.TIMED_OUT, slot.snapshot().state());
+        assertEquals(RequestState.Phase.TIMED_OUT, requestContext.snapshot().state());
     }
 
     @Test
@@ -592,21 +592,21 @@ class RequestRegistryTest {
             assertNotNull(admission);
             assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
         }
-        BalanceContext slot = lifecycle.requestSlot(709L);
+        BalanceContext requestContext = lifecycle.findRequestContext(709L);
         RequestContinuationExecutor continuations = (RequestContinuationExecutor) org.springframework.test.util.ReflectionTestUtils.getField(lifecycle, "continuations");
-        lifecycle.enqueueInactivityDeadline(slot, RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(slot, "inactivityDeadline"), Long.MAX_VALUE, () -> {
+        lifecycle.enqueueInactivityDeadline(requestContext, RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(requestContext, "inactivityDeadline"), Long.MAX_VALUE, () -> {
         });
         try {
             assertTrue(RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle));
             lifecycle.closeOutstandingAndTerminalize();
             lifecycle.runtime.continuations().awaitIdle();
-            assertEquals("FINISHED", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(slot, "stage")));
-            assertNull(slot.activeItem());
-            assertNull(slot.item());
-            assertNull(slot.requestDeadline());
-            assertNull(slot.decisionDeadline());
-            assertNull(RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(slot, "inactivityDeadline"));
-            assertNull(lifecycle.requestSlot(709L));
+            assertEquals("FINISHED", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(requestContext, "stage")));
+            assertNull(requestContext.activeItem());
+            assertNull(requestContext.item());
+            assertNull(requestContext.requestDeadline());
+            assertNull(requestContext.decisionDeadline());
+            assertNull(RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(requestContext, "inactivityDeadline"));
+            assertNull(lifecycle.findRequestContext(709L));
             RequestState terminal = org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(709L, 0L);
             assertTrue(terminal.state().isTerminal());
             assertSame(terminal, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(709L, 0L));
@@ -709,7 +709,7 @@ class RequestRegistryTest {
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(305L));
         AdmissionHandle admission = lifecycle.claimAdmissionHandle(305L, future);
         assertNotNull(admission);
-        assertNull(lifecycle.requestSlot(305L).claimShutdownAction(() -> { throw new AssertionError("active admission cannot publish"); }));
+        assertNull(lifecycle.findRequestContext(305L).claimShutdownAction(() -> { throw new AssertionError("active admission cannot publish"); }));
         admission.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), future.get(5, TimeUnit.SECONDS).getCode());
         assertEquals(RequestState.Phase.FAILED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(305L, 0L).state());
@@ -788,9 +788,9 @@ class RequestRegistryTest {
     void publishedQueueDeadlineReleasesLocalReservationWithoutEngineCancel() {
         Registered registered = registerItem(602L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
-        BalanceContext slot = lifecycle.requestSlot(602L);
-        synchronized (slot) {
-            slot.acceptPrefillStatus(registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL, org.flexlb.balance.endpoint.PrefillState.WorkerStatusFact.active(registered.item()), System.currentTimeMillis());
+        BalanceContext requestContext = lifecycle.findRequestContext(602L);
+        synchronized (requestContext) {
+            requestContext.acceptPrefillStatus(registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL, org.flexlb.balance.endpoint.PrefillState.WorkerStatusFact.active(registered.item()), System.currentTimeMillis());
         }
         lifecycle.cancelRequest(602L, 0L, CancelReason.DEADLINE_EXCEEDED);
         assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(602L, 0L).state());
@@ -828,7 +828,7 @@ class RequestRegistryTest {
     void oldDeliveryAndPreemptionCapabilitiesCannotReachAReusedRequestId() throws Exception {
         Registered registered = registerItem(703L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
-        BalanceContext old = lifecycle.requestSlot(703L);
+        BalanceContext old = lifecycle.findRequestContext(703L);
         DeliveryClaim delivery = RequestProtocolTestSupport.claimBatchWithoutPrediction(lifecycle, registered.item(), 17L, () -> true);
         assertNotNull(delivery);
         PreemptionRegistration preemption = lifecycle.tryClaim(703L, 1L, 19L, "victim").orElseThrow();

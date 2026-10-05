@@ -462,7 +462,7 @@ class RouteDeliveryStrategyTest {
     }
 
     @Test
-    void slotCommitFailureTerminalizesExactItemAndContinuesLaterRoutes() {
+    void contextCommitFailureTerminalizesExactItemAndContinuesLaterRoutes() {
         Fixture fixture = new Fixture();
         RequestRoute first = fixture.item(1L);
         RequestRoute second = fixture.item(2L);
