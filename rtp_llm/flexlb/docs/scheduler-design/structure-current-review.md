@@ -12414,7 +12414,7 @@ Runtime、Binding 与 Scheduler 共用一次捕获的 SchedulerSettings，删除
 | GroupPlanner / RouteTimelineProjector | 纯成组规则 / 冻结队列与工作量预测 | 职责清晰。可复用游标和缓存有性能依据；按代码形状合并单请求和批量预测会改变模型。 |
 | RequestRepository / SchedulerRuntime / Timer及执行器 | 精确索引 / 调度代际和共享设施 / 注册与执行排空 | 具有不同生命周期。不能把异常 termination 当成正常 drain，也不能让某个 Scheduler 关闭共享执行器。 |
 
-Context 中 queueWaitDiagnostics 实际只读 volatile 快照，不取 queueLock；Decode updatePreemption 是 detach exact claim 前的本地资源 CAS。二者不是已经证明的锁反转，不能简单搬到锁外。publication permit 也要在结果选择的原子边界内取得。事件接口收敛须保持这些边界，并复用现有 TerminalAction、DeliveryPublication、CleanupPass 等结果；仅搬函数或新增通用事件解释层没有净简化证据。
+Context 中 getLatestQueueWaitSnapshot 实际只读 volatile 快照，不取 queueLock；Decode updatePreemption 是 detach exact claim 前的本地资源 CAS。二者不是已经证明的锁反转，不能简单搬到锁外。publication permit 也要在结果选择的原子边界内取得。事件接口收敛须保持这些边界，并复用现有 TerminalAction、DeliveryPublication、CleanupPass 等结果；仅搬函数或新增通用事件解释层没有净简化证据。
 
 结论：仍有明确的函数质量缺陷、小型冗余及 Context/Scheduler 的接口分散，所以当前不能宣布“已经改不下去了”。但本次没有证明还能等价净删数百行。后续先修可复核的函数缺陷，再以取消/交付的一条完整事件流程验证接口收敛；若只增加包装或移动代码，则保留原实现。发送退出、取消 ACK、资源终态、精确身份和等待唤醒协议继续按独立事实处理。
 

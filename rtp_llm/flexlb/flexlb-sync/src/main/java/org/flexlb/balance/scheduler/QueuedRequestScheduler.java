@@ -80,7 +80,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private final ArrayDeque<Plan> completedPlans = new ArrayDeque<>();
     private final ArrayDeque<GlobalQueueEntry> controlInbox = new ArrayDeque<>();
     /** Published by the decision thread; timeout readers never acquire the queue lock. */
-    private volatile Map<String, Object> waitDiagnostics = Map.of("cause", "waiting for placement");
+    private volatile Map<String, Object> latestQueueWaitSnapshot = Map.of("cause", "waiting for placement");
     private final ExecutorService planners;
     private final Thread decisionThread;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -122,8 +122,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         decisionThread.start();
     }
 
-    Map<String, Object> waitDiagnostics() {
-        return waitDiagnostics;
+    /** Latest queue wait cause and counters; this snapshot is not specific to the current request. */
+    Map<String, Object> getLatestQueueWaitSnapshot() {
+        return latestQueueWaitSnapshot;
     }
 
     @Override
@@ -132,16 +133,26 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     /** Enqueue without selecting an endpoint on the ingress thread. */
     @Override
     public CompletableFuture<Response> submit(BalanceContext context) {
-        if (!beginSubmission()) { return rejected(); }
+        return submit(context, () -> {});
+    }
+
+    @Override
+    public CompletableFuture<Response> submit(BalanceContext context, Runnable onRegistered) {
+        Objects.requireNonNull(onRegistered, "onRegistered");
+        if (!tryAcquireSubmissionPermit()) { return rejected(); }
         try {
             if (context != null && !context.getConfig().isQueue()) {
                 return invalidMode();
             }
             if (context != null && context.requestExpired(System.currentTimeMillis())) {
-                context.setSchedulingDiagnostics(waitDiagnostics());
+                context.setSchedulingDiagnostics(getLatestQueueWaitSnapshot());
             }
             CompletableFuture<Response> future = register(context, StrategyErrorType.RESOURCE_EXHAUSTED);
             if (!future.isDone()) {
+                // Registration has bound the owner; cancellation can now safely reach it.
+                onRegistered.run();
+            }
+            if (!future.isDone() && context.isOpen()) {
                 this.expirationTimer().attachRequestDeadline(context, context.getRequestExpiresAtMs());
                 this.expirationTimer().attachInactivityDeadline(context);
                 if (!trySubmitRegistered(context)) {
@@ -632,7 +643,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         if (diagnostics != null) {
             details.put("decision", diagnostics);
         }
-        waitDiagnostics = Collections.unmodifiableMap(details);
+        latestQueueWaitSnapshot = Collections.unmodifiableMap(details);
         return parked;
     }
 

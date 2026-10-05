@@ -44,10 +44,10 @@ class RequestSlotTerminalSettlementTest {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 42L);
         var queue = mock(QueuedRequestScheduler.class);
         var timeoutEvidence = java.util.Map.<String, Object>of("cause", "DECODE placement unavailable");
-        when(queue.waitDiagnostics()).thenReturn(timeoutEvidence);
+        when(queue.getLatestQueueWaitSnapshot()).thenReturn(timeoutEvidence);
         BalanceContext slot = context;
         AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(RequestCompletionPublisher.class), slot, mock(ExpirationTimer.class));
-        org.mockito.Mockito.doReturn(timeoutEvidence).when((QueuedRequestScheduler) requestOwner).waitDiagnostics();
+        org.mockito.Mockito.doReturn(timeoutEvidence).when((QueuedRequestScheduler) requestOwner).getLatestQueueWaitSnapshot();
         var admission = RequestProtocolTestSupport.beginAdmission(requestOwner, slot);
         assertNotNull(admission);
         admission.recordDiagnostics(java.util.Map.of("cause", "earlier placement"));

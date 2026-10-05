@@ -167,7 +167,10 @@ void GenerateContext::stopStream() {
             RTP_LLM_LOG_WARNING("stopStream timeout (%ld ms) waiting for Engine Loop for request [%d]",
                                 kStopStreamWaitTimeoutMs,
                                 stream_->generateInput()->request_id);
+            // Keep runtime ownership visible; a timeout is not a terminal resource proof.
+            return;
         }
+        stream_->releaseResource();
         // RuntimeMeta snapshots the stream's terminal status during dequeue.
         // Capture only after reportError/finishOrCancel have committed it so
         // FlexLB observes the real cancellation or context error code.

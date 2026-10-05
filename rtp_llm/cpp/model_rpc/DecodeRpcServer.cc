@@ -726,6 +726,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG(
         "decode init stream[%s]: %s", generate_stream->streamLogTag().c_str(), generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
+    decode_context.stream_enqueued = true;
     RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =
         pollStreamOutput(decode_context.server_context,
@@ -733,7 +734,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                          dynamic_cast<grpc::internal::WriterInterface<GenerateOutputsPB>*>(grpc_stream),
                          generate_stream);
     decode_context.time_info.updateGenerateEndTime();
-    meta_->dequeue(decode_context.request_id, decode_context.getStream());
+    decode_context.stopStream();
 
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
 }
@@ -1580,19 +1581,24 @@ GroupBlockIds DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB&
     return block_ids_by_group;
 }
 
-// Report a terminal early failure to FlexLB via finishedTaskInfo so the scheduler can clean up its
-// inflight entry immediately instead of waiting for the 300s TTL eviction. finishTask() removes the
-// running entry first, so the fallback dequeue in ~GenerateContext() becomes a no-op afterwards and
-// no duplicate report is produced. NOTE: never call this from functions driven by EXECUTE_WITH_RETRY
-// (e.g. allocateResource), only from final failure points after retries are exhausted.
+// Publish terminal evidence only after the exact stream's resources have been released.
+// Call at final failure points, after allocation retries have ended.
 void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_context,
                                             int64_t                error_code,
                                             const std::string&     error_message) {
     if (decode_context.request_id == 0 || decode_context.early_finish_reported) {
         return;
     }
+    auto& stream = decode_context.getStream();
+    if (stream) {
+        stream->reportError(static_cast<ErrorCode>(error_code), error_message);
+        decode_context.finishUnscheduledStream();
+        if (!stream->finishOrCancel(2'000, "decode terminal cleanup")) {
+            return;
+        }
+        stream->releaseResource();
+    }
     decode_context.early_finish_reported = true;
-    auto& stream                         = decode_context.getStream();
     meta_->finishTask(decode_context.request_id,
                       stream ? stream->inputLength() : 0,
                       /*prefix_length=*/0,

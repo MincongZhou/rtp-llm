@@ -272,6 +272,44 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
                                       "read-failure path was not exercised in any attempt";
 }
 
+TEST(RpcWriterCancellationTest, OrdinaryPrefillCancelPropagatesBeforeDecodeAllocation) {
+    for (auto reason : {REQUEST_CANCEL_REASON_CLIENT_CANCELLED, REQUEST_CANCEL_REASON_DEADLINE_EXCEEDED,
+                        REQUEST_CANCEL_REASON_SHUTDOWN}) {
+        DecodeFirstReadService service;
+        int listen_port = 0;
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &listen_port);
+        builder.RegisterService(&service);
+        auto server = builder.BuildAndStart();
+        ASSERT_NE(server, nullptr);
+        auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port),
+                                           grpc::InsecureChannelCredentials());
+        auto stub = RpcService::NewStub(channel);
+        GenerateInputPB request;
+        request.set_request_id(49);
+        RPCContext rpc_context{&request, nullptr};
+        RemoteServerResource resource;
+        kmonitor::MetricsReporterPtr metrics_reporter;
+        PrefillGenerateContext context(&resource, rpc_context, 0, nullptr, metrics_reporter, nullptr);
+        context.client_context = std::make_shared<grpc::ClientContext>();
+        context.client_context->set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+        context.client_stream = stub->RemoteGenerate(context.client_context.get());
+        EXPECT_TRUE(service.waitUntilEntered(std::chrono::seconds(5)));
+
+        EXPECT_EQ(context.requestCancellation(reason), CancellationRequestResult::INSTALLED);
+        EXPECT_TRUE(context.finalizeCancellation());
+        // Observe the actual server exit separately: client Finish alone is not cleanup evidence.
+        const auto server_status = service.waitUntilReturned(std::chrono::seconds(5));
+        server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        server->Wait();
+        ASSERT_TRUE(server_status.has_value());
+        EXPECT_EQ(server_status->error_code(), grpc::StatusCode::CANCELLED);
+        EXPECT_EQ(service.decode_server_.onflight_requests_.load(), 0u);
+        EXPECT_EQ(context.error_info.code(), reason == REQUEST_CANCEL_REASON_DEADLINE_EXCEEDED ?
+                                                ErrorCode::GENERATE_TIMEOUT : ErrorCode::CANCELLED);
+    }
+}
+
 TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
     PrefillRpcServer server;
     RejectingWriter  writer;
@@ -431,8 +469,8 @@ TEST(RpcWriterCancellationTest, PriorityPreemptionOverridesOkAndCancelledTranspo
             context.pd_client_span_guard = std::make_unique<telemetry::RequestSpanGuard>(
                 telemetry::TelemetryRuntime::tracer()->StartSpan("priority_preempt"));
 
-            EXPECT_EQ(context.requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
-            EXPECT_TRUE(context.finalizePriorityPreemption());
+            EXPECT_EQ(context.requestCancellation(REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED), CancellationRequestResult::INSTALLED);
+            EXPECT_TRUE(context.finalizeCancellation());
         }
         ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
         expectClientSpanError(span_data, "PRIORITY_PREEMPTED", expected_rpc_status);

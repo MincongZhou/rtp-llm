@@ -36,7 +36,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
 
     @Override
     public CompletableFuture<Response> submit(BalanceContext context) {
-        if (!beginSubmission()) { return rejected(); }
+        if (!tryAcquireSubmissionPermit()) { return rejected(); }
         try {
             if (context != null && !context.getConfig().isDirect()) {
                 return invalidMode();

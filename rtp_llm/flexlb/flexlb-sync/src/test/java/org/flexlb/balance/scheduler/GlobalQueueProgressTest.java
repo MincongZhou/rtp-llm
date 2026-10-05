@@ -96,7 +96,7 @@ class GlobalQueueProgressTest {
                     .when(f.router).select(any(), nullable(String.class));
             f.submit(994L, "a");
             QueuedRequestScheduler queue = (QueuedRequestScheduler) f.scheduler;
-            awaitCondition(() -> diagnostics.equals(queue.waitDiagnostics().get("decision")));
+            awaitCondition(() -> diagnostics.equals(queue.getLatestQueueWaitSnapshot().get("decision")));
             verify(f.mutations.get(994L)).finish();
         }
     }

@@ -249,7 +249,7 @@ class WorkerBatcherQueueTest {
                             assertTrue(runtime.offer(queued));
                             org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
                                     RequestProtocolTestSupport.awaitCondition(() ->
-                                            runtime.waitDiagnostics().containsValue("Route commit in progress")));
+                                            runtime.getLatestQueueWaitSnapshot().containsValue("Route commit in progress")));
                             return true;
                         })));
             }

@@ -18,9 +18,9 @@ public final class RequestRepository {
     enum RegistrationResult { REGISTERED, DUPLICATE_ID, CONTEXT_BOUND, CLOSED }
     public record TerminalRecord(RequestState state, AbstractRequestScheduler owner) { }
 
-    RegistrationResult register(BalanceContext context, AbstractRequestScheduler owner, BalanceContext.RequestFuture response) {
+    RegistrationResult register(BalanceContext context, AbstractRequestScheduler scheduler, BalanceContext.RequestFuture response) {
         java.util.Objects.requireNonNull(context, "context");
-        java.util.Objects.requireNonNull(owner, "owner");
+        java.util.Objects.requireNonNull(scheduler, "scheduler");
         java.util.Objects.requireNonNull(response, "response");
         synchronized (registrationLock) {
             if (closed) { return RegistrationResult.CLOSED; }
@@ -31,13 +31,13 @@ public final class RequestRepository {
                 if (context.scheduler() != null || context.getFuture() instanceof BalanceContext.RequestFuture) {
                     return RegistrationResult.CONTEXT_BOUND;
                 }
-                owner.retain();
+                scheduler.retain();
                 try {
                     context.activate(response);
-                    context.attachScheduler(owner);
+                    context.attachScheduler(scheduler);
                     activeRequests.put(context.getRequestId(), context);
                 } catch (RuntimeException | Error failure) {
-                    owner.release();
+                    scheduler.release();
                     throw failure;
                 }
             }

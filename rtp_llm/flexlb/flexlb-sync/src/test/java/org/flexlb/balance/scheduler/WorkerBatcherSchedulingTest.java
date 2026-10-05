@@ -101,7 +101,7 @@ class WorkerBatcherSchedulingTest {
             })));
             try {
                 await(published);
-                RequestProtocolTestSupport.awaitCondition(() -> runtime.waitDiagnostics().containsValue("Route commit in progress"));
+                RequestProtocolTestSupport.awaitCondition(() -> runtime.getLatestQueueWaitSnapshot().containsValue("Route commit in progress"));
                 assertEquals(BalanceContext.RequestStage.ROUTING, context.stage());
                 assertEquals(0, delivery.attempts.get());
                 // The wait is unbounded even when a request deadline elapses during publication.
@@ -139,7 +139,7 @@ class WorkerBatcherSchedulingTest {
         await(delivery.firstAttempt);
         await(delivery.firstCapacity.subscribed);
 
-        var firstWait = runtime.waitDiagnostics();
+        var firstWait = runtime.getLatestQueueWaitSnapshot();
         assertEquals(1, firstWait.get("queueDepth"));
         assertEquals(Map.of(50, 1), firstWait.get("priorityCounts"));
         assertThrows(UnsupportedOperationException.class,
@@ -156,8 +156,8 @@ class WorkerBatcherSchedulingTest {
         delivery.firstCapacity.release();
         await(delivery.secondAttempt);
         await(delivery.parkedCapacity.subscribed);
-        assertEquals(2, runtime.waitDiagnostics().get("queueDepth"));
-        assertEquals(Map.of(50, 1, 30, 1), runtime.waitDiagnostics().get("priorityCounts"));
+        assertEquals(2, runtime.getLatestQueueWaitSnapshot().get("queueDepth"));
+        assertEquals(Map.of(50, 1, 30, 1), runtime.getLatestQueueWaitSnapshot().get("priorityCounts"));
         assertEquals(1, firstWait.get("queueDepth"), "later decisions must not mutate an earlier snapshot");
         assertTrue(delivery.firstCapacity.listeners.isEmpty());
         assertEquals(1, delivery.parkedCapacity.listeners.size());

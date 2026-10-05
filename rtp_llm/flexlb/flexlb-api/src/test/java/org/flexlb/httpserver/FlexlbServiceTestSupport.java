@@ -15,6 +15,15 @@ final class FlexlbServiceTestSupport {
         if (org.mockito.Mockito.mockingDetails(leadership).isMock()) {
             org.mockito.Mockito.doCallRealMethod().when(leadership).shouldForwardToMaster();
         }
+        if (org.mockito.Mockito.mockingDetails(scheduler).isMock()
+                && !(scheduler instanceof AbstractRequestScheduler)) {
+            org.mockito.Mockito.lenient().doAnswer(call -> {
+                var result = scheduler.submit(call.getArgument(0, BalanceContext.class));
+                call.getArgument(1, Runnable.class).run();
+                return result;
+            }).when(scheduler).submit(org.mockito.ArgumentMatchers.any(BalanceContext.class),
+                    org.mockito.ArgumentMatchers.any(Runnable.class));
+        }
         return new FlexlbServiceImpl(
                 scheduler, config.loadBalanceConfig(), requests, leadership, health, forwarder, batches, latency, reporter);
     }

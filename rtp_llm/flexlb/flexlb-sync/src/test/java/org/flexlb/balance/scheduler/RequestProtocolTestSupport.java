@@ -145,7 +145,7 @@ final class RequestProtocolTestSupport {
                 .defaultAnswer(invocation -> {
                     String name = invocation.getMethod().getName();
                     if (name.equals("expirationTimer")) { return timer; }
-                    if (name.equals("beginSubmission") || name.equals("retainIfActive")) { return true; }
+                    if (name.equals("tryAcquireSubmissionPermit") || name.equals("retainIfActive")) { return true; }
                     if (invocation.getMethod().getDeclaringClass() == QueuedRequestScheduler.class) {
                         return invocation.callRealMethod();
                     }

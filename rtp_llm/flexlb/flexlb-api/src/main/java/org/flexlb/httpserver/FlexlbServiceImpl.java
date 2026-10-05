@@ -282,25 +282,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
             AtomicBoolean completionClaimed,
             ScheduleOrigin origin) {
-        CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeFuture;
-        try {
-            // route() registers the scheduler owner synchronously. Install the
-            // cancellation listener only after that owner exists, so an
-            // already-cancelled Context cannot race ahead of registration.
-            routeFuture = routeLocally(context);
-        } catch (Exception error) {
-            Logger.warn("FlexlbService.schedule local route error, request_id={}",
-                    requestId, error);
-            completeOnce(
-                    requestId,
-                    context,
-                    buildErrorResponse(error),
-                    responseObserver,
-                    origin,
-                    completionClaimed,
-                    "");
-            return;
-        }
         Context inboundContext = Context.current();
         Context.CancellationListener cancellationListener = ignored -> {
             if (!completionClaimed.compareAndSet(false, true)) {
@@ -308,7 +289,18 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
             cancelUndeliveredRoute(context);
         };
-        inboundContext.addListener(cancellationListener, Runnable::run);
+        CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeFuture;
+        try {
+            // QUEUE installs cancellation after registration and before enqueueing; DIRECT submits immediately.
+            routeFuture = routeLocally(context,
+                    () -> inboundContext.addListener(cancellationListener, Runnable::run));
+        } catch (Exception error) {
+            inboundContext.removeListener(cancellationListener);
+            Logger.warn("FlexlbService.schedule local route error, request_id={}", requestId, error);
+            completeOnce(requestId, context, buildErrorResponse(error),
+                    responseObserver, origin, completionClaimed, "");
+            return;
+        }
         routeFuture.whenComplete((response, routeError) -> {
             try {
                 if (routeError != null) {
@@ -589,8 +581,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 .withCause(error);
     }
 
-    private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
-        return scheduler.submit(ctx).thenApply(response -> {
+    private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(
+            BalanceContext ctx, Runnable onRegistered) {
+        return scheduler.submit(ctx, onRegistered).thenApply(response -> {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                     toProtoResponse(response).toBuilder();
             RequestState lifecycle = requestState.getRequestState(ctx.getRequestId(), 0);

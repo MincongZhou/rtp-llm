@@ -99,7 +99,7 @@ class RequestSchedulerContractTest {
                     org.springframework.test.util.ReflectionTestUtils.getField(owner, "planners");
             var decision = (Thread) org.springframework.test.util.ReflectionTestUtils.getField(owner, "decisionThread");
             var failure = new IllegalStateException("delivery cleanup failed");
-            assertTrue(owner.beginSubmission());
+            assertTrue(owner.tryAcquireSubmissionPermit());
             owner.recordFailure(failure);
             owner.stopAccepting();
             assertSame(failure, assertThrows(ExecutionException.class,

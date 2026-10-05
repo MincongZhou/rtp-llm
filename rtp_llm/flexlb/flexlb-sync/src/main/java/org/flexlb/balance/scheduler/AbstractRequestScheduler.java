@@ -84,7 +84,12 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     private boolean drainScheduled;
 
 
-    protected final boolean beginSubmission() {
+    /**
+     * Accept one submission and retain a shutdown obligation atomically.
+     * The caller must release it in finally, including when registration fails.
+     * This guards graceful drain; it does not reserve scheduling capacity.
+     */
+    protected final boolean tryAcquireSubmissionPermit() {
         synchronized (lifecycle) {
             if (!accepting) { return false; }
             obligations++;

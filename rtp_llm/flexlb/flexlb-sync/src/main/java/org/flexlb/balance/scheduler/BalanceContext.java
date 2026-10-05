@@ -450,7 +450,7 @@ public class BalanceContext {
 
     boolean isOpen() {
         synchronized (this) {
-            return this.stage.isActive() && this.cancellationReason == null && !this.future().isDone() && this.finalOutcome == null;
+            return this.stage.isActive() && this.cancellationReason == null && !this.future.isDone() && this.finalOutcome == null;
         }
     }
 
@@ -1719,9 +1719,9 @@ public class BalanceContext {
             if (this.deliveryClaimKind() != DeliveryClaimKind.NONE) {
                 diagnostics = Map.of("cause", message);
             } else if (item != null && item.prefillEp() != null) {
-                diagnostics = item.prefillEp().queueWaitDiagnostics();
+                diagnostics = item.prefillEp().getLatestQueueWaitSnapshot();
             } else {
-                diagnostics = this.queueOwner().waitDiagnostics();
+                diagnostics = this.queueOwner().getLatestQueueWaitSnapshot();
             }
         }
         if (reason == CancelReason.DEADLINE_EXCEEDED && queueOwner() != null) {

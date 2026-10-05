@@ -94,7 +94,7 @@ class DefaultRouterTest {
                 .useConstructor(mock(DefaultRouter.class), runtime, config)
                 .defaultAnswer(invocation -> {
                     if (invocation.getMethod().getDeclaringClass() == DirectRequestScheduler.class) { return invocation.callRealMethod(); }
-                    if (invocation.getMethod().getName().equals("beginSubmission")) { return true; }
+                    if (invocation.getMethod().getName().equals("tryAcquireSubmissionPermit")) { return true; }
                     if (invocation.getMethod().getName().equals("expirationTimer")) { return mock(ExpirationTimer.class); }
                     return org.mockito.Answers.RETURNS_DEFAULTS.answer(invocation);
                 }));

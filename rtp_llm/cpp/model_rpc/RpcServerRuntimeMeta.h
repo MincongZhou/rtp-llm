@@ -95,7 +95,7 @@ public:
     // WorkerStatus control overlay for the original Prefill. This does not
     // mutate running_streams_, so accepting Cancel cannot inflate engine load
     // or resource accounting.
-    void markPriorityPreemptionCanceling(const TaskIdentity& identity) {
+    void markRequestCanceling(const TaskIdentity& identity) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         const auto                          request_id = identity.request_id;
         if (priority_preemption_overlays_.find(request_id) != priority_preemption_overlays_.end()) {
@@ -123,11 +123,12 @@ public:
         priority_preemption_overlays_.emplace(request_id, std::move(task_info));
     }
 
-    // Publish the single authoritative completion delta for priority Cancel.
+    // Publish the single authoritative completion delta for Prefill Cancel.
     // The caller must invoke this only after the Prefill request execution has
-    // quiesced and its local/downstream cleanup path has returned. `stream`
+    // quiesced and its local cleanup and downstream cancellation path have returned.
+    // This Prefill report does not replace Decode resource-release evidence. `stream`
     // must be the registered stream, or null when no local stream was enqueued.
-    bool markPriorityPreemptionCanceled(int64_t                  request_id,
+    bool markRequestCanceled(int64_t                  request_id,
                                         int64_t                  error_code,
                                         const std::string&       error_message,
                                         const GenerateStreamPtr& stream) {

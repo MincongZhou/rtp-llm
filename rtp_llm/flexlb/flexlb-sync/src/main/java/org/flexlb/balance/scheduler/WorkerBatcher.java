@@ -50,7 +50,7 @@ public final class WorkerBatcher {
         private final long capturedAtMs;
         private final PrefillState.QueueCounters counters;
         private final DecodeRoutingView decode;
-        private volatile Map<String, Object> diagnostics;
+        private volatile Map<String, Object> snapshotValues;
 
         private QueueWaitSnapshot(String endpoint, String cause, long capturedAtMs,
                                   PrefillState.QueueCounters counters, DecodeRoutingView decode) {
@@ -61,8 +61,8 @@ public final class WorkerBatcher {
             this.decode = decode;
         }
 
-        private Map<String, Object> diagnostics() {
-            Map<String, Object> cached = diagnostics;
+        private Map<String, Object> asMap() {
+            Map<String, Object> cached = snapshotValues;
             if (cached != null) { return cached; }
             Map<Integer, Integer> priorityCounts = new HashMap<>();
             int depth = 0;
@@ -86,7 +86,7 @@ public final class WorkerBatcher {
                         "kvTotal", decode.totalKv(), "kvAvailable", decode.placementUsage().hardKvAvailable()));
             }
             cached = Collections.unmodifiableMap(details);
-            diagnostics = cached;
+            snapshotValues = cached;
             return cached;
         }
     }
@@ -160,7 +160,7 @@ public final class WorkerBatcher {
     public static final Comparator<RequestRoute> FIFO_QUEUE_ORDER =
             Comparator.comparingLong(RequestRoute::enqueueSeq);
 
-    private static final Map<String, Object> INITIAL_WAIT_DIAGNOSTICS =
+    private static final Map<String, Object> INITIAL_QUEUE_WAIT_SNAPSHOT =
             Map.of("cause", "waiting for Prefill decision");
 
     private final String key;
@@ -200,7 +200,7 @@ public final class WorkerBatcher {
     private BatcherCycleResult capacityBlockedHead;
 
     /** Last waiting decision; timeout readers never acquire queueLock. */
-    private volatile QueueWaitSnapshot waitSnapshot;
+    private volatile QueueWaitSnapshot latestQueueWaitSnapshot;
 
     public WorkerBatcher(
             String key,
@@ -514,16 +514,17 @@ public final class WorkerBatcher {
         }
     }
 
-    public Map<String, Object> waitDiagnostics() {
-        QueueWaitSnapshot snapshot = waitSnapshot;
-        return snapshot == null ? INITIAL_WAIT_DIAGNOSTICS : snapshot.diagnostics();
+    /** Read the last captured queue wait state without waiting or acquiring the queue lock. */
+    public Map<String, Object> getLatestQueueWaitSnapshot() {
+        QueueWaitSnapshot snapshot = latestQueueWaitSnapshot;
+        return snapshot == null ? INITIAL_QUEUE_WAIT_SNAPSHOT : snapshot.asMap();
     }
 
     /** Capture fixed-size counters without formatting the PV record on the scheduling loop. */
     private void recordQueueWait(RequestRoute head, String reason) {
         PrefillState.QueueCounters counters = prefillState.captureQueueCounters();
         DecodeRoutingView decode = head.decodeEp() == null ? null : head.decodeEp().routingView();
-        waitSnapshot = new QueueWaitSnapshot(key, reason, now(), counters, decode);
+        latestQueueWaitSnapshot = new QueueWaitSnapshot(key, reason, now(), counters, decode);
     }
 
     // ==================== Queue ownership and projection ====================

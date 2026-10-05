@@ -286,8 +286,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /**
      * Read the last scheduling decision without traversing or locking the queue.
      */
-    public Map<String, Object> queueWaitDiagnostics() {
-        return runtime == null ? Map.of("cause", "waiting for Prefill decision") : runtime.waitDiagnostics();
+    /** Latest wait state from this endpoint's worker batcher; not a per-request failure cause. */
+    public Map<String, Object> getLatestQueueWaitSnapshot() {
+        return runtime == null ? Map.of("cause", "waiting for Prefill decision") : runtime.getLatestQueueWaitSnapshot();
     }
 
     public int queuedRequestCount() {

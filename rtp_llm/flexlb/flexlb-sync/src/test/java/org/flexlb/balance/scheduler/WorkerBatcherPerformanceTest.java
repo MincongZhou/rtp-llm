@@ -41,7 +41,7 @@ class WorkerBatcherPerformanceTest {
 
     @Test
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    void waitDiagnosticsCaptureDoesNotScaleWithRequestCount() throws Throwable {
+    void queueWaitSnapshotCaptureDoesNotScaleWithRequestCount() throws Throwable {
         var capture = MethodHandles.privateLookupIn(WorkerBatcher.class, MethodHandles.lookup())
                 .findVirtual(WorkerBatcher.class, "recordQueueWait",
                         MethodType.methodType(void.class, RequestRoute.class, String.class));
@@ -67,7 +67,7 @@ class WorkerBatcherPerformanceTest {
                 long nsPerCapture = (System.nanoTime() - started) / operations;
                 long bytesPerCapture = allocationBean == null ? 0
                         : (allocationBean.getThreadAllocatedBytes(threadId) - before) / operations;
-                assertEquals(depth, runtime.waitDiagnostics().get("queueDepth"));
+                assertEquals(depth, runtime.getLatestQueueWaitSnapshot().get("queueDepth"));
                 System.out.printf("FlexLB wait capture: depth=%d ns_per_capture=%d bytes_per_capture=%d%n",
                         depth, nsPerCapture, bytesPerCapture);
                 if (depth == 128) { shallowAllocation = bytesPerCapture; }
@@ -96,12 +96,12 @@ class WorkerBatcherPerformanceTest {
             try {
                 long checksum = 0;
                 for (int warmup = 0; warmup < operations; warmup++) {
-                    checksum += runtime.waitDiagnostics().size();
+                    checksum += runtime.getLatestQueueWaitSnapshot().size();
                 }
                 long allocatedBefore = allocationBean == null ? 0 : allocationBean.getThreadAllocatedBytes(threadId);
                 long started = System.nanoTime();
                 for (int operation = 0; operation < operations; operation++) {
-                    checksum += runtime.waitDiagnostics().size();
+                    checksum += runtime.getLatestQueueWaitSnapshot().size();
                 }
                 long nsPerRead = (System.nanoTime() - started) / operations;
                 long bytesPerRead = allocationBean == null ? 0

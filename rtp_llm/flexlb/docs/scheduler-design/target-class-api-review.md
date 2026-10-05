@@ -46,7 +46,7 @@ classDiagram
         -long obligations
         -Throwable failure
         -CompletableFuture terminated
-        #beginSubmission() boolean
+        #tryAcquireSubmissionPermit() boolean
         #register(BalanceContext request) CompletableFuture
         ~onDeliveryResult(DeliveryClaim exact, DeliveryResult result) void
         ~onWorkerFact(WorkerFact fact) void
@@ -139,7 +139,7 @@ classDiagram
 
 `SchedulerBinding` 是不可变值 `(scheduler, settings)`，不是新流程类。API 在入口取得一次 binding，构造请求和本地提交都使用该绑定。不能先读一份配置，异步转发后再取另一个调度器提交。
 
-`SchedulerSettings` 是请求及调度所需的冻结配置值；不能只用 record 包装可变 FlexlbConfig 引用。切换时，已进入 beginSubmission 的提交继续由旧实例完成；尚未接管、原实例已停收的提交明确拒绝，不自动换实例重放。
+`SchedulerSettings` 是请求及调度所需的冻结配置值；不能只用 record 包装可变 FlexlbConfig 引用。切换时，已进入 tryAcquireSubmissionPermit 的提交继续由旧实例完成；尚未接管、原实例已停收的提交明确拒绝，不自动换实例重放。
 
 本轮支持 DIRECT/QUEUE 模式切换。`QueueExecutionSettings` 只包含共享 WorkerBatcher 实际使用的排序、组批、交付容量和 Prefill 队列抢占配置。Runtime 在发布 QUEUE 实例前校验其与已启用队列执行设施的配置兼容；不兼容时拒绝切换，保留旧实例。首次启用的共享队列配置一旦发布，后续实例和新发现的 Endpoint 都使用它。
 
