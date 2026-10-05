@@ -110,7 +110,7 @@ class RequestAdmissionExpirationRaceTest {
                 assertNotNull(admission);
                 assertTrue((registry.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
                 if (clientCancellation) {
-                    registry.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+                    registry.cancel(requestId, 0L, CancelReason.CLIENT_CANCELLED);
                 }
                 registry.failDeliveryPreparation(item, new IllegalStateException("preparation failed"));
                 if (clientCancellation) {

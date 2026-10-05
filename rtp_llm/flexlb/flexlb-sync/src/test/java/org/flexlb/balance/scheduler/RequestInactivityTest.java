@@ -193,7 +193,7 @@ class RequestInactivityTest {
     void anEarlierClientCancellationDoesNotDisableInactivityExpiration() throws Exception {
         acknowledgeDelivery();
         assertEquals(RequestState.Phase.CANCEL_REQUESTED,
-                registry.cancelRequest(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED).state());
+                registry.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED).state());
         assertEquals(1, registry.requests.liveRequestCount());
         assertFalse(claim.cleanupComplete());
 

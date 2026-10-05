@@ -452,7 +452,7 @@ class RequestLifetimeTest {
             }
             assertNotNull(timer.attachInactivityDeadline(fixture.requestContext));
             verify(registry, timeout(1000L).times(1)).enqueueInactivityDeadline(any(), any(), anyLong(), any());
-            verify(registry, never()).cancelRequest(anyLong(), anyLong(), any());
+            verify(registry, never()).cancel(anyLong(), anyLong(), any());
         }
     }
 

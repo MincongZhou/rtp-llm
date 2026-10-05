@@ -125,7 +125,7 @@ class RequestCompletionPublicationRaceTest {
             executor.shutdown();
             CompletableFuture<Thread> callbackThread = future.thenApply(ignored -> Thread.currentThread());
 
-            registry.cancelRequest(503L, 0L, CancelReason.CLIENT_CANCELLED);
+            registry.cancel(503L, 0L, CancelReason.CLIENT_CANCELLED);
             // Waiting on the source future can help run its dependent callback on this thread.
             assertFalse(callbackThread.get(2L, TimeUnit.SECONDS) == Thread.currentThread());
             assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
@@ -174,14 +174,14 @@ class RequestCompletionPublicationRaceTest {
                         if (last) {
                             publisher.close();
                         } else {
-                            scheduler.cancelRequest(requestId + 1, 0L, CancelReason.CLIENT_CANCELLED);
+                            scheduler.cancel(requestId + 1, 0L, CancelReason.CLIENT_CANCELLED);
                         }
                     } finally {
                         depth.decrementAndGet();
                     }
                 }));
             }
-            scheduler.cancelRequest(10_000L, 0L, CancelReason.CLIENT_CANCELLED);
+            scheduler.cancel(10_000L, 0L, CancelReason.CLIENT_CANCELLED);
             CompletableFuture.allOf(callbacks.toArray(CompletableFuture[]::new)).get(10L, TimeUnit.SECONDS);
             publisher.close();
             assertEquals(count, completed.get());
@@ -346,7 +346,7 @@ class RequestCompletionPublicationRaceTest {
             // A second response proves the obsolete ACK has run. The terminal response
             // may finish while cleanup is pending, but cannot archive the live identity.
             var barrier = registry.register(RequestProtocolTestSupport.context(config, 502L), StrategyErrorType.BATCH_SLO_EXPIRED);
-            registry.cancelRequest(502L, 0L, CancelReason.CLIENT_CANCELLED);
+            registry.cancel(502L, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(barrier.get(2L, TimeUnit.SECONDS).isSuccess());
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess(),
                     "an obsolete success permit cannot win after TTL claims cleanup");

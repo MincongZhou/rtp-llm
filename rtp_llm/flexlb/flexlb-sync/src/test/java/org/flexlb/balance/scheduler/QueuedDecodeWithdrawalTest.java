@@ -251,7 +251,7 @@ class QueuedDecodeWithdrawalTest {
         doAnswer(call -> {
             assertFalse(RequestProtocolTestSupport.prepareMember(registry, item),
                     "withdrawal must fence batch preparation before releasing the old route");
-            registry.cancelRequest(4, 0, reason);
+            registry.cancel(4, 0, reason);
             return true;
         }).when(item.prefillEp()).removeQueued(eq(item), anyString());
         assertTrue(replace(item));
@@ -345,7 +345,7 @@ class QueuedDecodeWithdrawalTest {
             try {
                 assertTrue(removing.await(5, TimeUnit.SECONDS));
                 assertFalse(RequestProtocolTestSupport.prepareMember(registry, item));
-                registry.cancelRequest(9, 0, CancelReason.CLIENT_CANCELLED);
+                registry.cancel(9, 0, CancelReason.CLIENT_CANCELLED);
                 assertFalse(item.future().isDone(), "cancellation waits for withdrawal ownership to close");
             } finally {
                 resume.countDown();

@@ -389,7 +389,7 @@ public class CostBasedPrefillStrategy {
                             balanceContext.getRequestId(),
                             balanceContext.getPriority(),
                             planningAtMs,
-                            // RequestRepository owns terminal deadlines.
+                            // ExpirationTimer drives request deadlines through the owning scheduler.
                             // Selection scores endpoint work only; an expiry race
                             // must not be reported as a capacity blocker.
                             Long.MAX_VALUE,

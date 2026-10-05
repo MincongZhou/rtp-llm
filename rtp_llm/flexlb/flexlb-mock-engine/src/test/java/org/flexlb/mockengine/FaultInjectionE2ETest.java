@@ -308,7 +308,7 @@ class FaultInjectionE2ETest {
 
             AutoTpmE2EHarness.await(prefill::isStopped, 2_000,
                     "the first enqueue must trigger the configured engine crash");
-            AutoTpmE2EHarness.await(() -> org.flexlb.balance.scheduler.SchedulerTestSupport.repository(h.requests).liveRequestCount() == 1
+            AutoTpmE2EHarness.await(() -> h.requests.liveRequestCount() == 1
                             && prefillEndpoint.ownershipStats().batchCount() == 1
                             && prefillEndpoint.ownershipStats().locallyOwnedRequests() == 1,
                     2_000, "missing ACK must retain scheduler and Prefill accounting");

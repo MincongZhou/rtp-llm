@@ -91,7 +91,7 @@ class GenerateInputPreparationTest {
             if (deadline) {
                 clockAdvanced.set(true);
             } else {
-                registry.cancelRequest(17001L, 0L, CancelReason.CLIENT_CANCELLED);
+                registry.cancel(17001L, 0L, CancelReason.CLIENT_CANCELLED);
                 assertEquals(8504, future.get(2, TimeUnit.SECONDS).getCode(),
                         "input preparation owns no admission handle and cannot hold cancellation open");
             }

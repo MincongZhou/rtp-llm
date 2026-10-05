@@ -151,7 +151,7 @@ public class EvictionManager {
     }
 
     /**
-     * Observability only: the registry owns non-terminal withdrawal and requeue.
+     * Observability only: the request's scheduler completes withdrawal and requeue.
      */
     private void reportRequeuedVictim(BalanceContext ctx, DecodeRequestView victim,
                                      DecodeEvictionProposal proposal) {

@@ -4,7 +4,6 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;

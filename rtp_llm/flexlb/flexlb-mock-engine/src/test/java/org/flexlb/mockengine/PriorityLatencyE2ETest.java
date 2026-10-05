@@ -68,10 +68,10 @@ class PriorityLatencyE2ETest {
             // Wait for the actual held endpoint queue, not an intermediate aggregate of 150.
             AutoTpmE2EHarness.await(
                     () -> h.prefillEndpoint(0).queuedRequestCount() == total
-                            && org.flexlb.balance.scheduler.SchedulerTestSupport.repository(h.requests).getQueuedRequestCount() == total,
+                            && h.requests.getQueuedRequestCount() == total,
                     10_000,
                     "all requests must reach the endpoint priority queue before release");
-            assertEquals(total, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(h.requests).getQueuedRequestCount(),
+            assertEquals(total, h.requests.getQueuedRequestCount(),
                     "all requests must be committed into the endpoint priority queue before release");
 
             // Release the transport capacity without changing frozen queue settings.
@@ -91,7 +91,7 @@ class PriorityLatencyE2ETest {
                         "no eviction switches on — every request must succeed, got "
                                 + response.getCode() + ": " + response.getErrorMessage()
                                 + ", arrivals=" + h.engineArrivalOrder.size()
-                                + ", queued=" + org.flexlb.balance.scheduler.SchedulerTestSupport.repository(h.requests).getQueuedRequestCount()
+                                + ", queued=" + h.requests.getQueuedRequestCount()
                                 + ", prefillWork=" + h.prefillEndpoint(0).captureRouteProjectionInputs().work()
                                 + ", decode=" + h.decodeEndpoint(0).resourceSnapshot());
             }

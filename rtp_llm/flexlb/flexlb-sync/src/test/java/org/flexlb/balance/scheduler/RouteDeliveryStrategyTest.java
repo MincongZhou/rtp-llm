@@ -119,21 +119,21 @@ class RouteDeliveryStrategyTest {
             Throwable failure = assertThrows(NullPointerException.class,
                     () -> transaction.handoff("invalid-work", 0, null));
             if (cleanupFails) {
-                doThrow(cleanup).when(fixture.slots.requests()).failDeliveryPreparation(first, failure);
+                doThrow(cleanup).when(fixture.schedulerFixture.scheduler()).failDeliveryPreparation(first, failure);
                 assertSame(cleanup, assertThrows(IllegalStateException.class, () -> transaction.abort(failure)));
             } else {
                 transaction.abort(failure);
             }
             transaction.abort(failure);
             for (RequestRoute item : List.of(first, sibling)) {
-                verify(fixture.slots.requests()).failDeliveryPreparation(item, failure);
+                verify(fixture.schedulerFixture.scheduler()).failDeliveryPreparation(item, failure);
                 verify(fixture.capabilities.permit(item), never()).dispatch();
                 verify(fixture.capabilities.permit(item)).release();
             }
         }
         assertEquals(1, fixture.capabilities.handoffs().size());
         fixture.capabilities.handoffs().forEach(handoff -> verify(handoff).close());
-        assertTrue(fixture.slots.completions().isEmpty());
+        assertTrue(fixture.schedulerFixture.completions().isEmpty());
         assertTrue(fixture.telemetry.routes().isEmpty());
     }
 
@@ -294,15 +294,15 @@ class RouteDeliveryStrategyTest {
         RequestRoute cancelled = fixture.item(2L);
         RequestRoute last = fixture.item(3L);
         fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(new WorkSnapshot.RequestWork(99L, WorkSnapshot.Phase.COMMITTED, 25L)), List.of(), 0L));
-        fixture.slots.commitLostFor(cancelled);
+        fixture.schedulerFixture.commitLostFor(cancelled);
 
         fixture.context.deliver(fixture.strategy, List.of(first, cancelled, last),
                 "cancelled-middle", 0, OptionalLong.empty());
 
         assertEquals(Map.of(first, 90L,
-                last, 180L), fixture.slots.unstartedWorkMs());
-        assertEquals(115L, fixture.slots.remainingWorkMsAt(first, 1_000L).orElseThrow());
-        assertEquals(205L, fixture.slots.remainingWorkMsAt(last, 1_000L).orElseThrow());
+                last, 180L), fixture.schedulerFixture.unstartedWorkMs());
+        assertEquals(115L, fixture.schedulerFixture.remainingWorkMsAt(first, 1_000L).orElseThrow());
+        assertEquals(205L, fixture.schedulerFixture.remainingWorkMsAt(last, 1_000L).orElseThrow());
         assertEquals(List.of(List.of(first, last)), fixture.telemetry.routes());
         verify(fixture.capabilities.permit(cancelled)).release();
         verify(fixture.capabilities.permit(cancelled), never()).dispatch();
@@ -320,7 +320,7 @@ class RouteDeliveryStrategyTest {
         fixture.context.deliver(fixture.strategy, List.of(item),
                 "zero", 0, OptionalLong.empty());
 
-        assertEquals(Map.of(item, 0L), fixture.slots.unstartedWorkMs());
+        assertEquals(Map.of(item, 0L), fixture.schedulerFixture.unstartedWorkMs());
         assertEquals(List.of(List.of(item)), fixture.telemetry.routes());
     }
 
@@ -335,9 +335,9 @@ class RouteDeliveryStrategyTest {
                 "unknown", 0, OptionalLong.empty());
 
         assertEquals(Map.of(first, 90L,
-                second, 180L), fixture.slots.unstartedWorkMs());
-        assertTrue(fixture.slots.remainingWorkMsAt(first, 2_000L).isEmpty());
-        assertSame(fixture.slots.precedingWork(first), fixture.slots.precedingWork(second));
+                second, 180L), fixture.schedulerFixture.unstartedWorkMs());
+        assertTrue(fixture.schedulerFixture.remainingWorkMsAt(first, 2_000L).isEmpty());
+        assertSame(fixture.schedulerFixture.precedingWork(first), fixture.schedulerFixture.precedingWork(second));
         assertEquals(List.of(List.of(first, second)), fixture.telemetry.routes());
     }
 
@@ -351,13 +351,13 @@ class RouteDeliveryStrategyTest {
                         new WorkSnapshot.RequestWork(4L, WorkSnapshot.Phase.ENGINE_QUEUED, 300L)), List.of(), 0L));
         AtomicInteger published = new AtomicInteger();
         AtomicLong deliveryClock = new AtomicLong(1_000L);
-        fixture.slots.beforeCompletion(() -> {
+        fixture.schedulerFixture.beforeCompletion(() -> {
             if (published.getAndIncrement() == 0) {
-                assertEquals(1_390L, fixture.slots.remainingWorkMsAt(first, deliveryClock.get()).orElseThrow());
+                assertEquals(1_390L, fixture.schedulerFixture.remainingWorkMsAt(first, deliveryClock.get()).orElseThrow());
                 deliveryClock.set(3_000L);
             } else {
-                assertEquals(480L, fixture.slots.remainingWorkMsAt(second, deliveryClock.get()).orElseThrow());
-                assertEquals(180L, fixture.slots.unstartedWorkMs().get(second));
+                assertEquals(480L, fixture.schedulerFixture.remainingWorkMsAt(second, deliveryClock.get()).orElseThrow());
+                assertEquals(180L, fixture.schedulerFixture.unstartedWorkMs().get(second));
             }
         });
 
@@ -377,8 +377,8 @@ class RouteDeliveryStrategyTest {
                 OptionalLong.empty());
 
         assertEquals("COMMITTED", result);
-        assertEquals(List.of(first, second), fixture.slots.committed());
-        assertTrue(fixture.slots.identities().stream().allMatch(identity ->
+        assertEquals(List.of(first, second), fixture.schedulerFixture.committed());
+        assertTrue(fixture.schedulerFixture.identities().stream().allMatch(identity ->
                 identity.kind() == DeliveryClaimKind.ROUTE_DECISION
                         && identity.correlationId() == 0L));
         assertEquals(List.of(
@@ -388,7 +388,7 @@ class RouteDeliveryStrategyTest {
                         new DeliveryStrategyTestSupport.CompletionEvent(
                                 second,
                                 DeliveryResult.delivered())),
-                fixture.slots.completions());
+                fixture.schedulerFixture.completions());
         assertEquals(List.of(List.of(first, second)),
                 fixture.telemetry.routes());
         verify(first.prefillEp()).prepareRoute(first, 90L);
@@ -418,8 +418,8 @@ class RouteDeliveryStrategyTest {
         assertSame(head, fixture.context.emptyBoundary().item());
         assertEquals(CapacityBoundary.Status.UNAVAILABLE,
                 fixture.context.emptyBoundary().result().status());
-        assertEquals(List.of(head), fixture.slots.prepared());
-        assertTrue(fixture.slots.committed().isEmpty());
+        assertEquals(List.of(head), fixture.schedulerFixture.prepared());
+        assertTrue(fixture.schedulerFixture.committed().isEmpty());
         assertTrue(fixture.telemetry.routes().isEmpty());
     }
 
@@ -427,7 +427,7 @@ class RouteDeliveryStrategyTest {
     void lostHeadOwnershipMaterializesOwnershipBoundary() {
         Fixture fixture = new Fixture();
         RequestRoute head = fixture.item(1L);
-        fixture.slots.preparationLostFor(head);
+        fixture.schedulerFixture.preparationLostFor(head);
 
         String result = fixture.context.deliver(
                 fixture.strategy, List.of(head),
@@ -437,7 +437,7 @@ class RouteDeliveryStrategyTest {
         assertSame(head, fixture.context.emptyBoundary().item());
         assertSame(CapacityBoundary.OWNERSHIP_LOST,
                 fixture.context.emptyBoundary().result());
-        assertTrue(fixture.slots.prepared().isEmpty());
+        assertTrue(fixture.schedulerFixture.prepared().isEmpty());
     }
 
     @Test
@@ -457,7 +457,7 @@ class RouteDeliveryStrategyTest {
         assertSame(second, fixture.context.committedBoundary().item());
         assertEquals(CapacityBoundary.Status.UNAVAILABLE,
                 fixture.context.committedBoundary().result().status());
-        assertEquals(List.of(first), fixture.slots.committed());
+        assertEquals(List.of(first), fixture.schedulerFixture.committed());
         assertEquals(List.of(List.of(first)), fixture.telemetry.routes());
     }
 
@@ -467,7 +467,7 @@ class RouteDeliveryStrategyTest {
         RequestRoute first = fixture.item(1L);
         RequestRoute second = fixture.item(2L);
         RequestRoute third = fixture.item(3L);
-        fixture.slots.throwCommitFor(first);
+        fixture.schedulerFixture.throwCommitFor(first);
 
         String result = fixture.context.deliver(
                 fixture.strategy, List.of(first, second, third),
@@ -475,10 +475,10 @@ class RouteDeliveryStrategyTest {
                 OptionalLong.empty());
 
         assertEquals("COMMITTED", result);
-        assertEquals(List.of(first, second, third), fixture.slots.committed());
-        assertEquals(List.of(first), fixture.slots.failedPrepared());
+        assertEquals(List.of(first, second, third), fixture.schedulerFixture.committed());
+        assertEquals(List.of(first), fixture.schedulerFixture.failedPrepared());
         assertInstanceOf(IllegalStateException.class,
-                fixture.slots.preparedFailures().getFirst());
+                fixture.schedulerFixture.preparedFailures().getFirst());
         assertEquals(List.of(List.of(second, third)),
                 fixture.telemetry.routes());
     }
@@ -488,7 +488,7 @@ class RouteDeliveryStrategyTest {
         Fixture fixture = new Fixture();
         RequestRoute first = fixture.item(1L);
         RequestRoute second = fixture.item(2L);
-        fixture.slots.throwCompletionFor(first);
+        fixture.schedulerFixture.throwCompletionFor(first);
 
         IllegalStateException failure = assertThrows(
                 IllegalStateException.class,
@@ -498,8 +498,8 @@ class RouteDeliveryStrategyTest {
                         OptionalLong.empty()));
 
         assertTrue(failure.getMessage().contains("completion failure 1"));
-        assertEquals(List.of(first, second), fixture.slots.committed());
-        assertEquals(2, fixture.slots.completions().size());
+        assertEquals(List.of(first, second), fixture.schedulerFixture.committed());
+        assertEquals(2, fixture.schedulerFixture.completions().size());
         assertEquals(List.of(List.of(second)), fixture.telemetry.routes());
         fixture.capabilities.handoffs().forEach(handoff -> verify(handoff).close());
     }
@@ -536,7 +536,7 @@ class RouteDeliveryStrategyTest {
                 doThrow(cleanup).when(fixture.capabilities.permit(first)).release();
             }
             throw primary;
-        }).when(fixture.slots.requests()).prepareDispatch(eq(last), any());
+        }).when(fixture.schedulerFixture.scheduler()).prepareDispatch(eq(last), any());
 
         assertSame(primary, assertThrows(IllegalStateException.class,
                 () -> fixture.strategy.prepare(List.of(first, second, last),
@@ -550,13 +550,13 @@ class RouteDeliveryStrategyTest {
             verify(fixture.capabilities.routeReservation(item), never()).close();
         }
         assertEquals(cleanupFails ? List.of(cleanup) : List.of(), List.of(primary.getSuppressed()));
-        assertTrue(fixture.slots.committed().isEmpty());
+        assertTrue(fixture.schedulerFixture.committed().isEmpty());
     }
 
     private static final class Fixture {
         private final TestEndpointCapabilities capabilities =
                 new TestEndpointCapabilities();
-        private final TestRequestScheduler slots = new TestRequestScheduler();
+        private final TestRequestScheduler schedulerFixture = new TestRequestScheduler();
         private final TestTelemetry telemetry = new TestTelemetry();
         private final TestContext context = new TestContext();
         private final RouteDeliveryStrategy strategy =
@@ -565,7 +565,7 @@ class RouteDeliveryStrategyTest {
         private RequestRoute item(long requestId) {
             RequestRoute item = DeliveryStrategyTestSupport.item(requestId);
             var request = org.mockito.Mockito.mock(BalanceContext.class);
-            org.mockito.Mockito.when(request.scheduler()).thenReturn(slots.requests());
+            org.mockito.Mockito.when(request.scheduler()).thenReturn(schedulerFixture.scheduler());
             org.mockito.Mockito.when(item.ctx()).thenReturn(request);
             capabilities.bind(item);
             return item;

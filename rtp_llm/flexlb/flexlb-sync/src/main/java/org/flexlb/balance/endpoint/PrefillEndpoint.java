@@ -579,7 +579,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     // ==================== Metrics ====================
     /**
      * Report per-worker batch metrics via the given reporter.
-     * Called periodically by {@link org.flexlb.balance.scheduler.RequestRepository}.
+     * Called periodically by {@link org.flexlb.balance.scheduler.SchedulerRuntime}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         int queueSize = queuedRequestCount();

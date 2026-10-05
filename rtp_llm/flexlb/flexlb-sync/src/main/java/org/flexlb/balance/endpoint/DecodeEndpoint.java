@@ -27,7 +27,7 @@ import java.util.function.Predicate;
 public class DecodeEndpoint extends WorkerEndpoint {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
     private final DecodeState state;
-    private final RequestRepository scheduler;
+    private final RequestRepository requests;
     private final PlacementAvailability placementAvailability;
     private final Set<Runnable> engineDispatchCapacityListeners = ConcurrentHashMap.newKeySet();
 
@@ -35,20 +35,20 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     private void notifyWorkerFacts(List<WorkerStatusFact> facts) {
         for (WorkerStatusFact fact : facts) {
-            var context = scheduler.findActive(fact.reservation().requestId());
+            var context = requests.findActive(fact.reservation().requestId());
             if (context != null) { context.scheduler().onDecodeStatus(this, List.of(fact)); }
         }
     }
 
-    public DecodeEndpoint(WorkerStatus status, RequestRepository scheduler) {
-        this(status, scheduler, new PlacementAvailability());
+    public DecodeEndpoint(WorkerStatus status, RequestRepository requests) {
+        this(status, requests, new PlacementAvailability());
     }
 
-    DecodeEndpoint(WorkerStatus status, RequestRepository scheduler,
+    DecodeEndpoint(WorkerStatus status, RequestRepository requests,
                    PlacementAvailability placementAvailability) {
         super(status);
         this.state = new DecodeState(status);
-        this.scheduler = java.util.Objects.requireNonNull(scheduler, "scheduler");
+        this.requests = java.util.Objects.requireNonNull(requests, "requests");
         this.placementAvailability = java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
     }
 
@@ -634,7 +634,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     protected void closeEndpoint() {
         List<ReservationHandle> reservations = state.retire();
         try { for (ReservationHandle reservation : reservations) {
-            var context = scheduler.findActive(reservation.requestId());
+            var context = requests.findActive(reservation.requestId());
             if (context != null) { context.scheduler().onDecodeGenerationRetired(this, List.of(reservation)); }
         } }
         finally { notifyEngineDispatchCapacityListeners(); }

@@ -140,7 +140,7 @@ public class BalanceContext {
     // 注册后是 RequestFuture；投递 ACK 可使它完成，但不会因此结束 Engine 资源追踪。
     private volatile CompletableFuture<Response> future;
 
-    /** Scheduling input captured once by RequestRepository before registration is published. */
+    /** Scheduling input frozen before request registration becomes visible. */
     @Getter
     private RequestRequirements requirements;
 
@@ -211,8 +211,8 @@ public class BalanceContext {
 
     /**
      * Timestamp (ms) when the engine acknowledges the batch in BATCH mode.
-     * Set when RequestRepository confirms the EnqueueBatch acknowledgement.
-     * Used to compute ack_to_response_time_ms in FlexlbServiceImpl.completeSchedule().
+     * Set when the owning scheduler accepts a successful batch delivery result.
+     * Used to measure acknowledgement-to-response latency in the API layer.
      * Remains 0 for non-BATCH paths or when ACK was not received.
      */
     @Getter

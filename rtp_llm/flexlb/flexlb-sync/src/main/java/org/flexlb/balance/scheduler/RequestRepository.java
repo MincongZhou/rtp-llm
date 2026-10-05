@@ -43,8 +43,9 @@ public final class RequestRepository {
     public TerminalRecord findTerminal(long requestId) { return terminalRecords.get(requestId); }
     public AbstractRequestScheduler ownerOf(long requestId) {
         BalanceContext context = findActive(requestId);
+        if (context != null) { return context.scheduler(); }
         TerminalRecord terminal = findTerminal(requestId);
-        return context != null ? context.scheduler() : terminal == null ? null : terminal.owner();
+        return terminal == null ? null : terminal.owner();
     }
     public List<BalanceContext> snapshotActive() { return List.copyOf(activeRequests.values()); }
     public boolean retainsIdentity(long requestId) {
@@ -103,10 +104,10 @@ public final class RequestRepository {
     public List<RequestState> snapshotActiveRequests() {
         List<RequestState> snapshots = new ArrayList<>(activeRequests.size());
         for (Map.Entry<Long, BalanceContext> candidate : activeRequests.entrySet()) {
-            BalanceContext entry = candidate.getValue();
-            synchronized (entry) {
-                if (activeRequests.get(candidate.getKey()) == entry && entry.isLiveGeneration()) {
-                    snapshots.add(entry.snapshot());
+            BalanceContext context = candidate.getValue();
+            synchronized (context) {
+                if (activeRequests.get(candidate.getKey()) == context && context.isLiveGeneration()) {
+                    snapshots.add(context.snapshot());
                 }
             }
         }

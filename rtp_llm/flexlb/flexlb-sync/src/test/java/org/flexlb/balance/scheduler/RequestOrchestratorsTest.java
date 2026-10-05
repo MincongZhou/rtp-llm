@@ -139,7 +139,7 @@ class RequestOrchestratorsTest {
 
     @Test
     void expirationOrchestratorPassesOnlyTheExactRegistrySweeper() {
-        RequestRepository lifecycle = mock(RequestRepository.class);
+        RequestRepository requests = mock(RequestRepository.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         AtomicBoolean exactOwnershipPredicateObserved = new AtomicBoolean();
         doAnswer(invocation -> {
@@ -147,28 +147,28 @@ class RequestOrchestratorsTest {
             exactOwnershipPredicateObserved.set(owns.test(91L));
             return null;
         }).when(registry).evictExpiredOrphans(anyLong(), any());
-        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).retainsIdentity(91L)).thenReturn(true);
-        runtime(lifecycle, registry).maintainExpiration();
+        when(requests.retainsIdentity(91L)).thenReturn(true);
+        runtime(requests, registry).maintainExpiration();
         verify(registry).evictExpiredOrphans(anyLong(), any());
         org.junit.jupiter.api.Assertions.assertTrue(exactOwnershipPredicateObserved.get());
     }
 
     @Test
     void metricsDoNothingAfterLifecycleShutdownBegins() {
-        RequestRepository lifecycle = mock(RequestRepository.class);
+        RequestRepository requests = mock(RequestRepository.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         RequestSchedulerReporter admissionReporter = mock(RequestSchedulerReporter.class);
-        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).isClosed()).thenReturn(true);
-        new SchedulerRuntime(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle), registry, reporter, admissionReporter, org.mockito.Mockito.mock(DefaultBatchDispatcher.class), configuration(), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class)).report();
-        verify(lifecycle, never()).liveRequestCount();
+        when(requests.isClosed()).thenReturn(true);
+        new SchedulerRuntime(requests, registry, reporter, admissionReporter, org.mockito.Mockito.mock(DefaultBatchDispatcher.class), configuration(), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class)).report();
+        verify(requests, never()).liveRequestCount();
         verify(registry, never()).snapshotPrefillEndpoints();
         verify(registry, never()).snapshotDecodeEndpoints();
     }
 
     @Test
     void metricsIsolateEveryEndpointLeafAndContinueTraversal() {
-        RequestRepository lifecycle = mock(RequestRepository.class);
+        RequestRepository requests = mock(RequestRepository.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         RequestSchedulerReporter admissionReporter = mock(RequestSchedulerReporter.class);
@@ -178,12 +178,12 @@ class RequestOrchestratorsTest {
         Map<String, PrefillEndpoint> prefill = new LinkedHashMap<>();
         prefill.put("p1", failingPrefill);
         prefill.put("p2", healthyPrefill);
-        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount()).thenReturn(7);
-        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).oldestLiveRequestAgeMs()).thenReturn(19L);
+        when(requests.liveRequestCount()).thenReturn(7);
+        when(requests.oldestLiveRequestAgeMs()).thenReturn(19L);
         when(registry.snapshotPrefillEndpoints()).thenReturn(prefill);
         when(registry.snapshotDecodeEndpoints()).thenReturn(Map.of("d1", decode));
         doThrow(new RuntimeException("metrics unavailable")).when(failingPrefill).reportBatchMetrics(reporter);
-        new SchedulerRuntime(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle), registry, reporter, admissionReporter, org.mockito.Mockito.mock(DefaultBatchDispatcher.class), configuration(), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class)).report();
+        new SchedulerRuntime(requests, registry, reporter, admissionReporter, org.mockito.Mockito.mock(DefaultBatchDispatcher.class), configuration(), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class)).report();
         verify(reporter).reportSchedulerInflight(7, 19L);
         verify(failingPrefill).reportBatchMetrics(reporter);
         verify(healthyPrefill).reportBatchMetrics(reporter);
@@ -194,7 +194,7 @@ class RequestOrchestratorsTest {
     }
 
     private static SchedulerRuntime runtime(RequestRepository requests, EndpointRegistry endpoints) {
-        return new SchedulerRuntime(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests), endpoints, mock(BatchSchedulerReporter.class), mock(RequestSchedulerReporter.class), org.mockito.Mockito.mock(DefaultBatchDispatcher.class), configuration(), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
+        return new SchedulerRuntime(requests, endpoints, mock(BatchSchedulerReporter.class), mock(RequestSchedulerReporter.class), org.mockito.Mockito.mock(DefaultBatchDispatcher.class), configuration(), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
     }
 
     @Test
@@ -208,7 +208,7 @@ class RequestOrchestratorsTest {
         when(registry.snapshotDecodeEndpoints()).thenReturn(Map.of("d1", decode));
         doThrow(new IllegalStateException("batch metrics failed")).when(decode).reportBatchMetrics(batches);
 
-        new SchedulerRuntime(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests), registry, batches, admission, mock(DefaultBatchDispatcher.class), configuration(), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class)).report();
+        new SchedulerRuntime(requests, registry, batches, admission, mock(DefaultBatchDispatcher.class), configuration(), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class)).report();
 
         verify(batches).reportSchedulerInflight(0, 0L);
         verify(decode).reportBatchMetrics(batches);
@@ -255,7 +255,7 @@ class RequestOrchestratorsTest {
         var config = SchedulingTestConfig.newConfig();
         config.getWorkerRegistry().getHealth().setStatusStaleAfterMs(250L);
         when(service.loadBalanceConfig()).thenReturn(config);
-        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).retainsIdentity(91L)).thenReturn(true);
+        when(requests.retainsIdentity(91L)).thenReturn(true);
         org.mockito.Mockito.doAnswer(call -> {
             assertEquals(250L, call.getArgument(0, Long.class));
             LongPredicate retained = call.getArgument(1);
@@ -282,11 +282,11 @@ class RequestOrchestratorsTest {
         var endpoints = mock(org.flexlb.balance.endpoint.EndpointRegistry.class);
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
-        var runtime = new SchedulerRuntime(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests), endpoints, mock(org.flexlb.service.monitor.BatchSchedulerReporter.class), mock(org.flexlb.service.monitor.RequestSchedulerReporter.class), mock(DefaultBatchDispatcher.class), service, org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class), () -> Long.MIN_VALUE);
+        var runtime = new SchedulerRuntime(requests, endpoints, mock(org.flexlb.service.monitor.BatchSchedulerReporter.class), mock(org.flexlb.service.monitor.RequestSchedulerReporter.class), mock(DefaultBatchDispatcher.class), service, org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class), () -> Long.MIN_VALUE);
         runtime.maintainExpiration();
         org.mockito.Mockito.verify(requests).expireTerminalRecords(Long.MIN_VALUE);
         org.mockito.Mockito.clearInvocations(requests, service, endpoints);
-        when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).isClosed()).thenReturn(true);
+        when(requests.isClosed()).thenReturn(true);
         runtime.maintainExpiration();
         org.mockito.Mockito.verifyNoInteractions(service, endpoints);
         org.mockito.Mockito.verify(requests, org.mockito.Mockito.never()).expireTerminalRecords(anyLong());
@@ -294,6 +294,6 @@ class RequestOrchestratorsTest {
 
     private static SchedulerRuntime maintenanceRuntime(RequestRepository requests,
             org.flexlb.balance.endpoint.EndpointRegistry endpoints, ConfigService service) {
-        return new SchedulerRuntime(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests), endpoints, mock(org.flexlb.service.monitor.BatchSchedulerReporter.class), mock(org.flexlb.service.monitor.RequestSchedulerReporter.class), mock(DefaultBatchDispatcher.class), service, org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class), () -> 1000L);
+        return new SchedulerRuntime(requests, endpoints, mock(org.flexlb.service.monitor.BatchSchedulerReporter.class), mock(org.flexlb.service.monitor.RequestSchedulerReporter.class), mock(DefaultBatchDispatcher.class), service, org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class), () -> 1000L);
     }
 }

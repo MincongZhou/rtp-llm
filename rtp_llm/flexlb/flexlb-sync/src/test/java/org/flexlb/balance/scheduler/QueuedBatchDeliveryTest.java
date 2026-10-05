@@ -132,7 +132,7 @@ class QueuedBatchDeliveryTest {
         for (RequestRoute item : all ? List.of(first, second) : List.of(first)) {
             BalanceContext requestContext = registry.findRequestContext(item.requestId());
             switch (expiry) {
-                case "CANCEL" -> registry.cancelRequest(item.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
+                case "CANCEL" -> registry.cancel(item.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
                 case "TIMER" -> RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, requestContext.createdAtMs() + TIMEOUT_MS);
                 case "LATE_DEADLINE" -> ReflectionTestUtils.setField(requestContext, "schedulingMetadata",
                         org.flexlb.dao.SchedulingMetadata.explicit(requestContext.getPriority(), System.currentTimeMillis() - 1L));
@@ -164,7 +164,7 @@ class QueuedBatchDeliveryTest {
             DeliverySettlementTestSupport.decodeStatus(decode, 2L, true);
         }
         // Repeated terminal events cannot subtract the other member or leak a batch permit.
-        registry.cancelRequest(1L, 0L, CancelReason.CLIENT_CANCELLED);
+        registry.cancel(1L, 0L, CancelReason.CLIENT_CANCELLED);
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());

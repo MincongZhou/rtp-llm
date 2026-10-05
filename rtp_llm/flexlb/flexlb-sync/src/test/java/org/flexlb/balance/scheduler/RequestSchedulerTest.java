@@ -147,14 +147,14 @@ class RequestSchedulerTest {
         try {
             BalanceContext gate = context(config, 990006L);
             CompletableFuture<Response> gateFuture = RequestProtocolTestSupport.register(lifecycle, gate);
-            lifecycle.cancelRequest(990006L, 0L, CancelReason.CLIENT_CANCELLED);
+            lifecycle.cancel(990006L, 0L, CancelReason.CLIENT_CANCELLED);
             assertTrue(coordinator.trySubmitRegistered(gate));
             assertTrue(controlStarted.await(5, TimeUnit.SECONDS));
             BalanceContext target = context(config, 990007L);
             CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, target);
             assertTrue(coordinator.trySubmitRegistered(target));
             if (priorBusinessCancel) {
-                lifecycle.cancelRequest(990007L, 0L, CancelReason.CLIENT_CANCELLED);
+                lifecycle.cancel(990007L, 0L, CancelReason.CLIENT_CANCELLED);
                 Response success = new Response();
                 success.setSuccess(true);
                 assertFalse(future.complete(success));
@@ -272,7 +272,7 @@ class RequestSchedulerTest {
                     CompletableFuture<Response> future = invocation.getArgument(1);
                     assertTrue(future.cancel(false));
                 } else {
-                    assertEquals(RequestState.Phase.CANCEL_REQUESTED, lifecycle.cancelRequest(990004L, 0L, CancelReason.CLIENT_CANCELLED).state());
+                    assertEquals(RequestState.Phase.CANCEL_REQUESTED, lifecycle.cancel(990004L, 0L, CancelReason.CLIENT_CANCELLED).state());
                 }
             }
             return invocation.callRealMethod();
@@ -282,7 +282,7 @@ class RequestSchedulerTest {
         try {
             BalanceContext gate = context(config, 990003L);
             CompletableFuture<Response> gateFuture = RequestProtocolTestSupport.register(lifecycle, gate);
-            lifecycle.cancelRequest(990003L, 0L, CancelReason.CLIENT_CANCELLED);
+            lifecycle.cancel(990003L, 0L, CancelReason.CLIENT_CANCELLED);
             assertTrue(coordinator.trySubmitRegistered(gate));
             assertTrue(controlStarted.await(5, TimeUnit.SECONDS));
             BalanceContext target = context(config, 990004L);
@@ -335,7 +335,7 @@ class RequestSchedulerTest {
                 assertTrue(future.cancel(false));
                 assertTrue(future.isCancelled());
             } else {
-                assertEquals(RequestState.Phase.CANCEL_REQUESTED, lifecycle.cancelRequest(990002L, 0L, CancelReason.CLIENT_CANCELLED).state());
+                assertEquals(RequestState.Phase.CANCEL_REQUESTED, lifecycle.cancel(990002L, 0L, CancelReason.CLIENT_CANCELLED).state());
                 assertFalse(future.isDone());
             }
             assertTrue(coordinator.trySubmitRegistered(context));
@@ -390,7 +390,7 @@ class RequestSchedulerTest {
                 var exact = (ExpirationTimer.RequestDeadline) org.springframework.test.util.ReflectionTestUtils.getField(requestContext, "requestDeadline");
                 lifecycle.onSchedulingDeadline(requestContext, exact);
             } else {
-                lifecycle.cancelRequest(990001L, 0L, CancelReason.CLIENT_CANCELLED);
+                lifecycle.cancel(990001L, 0L, CancelReason.CLIENT_CANCELLED);
             }
             assertEquals(RequestState.Phase.CANCEL_REQUESTED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(990001L, 0L).state());
             assertFalse(future.isDone(), "the admission claim still owns its route");

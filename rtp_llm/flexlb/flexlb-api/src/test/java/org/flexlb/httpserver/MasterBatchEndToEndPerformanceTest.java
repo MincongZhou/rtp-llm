@@ -366,7 +366,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
         latencyRecorder = new CompletionCoverageRecorder();
         EngineHealthReporter engineHealthReporter = createNoOpEngineHealthReporter();
-        FlexlbServiceImpl service = new FlexlbServiceImpl(scheduler, configService.loadBalanceConfig(), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestRegistry()), STANDALONE_MASTER_ELECT_SERVICE, engineHealthReporter, mock(FlexlbGrpcForwarder.class, withSettings().stubOnly()),
+        FlexlbServiceImpl service = new FlexlbServiceImpl(scheduler, configService.loadBalanceConfig(), requestRegistry(), STANDALONE_MASTER_ELECT_SERVICE, engineHealthReporter, mock(FlexlbGrpcForwarder.class, withSettings().stubOnly()),
             reporter, latencyRecorder, NO_OP_REQUEST_REPORTER);
 
         int grpcPort;

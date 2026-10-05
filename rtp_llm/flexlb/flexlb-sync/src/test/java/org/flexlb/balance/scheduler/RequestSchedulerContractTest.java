@@ -39,6 +39,67 @@ import static org.mockito.Mockito.when;
 class RequestSchedulerContractTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void cancellationRejectsForeignActiveAndTerminalRequestsInTheSharedRepository(boolean queued) throws Exception {
+        try (Fixture f = new Fixture(queued)) {
+            var other = new DirectRequestScheduler(f.router, f.requests.runtime, f.config);
+            var ownContext = f.context(942L);
+            var ownFuture = f.requests.register(ownContext, StrategyErrorType.BATCH_SLO_EXPIRED);
+            var foreignContext = f.context(943L);
+            var foreignFuture = other.register(foreignContext, StrategyErrorType.BATCH_SLO_EXPIRED);
+            try {
+                assertNull(other.cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNull(f.scheduler.cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertFalse(ownFuture.isDone());
+                assertFalse(foreignFuture.isDone());
+                assertNull(ownContext.cancellationReason());
+                assertNull(foreignContext.cancellationReason());
+
+                assertNotNull(other.cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
+                foreignFuture.get(3, TimeUnit.SECONDS);
+                assertNull(f.scheduler.cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNotNull(other.cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNull(other.cancel(943L, 17L, CancelReason.CLIENT_CANCELLED));
+
+                assertNotNull(f.scheduler.cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
+                // Direct registration does not create a global queue entry; consume its control ticket explicitly.
+                if (queued) { f.requests.onGlobalControl(942L, ownFuture); }
+                ownFuture.get(3, TimeUnit.SECONDS);
+                assertNull(other.cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNotNull(f.scheduler.cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
+            } finally {
+                other.cancel(943L, 0L, CancelReason.CLIENT_CANCELLED);
+            }
+        }
+    }
+
+    @Test
+    void cancellationResolvesTheNewOwnerAfterRequestIdReuse() throws Exception {
+        try (Fixture f = new Fixture(false)) {
+            var other = new DirectRequestScheduler(f.router, f.requests.runtime, f.config);
+            var oldContext = f.context(944L);
+            var oldFuture = other.register(oldContext, StrategyErrorType.BATCH_SLO_EXPIRED);
+            try {
+                other.cancel(944L, 0L, CancelReason.CLIENT_CANCELLED);
+                oldFuture.get(3, TimeUnit.SECONDS);
+                var repository = f.requests.requests;
+                assertTrue(repository.removeExactTerminal(repository.findTerminal(944L), Long.MAX_VALUE));
+
+                var replacement = f.context(944L);
+                var future = f.requests.register(replacement, StrategyErrorType.BATCH_SLO_EXPIRED);
+                assertNull(other.cancel(944L, 0L, CancelReason.CLIENT_CANCELLED));
+                other.onResponseUndeliverable(oldContext);
+                assertFalse(future.isDone());
+                assertNull(replacement.cancellationReason());
+                assertNotNull(f.scheduler.cancel(944L, 0L, CancelReason.CLIENT_CANCELLED));
+                future.get(3, TimeUnit.SECONDS);
+            } finally {
+                other.cancel(944L, 0L, CancelReason.CLIENT_CANCELLED);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void missingOwnerCannotActivateARequestOrPreventLaterRegistration(boolean queued) throws Exception {
         try (Fixture f = new Fixture(queued)) {
             var request = f.context(900);

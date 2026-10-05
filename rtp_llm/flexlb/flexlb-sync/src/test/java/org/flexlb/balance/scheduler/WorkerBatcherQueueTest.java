@@ -272,7 +272,7 @@ class WorkerBatcherQueueTest {
                 RequestProtocolTestSupport.awaitCondition(() ->
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(907L, 0L).state() == RequestState.Phase.CANCELLED);
             } else {
-                RequestState cancelled = registry.cancelRequest(907L, 0L, CancelReason.CLIENT_CANCELLED);
+                RequestState cancelled = registry.cancel(907L, 0L, CancelReason.CLIENT_CANCELLED);
                 assertEquals(RequestState.Phase.CANCEL_REQUESTED, cancelled.state());
                 assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
             }

@@ -133,7 +133,7 @@ public class EndpointRegistry {
         queueSettings = settings;
     }
 
-    private final RequestRepository scheduler;
+    private final RequestRepository requests;
     private final BatchSchedulerReporter reporter;
     private final DeliveryStrategy deliveryStrategy;
     private final PlacementAvailability placementAvailability;
@@ -158,14 +158,14 @@ public class EndpointRegistry {
 
     @Autowired
     public EndpointRegistry(ConfigService configService,
-                            RequestRepository scheduler,
+                            RequestRepository requests,
                             BatchSchedulerReporter reporter,
                             DeliveryStrategy deliveryStrategy,
                             PlacementAvailability placementAvailability) {
         this.configService = java.util.Objects.requireNonNull(
                 configService, "configService");
-        this.scheduler = java.util.Objects.requireNonNull(
-                scheduler, "scheduler");
+        this.requests = java.util.Objects.requireNonNull(
+                requests, "requests");
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
         this.deliveryStrategy = java.util.Objects.requireNonNull(
                 deliveryStrategy, "deliveryStrategy");
@@ -315,8 +315,8 @@ public class EndpointRegistry {
     /**
      * Reduce a private candidate from a new status delta, commit the validated
      * Engine observation, then make the candidate routable. A private candidate
-     * cannot own any published BalanceContext identity, so its typed scheduler
-     * reduction is necessarily empty.
+     * cannot own any published BalanceContext identity, so there are no request
+     * transitions to apply before publication.
      *
      * <p>A factory, endpoint-reducer, or status-commit failure closes the
      * candidate before routing publication. If final map publication fails
@@ -574,7 +574,7 @@ public class EndpointRegistry {
                     reporter,
                     placementAvailability);
             case DECODE -> new DecodeEndpoint(
-                    status, scheduler, placementAvailability);
+                    status, requests, placementAvailability);
             case VIT -> new WorkerEndpoint(status);
             case FRONTEND -> throw new AssertionError("validated above");
         };

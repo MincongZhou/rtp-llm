@@ -90,7 +90,7 @@ class RequestDeliveryLockContractTest {
         Future<RequestState> cancellation = operations.submit(() -> {
             await(initializing);
             cancellationStarted.countDown();
-            return lifecycle.cancelRequest(809L, 0L, CancelReason.CLIENT_CANCELLED);
+            return lifecycle.cancel(809L, 0L, CancelReason.CLIENT_CANCELLED);
         });
         org.mockito.Mockito.when(endpoint.reserveBatch(org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyInt()))
@@ -277,7 +277,7 @@ class RequestDeliveryLockContractTest {
                 assertTrue(publicationEntered.await(5, TimeUnit.SECONDS));
 
                 Future<RequestState> cancellation =
-                        operations.submit(() -> lifecycle.cancelRequest(
+                        operations.submit(() -> lifecycle.cancel(
                                 registered.item().requestId(),
                                 0L,
                                 CancelReason.CLIENT_CANCELLED));
@@ -327,7 +327,7 @@ class RequestDeliveryLockContractTest {
                 assertTrue(queuePublished.await(5, TimeUnit.SECONDS));
 
                 Future<RequestState> cancellation =
-                        operations.submit(() -> lifecycle.cancelRequest(
+                        operations.submit(() -> lifecycle.cancel(
                                 registered.item().requestId(),
                                 0L,
                                 CancelReason.CLIENT_CANCELLED));
@@ -558,7 +558,7 @@ class RequestDeliveryLockContractTest {
                 () -> true);
         assertNotNull(claim);
 
-        RequestState afterDeadline = lifecycle.cancelRequest(
+        RequestState afterDeadline = lifecycle.cancel(
                 registered.item().requestId(),
                 0L,
                 CancelReason.DEADLINE_EXCEEDED);

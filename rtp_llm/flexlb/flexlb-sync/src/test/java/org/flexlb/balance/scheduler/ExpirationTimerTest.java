@@ -30,7 +30,7 @@ class ExpirationTimerTest {
         var context = mock(BalanceContext.class);
         when(access.isCurrent(context)).thenReturn(true);
         when(access.snapshotActive()).thenReturn(List.of(context));
-        var timer = new ExpirationTimer(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(access));
+        var timer = new ExpirationTimer(access);
         var timerExecutor = (java.util.concurrent.ScheduledThreadPoolExecutor)
                 ReflectionTestUtils.getField(timer, "executor");
         CountDownLatch installing = new CountDownLatch(1);
@@ -211,7 +211,7 @@ class ExpirationTimerTest {
             when(context.installDecisionDeadline(any())).thenReturn(true);
             when(context.installInactivityDeadline(any())).thenReturn(true);
             when(context.inactivityDeadlineAtMs()).thenReturn(OptionalLong.of(Long.MAX_VALUE));
-            timer = new ExpirationTimer(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(access));
+            timer = new ExpirationTimer(access);
             var request = timer.attachRequestDeadline(context, Long.MAX_VALUE);
             var decision = timer.registerDecisionDeadline(context, Long.MAX_VALUE);
             var inactivity = timer.attachInactivityDeadline(context);

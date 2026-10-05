@@ -93,7 +93,7 @@ class DirectRequestLifetimeRaceTest {
             AtomicBoolean lateConfirmation = new AtomicBoolean();
             doAnswer(invocation -> {
                 BalanceContext requestContext = requests.findRequestContext(101L);
-                if (reason != CancelReason.DEADLINE_EXCEEDED) { requests.cancelRequest(101L, 0L, reason); }
+                if (reason != CancelReason.DEADLINE_EXCEEDED) { requests.cancel(101L, 0L, reason); }
                 RequestProtocolTestSupport.expireInactiveRequest(requests, requestContext, requestContext.createdAtMs()
                         + config.getRequestLifecycle().getRequest().getTimeoutMs());
                 assertTrue(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).getRequestState(101L, 0L).state().isTerminal());

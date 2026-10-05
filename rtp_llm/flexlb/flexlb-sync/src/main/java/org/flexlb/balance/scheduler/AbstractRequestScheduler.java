@@ -67,7 +67,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         this.requestReporter = runtime.requestReporter();
     }
 
-    public boolean isCurrentContext(BalanceContext exact) { return exact != null && exact.scheduler() == this && requests.isCurrent(exact); }
+    private boolean isCurrentContext(BalanceContext exact) {
+        return exact != null && exact.scheduler() == this && requests.isCurrent(exact);
+    }
     BalanceContext findRequestContext(long requestId) {
         BalanceContext exact = requests.findActive(requestId);
         return exact != null && exact.scheduler() == this ? exact : null;
@@ -79,9 +81,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     @Override
     public final RequestState cancel(long requestId, long batchId, CancelReason reason) {
-        AbstractRequestScheduler owner = requests.ownerOf(requestId);
-        if (owner != null && owner != this) { return null; }
-        return cancelRequest(requestId, batchId, reason);
+        Objects.requireNonNull(reason, "reason");
+        BalanceContext context = requests.findActive(requestId);
+        if (context != null) {
+            return context.scheduler() == this ? cancelRequest(context, batchId, reason) : null;
+        }
+        RequestRepository.TerminalRecord terminal = requests.findTerminal(requestId);
+        return terminal != null && terminal.owner() == this && terminal.state().matchesBatch(batchId)
+                ? terminal.state() : null;
     }
 
     protected final CompletableFuture<Response> register(BalanceContext context, StrategyErrorType expiredError) {
@@ -107,7 +114,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         if (context == null || context.scheduler() != this) {
             return CompletableFuture.completedFuture(response);
         }
-        publishDecisionResponseAsync(context.getRequestId(), context.getFuture(), response);
+        terminateLocallyAndPublishResponse(context, response);
         return context.getFuture();
     }
 
@@ -127,41 +134,41 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     public void completeWithdrawal(AdmissionHandle withdrawal, boolean committed) {
         if (withdrawal.owner().scheduler() != this) { throw new IllegalArgumentException("foreign withdrawal"); }
         Throwable failure = null;
-                BalanceContext context = withdrawal.owner();
-                // Closing the handle clears its route; retain the exact old identity for requeue.
-                RequestRoute item = withdrawal.withdrawingRoute();
-                try {
-                    if (committed) {
-                        // Decode replacement has committed. Never take the Prefill lock under the context monitor.
-                        if (!item.prefillEp().removeQueued(item, "DECODE_RESERVATION_YIELDED")) {
-                            throw new IllegalStateException("withdrawn route is no longer queued: " + context.getRequestId());
-                        }
-                        synchronized (context) {
-                            context.detachWithdrawnRoute(withdrawal, item);
-                        }
-                    }
-                } catch (Throwable detachFailure) {
-                    failure = Failures.append(failure, detachFailure);
-                    try {
-                        withdrawal.terminate(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "queued route withdrawal failed"));
-                    } catch (Throwable terminalFailure) {
-                        failure = Failures.append(failure, terminalFailure);
-                    }
-                } finally {
-                    try {
-                        withdrawal.finish();
-                        if (committed && context.isOpen() && !Objects.requireNonNull(context.queueOwner(), "queued request owner").requeue(item)) {
-                            item.future().complete(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "scheduler closed during route withdrawal"));
-                        }
-                    } catch (Throwable closeFailure) {
-                        failure = Failures.append(failure, closeFailure);
-                        try {
-                            item.future().complete(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "queued route requeue failed"));
-                        } catch (Throwable terminalFailure) {
-                            failure = Failures.append(failure, terminalFailure);
-                        }
-                    }
+        BalanceContext context = withdrawal.owner();
+        // Closing the handle clears its route; retain the exact old identity for requeue.
+        RequestRoute item = withdrawal.withdrawingRoute();
+        try {
+            if (committed) {
+                // Decode replacement has committed. Never take the Prefill lock under the context monitor.
+                if (!item.prefillEp().removeQueued(item, "DECODE_RESERVATION_YIELDED")) {
+                    throw new IllegalStateException("withdrawn route is no longer queued: " + context.getRequestId());
                 }
+                synchronized (context) {
+                    context.detachWithdrawnRoute(withdrawal, item);
+                }
+            }
+        } catch (Throwable detachFailure) {
+            failure = Failures.append(failure, detachFailure);
+            try {
+                withdrawal.terminate(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "queued route withdrawal failed"));
+            } catch (Throwable terminalFailure) {
+                failure = Failures.append(failure, terminalFailure);
+            }
+        } finally {
+            try {
+                withdrawal.finish();
+                if (committed && context.isOpen() && !Objects.requireNonNull(context.queueOwner(), "queued request owner").requeue(item)) {
+                    item.future().complete(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "scheduler closed during route withdrawal"));
+                }
+            } catch (Throwable closeFailure) {
+                failure = Failures.append(failure, closeFailure);
+                try {
+                    item.future().complete(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "queued route requeue failed"));
+                } catch (Throwable terminalFailure) {
+                    failure = Failures.append(failure, terminalFailure);
+                }
+            }
+        }
         Failures.rethrow(failure, "queued route withdrawal failed");
     }
 
@@ -179,7 +186,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 RequestRoute item = requestContext.item();
                 if (item == null || item.priority() >= incomingPriority
                         || item.decodeEp() != endpoint || !Objects.equals(item.decodeReservation(), victim)
-                        || !ownsPreparedDeliveryLocked(requestContext, item) || requestContext.admission() != null
+                        || !requests.isCurrent(requestContext) || !requestContext.ownsPreparedDeliveryLocked(item)
+                        || requestContext.admission() != null
                         || item.requestExpired(System.currentTimeMillis())) {
                     return null;
                 }
@@ -328,7 +336,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             return false;
         }
         synchronized (requestContext) {
-            return isCurrentContext(requestContext) && requestContext.isOpen();
+            return requests.isCurrent(requestContext) && requestContext.isOpen();
         }
     }
 
@@ -344,7 +352,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             AdmissionHandle handle;
             synchronized (requestContext) {
-                handle = isCurrentContext(requestContext) ? requestContext.beginAdmission((operation, response) -> finishAdmission(requestContext, operation, response)) : null;
+                handle = requests.isCurrent(requestContext) ? requestContext.beginAdmission((operation, response) -> finishAdmission(requestContext, operation, response)) : null;
             }
             transferred = handle != null;
             return handle;
@@ -398,7 +406,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     public void onQueuedItemPreempted(RequestRoute victim, RequestRoute incoming) {
         try {
-            BalanceContext context = entryFor(victim);
+            BalanceContext context = findRouteContext(victim);
             if (context != null) {
                 recordSchedulingFailure(context, StrategyErrorType.PRIORITY_PREEMPTED,
                         "preempted by higher-priority request " + incoming.requestId());
@@ -410,30 +418,24 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     public Optional<PreemptionRegistration> tryClaim(long requestId, long reservationToken, long attemptToken, String detail) {
-        BalanceContext entry = findRequestContext(requestId);
-        if (entry == null) {
+        BalanceContext context = findRequestContext(requestId);
+        if (context == null) {
             return Optional.empty();
         }
-        synchronized (entry) {
-            return Optional.ofNullable(entry.tryInstallPreemption(reservationToken, attemptToken, detail));
+        synchronized (context) {
+            return Optional.ofNullable(context.tryInstallPreemption(reservationToken, attemptToken, detail));
         }
     }
 
     public Optional<CancelTarget> findCancelTarget(long requestId, long reservationToken) {
-        BalanceContext entry = findRequestContext(requestId);
-        if (entry == null) {
+        BalanceContext context = findRequestContext(requestId);
+        if (context == null) {
             return Optional.empty();
         }
-        synchronized (entry) {
-            CancelTarget target = cancelTarget(entry.activeItemForReservation(reservationToken));
+        synchronized (context) {
+            CancelTarget target = cancelTarget(context.activeItemForReservation(reservationToken));
             return target == null || !target.isRoutable() ? Optional.empty() : Optional.of(target);
         }
-    }
-
-    public RequestState cancelRequest(long requestId, long expectedBatchId, CancelReason reason) {
-        Objects.requireNonNull(reason, "reason");
-        BalanceContext requestContext = findRequestContext(requestId);
-        return requestContext == null ? requests.getRequestState(requestId, expectedBatchId) : cancelRequest(requestContext, expectedBatchId, reason);
     }
 
     private static CancelTarget cancelTarget(RequestRoute item) {
@@ -450,14 +452,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
 
     public void onQueuedItemExpired(RequestRoute exact) {
-        BalanceContext requestContext = entryFor(exact);
+        BalanceContext requestContext = findRouteContext(exact);
         if (requestContext != null) {
             cancelRequest(requestContext, 0L, CancelReason.DEADLINE_EXCEEDED);
         }
     }
 
     void onQueuedItemControl(RequestRoute exact) {
-        BalanceContext requestContext = entryFor(exact);
+        BalanceContext requestContext = findRouteContext(exact);
         if (requestContext != null) {
             processQueuedControl(requestContext, exact);
         }
@@ -494,17 +496,17 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     public void onQueueOfferFailure(RequestRoute exact, Throwable error) {
-        BalanceContext requestContext = entryFor(exact);
+        BalanceContext requestContext = findRouteContext(exact);
         if (requestContext != null) {
             processQueuedControl(requestContext, exact);
             recordSchedulingFailure(requestContext, StrategyErrorType.DISPATCH_FAILED, "Worker scheduling queue rejected request: " + (error == null ? "endpoint publication failed" : error.getMessage()));
         }
     }
 
-    private BalanceContext entryFor(RequestRoute item) {
-        BalanceContext entry = item.ctx();
-        synchronized (entry) {
-            return isCurrentContext(entry) && entry.ownsActiveItem(item) ? entry : null;
+    private BalanceContext findRouteContext(RequestRoute item) {
+        BalanceContext context = item.ctx();
+        synchronized (context) {
+            return isCurrentContext(context) && context.ownsActiveItem(item) ? context : null;
         }
     }
 
@@ -811,7 +813,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         cancelRequest(exact, 0L, CancelReason.CLIENT_CANCELLED);
     }
 
-    public RequestState cancelRequest(BalanceContext ctx, long expectedBatchId, CancelReason reason) {
+    final RequestState cancelRequest(BalanceContext ctx, long expectedBatchId, CancelReason reason) {
         return cancelRequest(ctx, expectedBatchId, reason, null);
     }
 
@@ -905,9 +907,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         cancelRequest(ctx, 0L, CancelReason.DEADLINE_EXCEEDED, Objects.requireNonNull(exact, "deadline"));
     }
 
-    // ── 沉默期限：计划、安装、消费与显式检查 ──
-
-
     // ── 抢占协议：注册、进展、释放与完成 ──
 
     public boolean updatePreemption(PreemptionRegistration claim, PreemptionCancelPhase next) {
@@ -992,34 +991,34 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     private PublicationPermit finishTerminal(TerminalAction action) {
-        BalanceContext entry = action.requestContext();
-        entry.requireCleanupOwner(action);
+        BalanceContext context = action.requestContext();
+        context.requireCleanupOwner(action);
         Throwable cleanupFailure = null;
         cleanupFailure = Failures.run(cleanupFailure, () -> action.terminalResources().release());
-        cleanupFailure = Failures.run(cleanupFailure, action.preemption() == null ? null : () -> action.preemption().signalTerminal(new VictimTerminal(entry.getRequestId())));
+        cleanupFailure = Failures.run(cleanupFailure, action.preemption() == null ? null : () -> action.preemption().signalTerminal(new VictimTerminal(context.getRequestId())));
         Throwable settledCleanupFailure = cleanupFailure;
         if (cleanupFailure != null) {
-            entry.scheduler().recordFailure(cleanupFailure);
+            context.scheduler().recordFailure(cleanupFailure);
         }
-        DeliveryClaim delivery = entry.delivery();
+        DeliveryClaim delivery = context.delivery();
         boolean successfulWorker = action.event() != null && action.event().kind() == DeferredTerminal.Kind.WORKER
                 && action.event().workerSuccessful();
         if (delivery != null) {
-            if (successfulWorker && entry.cancellationReason() == null && !delivery.cleanupRequired()) {
+            if (successfulWorker && context.cancellationReason() == null && !delivery.cleanupRequired()) {
                 delivery.observeWorkerCompletion(action.item());
             } else {
-                delivery.abandon(entry.cancellationReason() == null ? CancelReason.CLIENT_CANCELLED : entry.cancellationReason());
+                delivery.abandon(context.cancellationReason() == null ? CancelReason.CLIENT_CANCELLED : context.cancellationReason());
             }
         }
         Runnable archive = () -> {
             Throwable failure = Failures.run(settledCleanupFailure, () -> releaseEndpoints(action));
             if (failure != null) { recordFailure(failure); }
-            else { commitTerminalRecord(entry, action); }
+            else { commitTerminalRecord(context, action); }
         };
         if (delivery == null || delivery.cleanupComplete()) {
             archive.run();
         } else {
-            delivery.settlement().thenRun(() -> submitContinuation(entry, archive));
+            delivery.settlement().thenRun(() -> submitContinuation(context, archive));
         }
         return action.publication();
     }

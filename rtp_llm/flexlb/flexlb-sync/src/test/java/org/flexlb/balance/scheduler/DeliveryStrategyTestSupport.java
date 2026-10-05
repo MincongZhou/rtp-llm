@@ -278,7 +278,7 @@ public final class DeliveryStrategyTestSupport {
 
     static final class TestRequestScheduler {
 
-        private final AbstractRequestScheduler requests = RequestProtocolTestSupport.schedulerMock();
+        private final AbstractRequestScheduler scheduler = RequestProtocolTestSupport.schedulerMock();
         private final List<RequestRoute> prepared = new ArrayList<>();
         private final List<RequestRoute> committed = new ArrayList<>();
         private final List<ClaimIdentity> identities = new ArrayList<>();
@@ -300,14 +300,14 @@ public final class DeliveryStrategyTestSupport {
                 if (item == preparationLostFor) { return CapacityBoundary.OWNERSHIP_LOST; }
                 prepared.add(item);
                 return invocation.getArgument(1, PrefillAdmissionResources.Preparation.class).append(invocation.getArgument(0));
-            }).when(requests).prepareDispatch(Mockito.any(), Mockito.any());
+            }).when(scheduler).prepareDispatch(Mockito.any(), Mockito.any());
             Mockito.doAnswer(invocation -> claim(invocation.getArgument(0), invocation.getArgument(1),
                     invocation.getArgument(2), invocation.getArgument(3)))
-                    .when(requests).claimDelivery(Mockito.any(), Mockito.any(), Mockito.anyLong(), Mockito.any());
+                    .when(scheduler).claimDelivery(Mockito.any(), Mockito.any(), Mockito.anyLong(), Mockito.any());
             Mockito.doAnswer(invocation -> {
                 failDeliveryPreparation(invocation.getArgument(0), invocation.getArgument(1));
                 return null;
-            }).when(requests).failDeliveryPreparation(Mockito.any(), Mockito.any());
+            }).when(scheduler).failDeliveryPreparation(Mockito.any(), Mockito.any());
         }
 
         private DeliveryClaim claim(
@@ -338,12 +338,12 @@ public final class DeliveryStrategyTestSupport {
                 precedingWork.put(exactItem, inv.getArgument(1));
                 unstartedWorkMs.put(exactItem, inv.getArgument(2));
                 return null;
-            }).when(requests).setDeliveryPrediction(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
+            }).when(scheduler).setDeliveryPrediction(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
             Mockito.doAnswer(inv -> {
-                requests.setDeliveryPrediction(claim, inv.getArgument(1), inv.getArgument(2));
+                scheduler.setDeliveryPrediction(claim, inv.getArgument(1), inv.getArgument(2));
                 complete(claim, DeliveryResult.delivered());
                 return null;
-            }).when(requests).publishRoute(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
+            }).when(scheduler).publishRoute(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
             return claim;
         }
 
@@ -430,8 +430,8 @@ public final class DeliveryStrategyTestSupport {
             return List.copyOf(events);
         }
 
-        AbstractRequestScheduler requests() {
-            return requests;
+        AbstractRequestScheduler scheduler() {
+            return scheduler;
         }
     }
 

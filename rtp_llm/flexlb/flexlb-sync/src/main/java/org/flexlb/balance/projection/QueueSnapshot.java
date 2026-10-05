@@ -11,7 +11,7 @@ import java.util.Objects;
  * Immutable scheduling inputs captured for a route-time what-if projection.
  *
  * <p>The active items are already in production queue order. This object is
- * materialized from the canonical ownership registry at one linearization
+ * materialized from the endpoint's PrefillState at one linearization
  * point together with committed work and pending count.
  */
 public record QueueSnapshot(

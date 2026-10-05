@@ -16,7 +16,6 @@ import static org.mockito.Mockito.*;
 /** Builds real request owners and shared facilities; contains no request state machine. */
 public final class SchedulerTestSupport {
     private static final Map<AbstractRequestScheduler, RequestRepository> mockRepositories = new WeakHashMap<>();
-    public static RequestRepository repository(RequestRepository value) { return value; }
     public static synchronized RequestRepository repository(AbstractRequestScheduler owner) {
         if (owner == null) { return null; }
         return owner.requests != null ? owner.requests : mockRepositories.computeIfAbsent(owner, SchedulerTestSupport::mockRepository);
@@ -51,7 +50,6 @@ public final class SchedulerTestSupport {
             bindOwner(route.ctx(), owner == null ? mock(AbstractRequestScheduler.class) : owner);
         }
     }
-    public static SchedulerRuntime runtime(SchedulerRuntime value) { return value; }
     public static SchedulerRuntime runtime(RequestScheduler owner) { return ((AbstractRequestScheduler) owner).runtime; }
     static Throwable failure(RequestScheduler owner) {
         return (Throwable) ReflectionTestUtils.getField(runtime(owner), "failure");

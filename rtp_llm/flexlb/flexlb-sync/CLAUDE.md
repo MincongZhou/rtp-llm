@@ -15,7 +15,7 @@ flexlb-sync is the core load balancing module of FlexLB. It handles:
 
 ### Routing and scheduling
 - `DefaultRouter` performs one multi-role selection and returns exact endpoint-generation capabilities
-- `RequestScheduler` exposes submit, cancel, stopAccepting, and termination for both modes
+- `RequestScheduler` exposes submit and cancel for both modes; `SchedulerRuntime` owns intake closure and shutdown
 - `AbstractRequestScheduler` executes protocol effects outside the request lock and tracks all generation obligations
 - `DirectRequestScheduler` accepts requests and owns immediate selection and commit
 - `QueuedRequestScheduler` accepts requests and owns ordering, planning, capacity waits, and commit
@@ -94,7 +94,7 @@ flexlb-sync/
 │   │   ├── DirectRequestScheduler.java # immediate selection/commit
 │   │   ├── QueuedRequestScheduler.java # model-wide ordering/commit
 │   │   ├── BalanceContext.java      # request lifecycle protocol
-│   │   ├── RequestScheduler.java    # public scheduling and drain contract
+│   │   ├── RequestScheduler.java    # public scheduling and cancellation contract
 │   │   ├── RequestRepository.java   # exact shared registration and archival
 │   │   ├── SchedulerRuntime.java    # maintenance and shutdown
 │   │   └── WorkerBatcher.java       # endpoint decision/delivery runtime

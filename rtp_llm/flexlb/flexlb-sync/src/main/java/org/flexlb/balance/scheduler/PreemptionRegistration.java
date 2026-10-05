@@ -10,11 +10,9 @@ import java.util.concurrent.CompletionStage;
 /**
  * Exact ownership token for one priority-preemption attempt.
  *
- * <p>This class owns only the attempt-local protocol. RequestRepository remains the
- * aggregate root and decides when a transition is legal for the request as a
- * whole. Keeping this small state machine separate makes that boundary
- * explicit and prevents transport bookkeeping from obscuring request
- * lifecycle decisions.</p>
+ * <p>This class records the attempt-local cancel protocol. BalanceContext decides
+ * which request transitions are legal; its scheduler executes the resulting effects.
+ * Cancel acknowledgement and request resource termination remain separate facts.</p>
  */
 public final class PreemptionRegistration {
     final BalanceContext owner;

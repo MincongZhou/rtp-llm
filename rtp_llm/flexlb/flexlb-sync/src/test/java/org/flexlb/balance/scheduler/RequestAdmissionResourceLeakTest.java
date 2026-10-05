@@ -92,7 +92,7 @@ class RequestAdmissionResourceLeakTest {
                 lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> true)));
         assertSame(registered.item(), activeItem(3L));
         verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
-        lifecycle.cancelRequest(3L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancel(3L, 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), registered.future().join().getCode());
         verify(registered.item().decodeEp(), times(1)).release(
                 registered.item().decodeReservation(),
@@ -107,7 +107,7 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(PlacementResult.Status.SUCCESS,
                 lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> true)));
         assertEquals(RequestState.Phase.CANCEL_REQUESTED,
-                lifecycle.cancelRequest(4L, 0L, CancelReason.CLIENT_CANCELLED).state());
+                lifecycle.cancel(4L, 0L, CancelReason.CLIENT_CANCELLED).state());
         verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
         admission.finish();
         registered.future().join();
@@ -126,7 +126,7 @@ class RequestAdmissionResourceLeakTest {
                 long requestId = id;
                 var canceled = executor.submit(() -> {
                     RequestProtocolTestSupport.await(start);
-                    lifecycle.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+                    lifecycle.cancel(requestId, 0L, CancelReason.CLIENT_CANCELLED);
                 });
                 var completed = executor.submit(() -> {
                     RequestProtocolTestSupport.await(start);
@@ -168,7 +168,7 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), response.getCode());
         assertEquals("preempted by higher-priority request 62", response.getErrorMessage());
         lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
-        lifecycle.cancelRequest(61L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancel(61L, 0L, CancelReason.CLIENT_CANCELLED);
         verify(victim.item().decodeEp(), times(1)).release(
                 victim.item().decodeReservation(),
                 DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);

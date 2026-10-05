@@ -91,7 +91,7 @@ class RequestResourceAccountingTest {
         try (Fixture f = new Fixture()) {
             f.assertReserved();
             switch (end) {
-                case CANCEL -> f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
+                case CANCEL -> f.requests.cancel(ID, 0, CancelReason.CLIENT_CANCELLED);
                 case FUTURE_CANCEL -> assertTrue(f.item.future().cancel(false));
                 case EXPIRE -> f.expire();
                 case SHUTDOWN -> {
@@ -128,7 +128,7 @@ class RequestResourceAccountingTest {
         try (Fixture f = new Fixture(true)) {
             f.assertReserved();
             if (reason == CancelReason.CLIENT_CANCELLED) {
-                f.requests.cancelRequest(ID, 0, reason);
+                f.requests.cancel(ID, 0, reason);
             } else {
                 f.expire();
             }
@@ -147,7 +147,7 @@ class RequestResourceAccountingTest {
             assertTrue(member.accepted());
             assertEquals(1, f.decode.resourceSnapshot().activeDispatchPermits());
             assertEquals(1, f.decode.routingView().engineCapacityUsed());
-            f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
+            f.requests.cancel(ID, 0, CancelReason.CLIENT_CANCELLED);
             // The transaction's eventual rollback must remain harmless after request cleanup.
             assertNull(PrefillAdmissionResources.rollback(member.value(), null));
             f.assertEmpty();
@@ -165,7 +165,7 @@ class RequestResourceAccountingTest {
                 assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
             }
             f.assertHandedOff();
-            f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
+            f.requests.cancel(ID, 0, CancelReason.CLIENT_CANCELLED);
             f.assertHandedOff();
             f.expire();
             f.assertHandedOff();
@@ -183,7 +183,7 @@ class RequestResourceAccountingTest {
             assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().dispatch());
             // Endpoint ownership can advance before its notification reaches the context.
-            f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
+            f.requests.cancel(ID, 0, CancelReason.CLIENT_CANCELLED);
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.requests).liveRequestCount());
             assertEquals(0, f.prefill.ownershipStats().locallyOwnedRequests());
             assertEquals(HARD_KV, f.decode.routingView().inflightHardKv());

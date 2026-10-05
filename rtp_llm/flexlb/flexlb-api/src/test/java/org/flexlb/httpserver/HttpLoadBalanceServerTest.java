@@ -27,14 +27,14 @@ class HttpLoadBalanceServerTest {
     void masterInfoUsesCanonicalSchedulerQueueDepth() {
         LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
         ConfigService configService = mock(ConfigService.class);
-        RequestRepository scheduler = mock(RequestRepository.class);
+        RequestRepository requests = mock(RequestRepository.class);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
-        when(scheduler.getQueuedRequestCount()).thenReturn(7);
+        when(requests.getQueuedRequestCount()).thenReturn(7);
         when(synchronizer.isReady()).thenReturn(true);
 
-        HttpLoadBalanceServer server = new HttpLoadBalanceServer(consistency, configService, scheduler, endpointRegistry, synchronizer, new ServerScheduleLatencyRecorder());
+        HttpLoadBalanceServer server = new HttpLoadBalanceServer(consistency, configService, requests, endpointRegistry, synchronizer, new ServerScheduleLatencyRecorder());
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();
@@ -51,13 +51,13 @@ class HttpLoadBalanceServerTest {
                 .jsonPath("$.real_master_host").isEqualTo("127.0.0.1:7001")
                 .jsonPath("$.ready").isEqualTo(true);
 
-        verify(scheduler).getQueuedRequestCount();
+        verify(requests).getQueuedRequestCount();
     }
 
     @Test
     void inflightStatusExposesObservedAndIndexedCacheVersions() {
         ConfigService configService = mock(ConfigService.class);
-        RequestRepository scheduler = mock(RequestRepository.class);
+        RequestRepository requests = mock(RequestRepository.class);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         WorkerStatus status = mock(WorkerStatus.class);
@@ -76,7 +76,7 @@ class HttpLoadBalanceServerTest {
                 .thenReturn(Map.of("127.0.0.1:8080", endpoint));
         when(endpointRegistry.snapshotDecodeEndpoints()).thenReturn(Map.of());
 
-        HttpLoadBalanceServer server = new HttpLoadBalanceServer(mock(LBStatusConsistencyService.class), configService, scheduler, endpointRegistry, mock(MasterEngineSynchronizer.class), new ServerScheduleLatencyRecorder());
+        HttpLoadBalanceServer server = new HttpLoadBalanceServer(mock(LBStatusConsistencyService.class), configService, requests, endpointRegistry, mock(MasterEngineSynchronizer.class), new ServerScheduleLatencyRecorder());
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();
