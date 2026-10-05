@@ -685,37 +685,45 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     private void finishAdmission(BalanceContext ctx, AdmissionHandle exact, Response failureResponse) {
         Throwable failure = null;
         try {
-            Runnable effect = null;
-            boolean cleanupPending;
-            RequestRoute localControl;
-            RequestRoute restoredRoute = null;
-            synchronized (ctx) {
-                if (ctx.admission() == exact) {
-                    restoredRoute = ctx.finishAdmission(exact);
-                    effect = ctx.settleAdmissionLocked(exact, failureResponse);
+            try {
+                Runnable effect = null;
+                boolean cleanupPending;
+                RequestRoute localControl;
+                RequestRoute restoredRoute = null;
+                synchronized (ctx) {
+                    if (ctx.admission() == exact) {
+                        restoredRoute = ctx.finishAdmission(exact);
+                        effect = ctx.settleAdmissionLocked(exact, failureResponse);
+                    }
+                    cleanupPending = ctx.hasCleanup();
+                    localControl = !cleanupPending && effect == null && ctx.queuedLocalControlLocked() ? ctx.item() : null;
                 }
-                cleanupPending = ctx.hasCleanup();
-                localControl = !cleanupPending && effect == null && ctx.queuedLocalControlLocked() ? ctx.item() : null;
-            }
-            if (restoredRoute != null && restoredRoute.prefillEp() != null) {
-                restoredRoute.prefillEp().signalRouteReady();
-            }
-            if (cleanupPending) {
-                resumeCleanup(ctx);
-            } else {
-                if (localControl != null) {
-                    signalOrSettleLocalControl(ctx, localControl);
+                if (restoredRoute != null && restoredRoute.prefillEp() != null) {
+                    restoredRoute.prefillEp().signalRouteReady();
                 }
-                execute(ctx, effect);
+                if (cleanupPending) {
+                    resumeCleanup(ctx);
+                } else {
+                    if (localControl != null) {
+                        signalOrSettleLocalControl(ctx, localControl);
+                    }
+                    execute(ctx, effect);
+                }
+            } catch (Throwable settlementFailure) {
+                failure = settlementFailure;
             }
-        } catch (Throwable settlementFailure) {
-            failure = settlementFailure;
+            // A failed settlement must not strand the expiry watch or the admission gate.
+            failure = Failures.run(failure, () -> expirationTimer.attachInactivityDeadline(ctx));
+            // Drain must see the failure before the last admission gate opens.
+            if (failure != null) {
+                synchronized (lifecycle) { this.failure = Failures.append(this.failure, failure); }
+            }
+        } finally {
+            exitAdmissionHandleGate();
+            ctx.scheduler().release();
         }
-        // A failed settlement must not strand the expiry watch or the admission gate.
-        failure = Failures.run(failure, () -> expirationTimer.attachInactivityDeadline(ctx));
-        failure = Failures.run(failure, (Runnable) this::exitAdmissionHandleGate);
-        if (failure != null) { ctx.scheduler().recordFailure(failure); }
-        ctx.scheduler().release();
+        // Completion listeners may reenter shutdown and wait for admission drain.
+        if (failure != null) { terminated.completeExceptionally(failure); }
         Failures.rethrow(failure, "request slot cleanup failed");
     }
 

@@ -1026,7 +1026,7 @@ class RequestSchedulerTest {
     void terminalRouteRejectionDoesNotAcquireDecodeAcceptance() {
         Fixture fixture = new Fixture(true);
 
-        Response response = fixture.scheduler.submit(fixture.context).join();
+        Response response = fixture.scheduler.submit(fixture.context).orTimeout(3, TimeUnit.SECONDS).join();
 
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                 response.getCode());
@@ -1366,6 +1366,7 @@ class RequestSchedulerTest {
             }
             when(configService.loadBalanceConfig()).thenReturn(config);
             when(context.getRequest()).thenReturn(new Request());
+            when(context.isOpen()).thenReturn(true);
             when(context.hasGenerateInput()).thenReturn(true);
             when(context.getConfig()).thenReturn(config);
             when(context.getRequestId()).thenReturn(requestId);

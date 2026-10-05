@@ -331,6 +331,39 @@ class RequestSchedulerContractTest {
         }
     }
 
+    @Test
+    void admissionFailureReleasesDrainGateBeforeInvokingTerminationCallbacks() throws Exception {
+        try (Fixture f = new Fixture(false)) {
+            var context = f.context(940L);
+            var future = f.requests.register(context, StrategyErrorType.BATCH_SLO_EXPIRED);
+            var handle = f.requests.claimAdmissionHandle(940L, future);
+            assertNotNull(handle);
+            var originalTimer = f.requests.expirationTimer();
+            var timer = org.mockito.Mockito.spy(originalTimer);
+            var failure = new IllegalStateException("expiry attachment failed");
+            doThrow(failure).when(timer).attachInactivityDeadline(context);
+            var observed = f.requests.termination().handle((ignored, cause) -> {
+                assertSame(failure, cause instanceof java.util.concurrent.CompletionException ? cause.getCause() : cause);
+                assertSame(failure, org.springframework.test.util.ReflectionTestUtils.getField(f.requests, "failure"));
+                assertEquals(0, org.springframework.test.util.ReflectionTestUtils.getField(
+                        f.requests, "inFlightAdmissionHandles"),
+                        "synchronous termination callbacks must be able to wait for admission drain");
+                f.requests.awaitAdmissionMutations();
+                return failure;
+            }).toCompletableFuture();
+            org.springframework.test.util.ReflectionTestUtils.setField(f.requests, "expirationTimer", timer);
+            try {
+                assertSame(failure, assertThrows(IllegalStateException.class, handle::finish));
+                assertSame(failure, observed.get(3, TimeUnit.SECONDS));
+                assertEquals(0, org.springframework.test.util.ReflectionTestUtils.getField(
+                        f.requests, "inFlightAdmissionHandles"));
+            } finally {
+                org.springframework.test.util.ReflectionTestUtils.setField(f.requests, "expirationTimer", originalTimer);
+                f.scheduler.cancel(940L, 0L, CancelReason.CLIENT_CANCELLED);
+            }
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.newConfig();
         final DefaultRouter router = mock(DefaultRouter.class);

@@ -87,7 +87,7 @@ class DecodePreemptionCoordinatorTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = EngineCancelChannel.CancelAck.class, names = {"ACCEPTED", "FAILED"})
+    @EnumSource(value = EngineCancelChannel.CancelAck.class, names = {"ACCEPTED", "FAILED", "REQUEST_FENCED"})
     void timeoutBeginsAfterAckAndLateTerminalCannotReopenIncoming(
             EngineCancelChannel.CancelAck acknowledgement) throws Exception {
         Fixture fixture = fixture();
@@ -170,7 +170,7 @@ class DecodePreemptionCoordinatorTest {
 
     @ParameterizedTest
     @EnumSource(value = EngineCancelChannel.CancelAck.class,
-            names = {"FAILED", "NOT_FOUND", "REQUEST_FENCED"})
+            names = {"FAILED", "NOT_FOUND", "REQUEST_FENCED", "REQUEST_CLEANED"})
     void reversedAcknowledgementsStayBoundToTheirVictims(
             EngineCancelChannel.CancelAck secondReply) throws Exception {
         Fixture fixture = fixture();
@@ -202,7 +202,8 @@ class DecodePreemptionCoordinatorTest {
         switch (secondReply) {
             case FAILED -> verify(fixture.requests()).updatePreemption(second, PreemptionCancelPhase.CANCEL_UNKNOWN);
             case NOT_FOUND -> verify(fixture.requests()).updatePreemption(second, PreemptionCancelPhase.NOT_FOUND_STALE);
-            case REQUEST_FENCED -> {
+            case REQUEST_FENCED -> verify(fixture.requests()).updatePreemption(second, PreemptionCancelPhase.CANCEL_REQUESTED);
+            case REQUEST_CLEANED -> {
                 verify(fixture.endpoint()).updatePreemption(1L,
                         DecodeEndpoint.PreemptionUpdate.fenced(
                                 new DecodeEndpoint.ReservationHandle(9L, 12L, 102L)));
@@ -211,13 +212,43 @@ class DecodePreemptionCoordinatorTest {
             default -> throw new AssertionError("unexpected test reply");
         }
         assertFalse(result.isDone(), "ACKs cannot replace the first victim's terminal proof");
-        if (secondReply != EngineCancelChannel.CancelAck.REQUEST_FENCED) {
+        if (secondReply != EngineCancelChannel.CancelAck.REQUEST_CLEANED) {
             secondTerminal.complete(new VictimTerminal(12L));
         }
         firstTerminal.complete(new VictimTerminal(11L));
         assertTrue(result.get(1L, TimeUnit.SECONDS).committed());
         verify(fixture.endpoint()).commitPreemption(1L);
         verify(fixture.endpoint(), never()).abortPreemption(anyLong());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = EngineCancelChannel.CancelAck.class,
+            names = {"REQUEST_FENCED", "REQUEST_CLEANED"})
+    void onlyDownstreamCleanupProofCanReplaceDecodeTerminal(EngineCancelChannel.CancelAck reply) throws Exception {
+        Fixture fixture = fixture();
+        CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
+        PreemptionRegistration claim = claim(fixture.requests(), 11L, terminal);
+        when(fixture.requests().tryClaim(anyLong(), anyLong(), anyLong(), any()))
+                .thenReturn(Optional.of(claim));
+        when(fixture.requests().completePreemption(eq(claim), any())).thenReturn(true);
+        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        when(channel.cancel(any(), anyLong(), eq(CancelReason.PRIORITY_PREEMPTED), anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(reply));
+        var coordinator = new DecodePreemptionCoordinator(channel,
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(fixture.requests()));
+        var outcome = coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
+                fixture.endpoint(), incoming(1L), List.of(victim(11L, 101L)),
+                1_000L, 1_000L, () -> true, "test"));
+        if (reply == EngineCancelChannel.CancelAck.REQUEST_FENCED) {
+            assertFalse(outcome.isDone(), "Prefill fence alone does not prove Decode resource release");
+            verify(fixture.requests(), never()).completePreemption(eq(claim), any());
+            verify(fixture.endpoint(), never()).updatePreemption(1L,
+                    DecodeEndpoint.PreemptionUpdate.fenced(new DecodeEndpoint.ReservationHandle(9L, 11L, 101L)));
+            verify(fixture.endpoint(), never()).commitPreemption(anyLong());
+            terminal.complete(new VictimTerminal(11L));
+        }
+        assertTrue(outcome.get(1L, TimeUnit.SECONDS).committed());
+        verify(fixture.endpoint()).commitPreemption(1L);
     }
 
     private static Fixture fixture() {

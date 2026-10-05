@@ -244,7 +244,7 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
             }
             EngineCancelChannel.CancelAck outcome = owned.acknowledgement.join();
             switch (outcome) {
-                case ACCEPTED -> {
+                case ACCEPTED, REQUEST_FENCED -> {
                     boolean transitioned =
                             command.endpoint().updatePreemption(
                                     capability.token,
@@ -267,12 +267,9 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
                         hasNotFound = true;
                     }
                 }
-                case REQUEST_FENCED, REQUEST_CLEANED -> {
-                    // Unlike NOT_FOUND, REQUEST_FENCED atomically proves absence
-                    // and prevents every racing late Enqueue. It is therefore
-                    // a terminal victim proof and contributes freed capacity
-                    // to this same transaction.
-                    settleRequestFenced(capability, owned);
+                case REQUEST_CLEANED -> {
+                    // Only downstream cleanup proof can release Decode capacity without a WorkerStatus terminal.
+                    settleRequestCleaned(capability, owned);
                 }
                 case FAILED, UNSUPPORTED -> {
                     capability.transferUnknown(owned);
@@ -303,7 +300,7 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
         return settlement.handle((ignored, failure) -> capability.finish(ackNotFound));
     }
 
-    private void settleRequestFenced(
+    private void settleRequestCleaned(
             AttemptCapability capability,
             ClaimedVictim owned) {
         PreemptionCommand command = capability.command;
