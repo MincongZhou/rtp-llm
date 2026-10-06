@@ -241,6 +241,8 @@ Scheduler 持有响应协议和完成操作：ACK 对应的请求 deadline 在�
 
 验证：3 个独立 reviewer 的复审无阻断问题；所有权/关闭重点 UT 70 项通过，Sync 全量 UT 1,631 项通过。完整本地 reactor 共 2,484 项，1 项跳过，Mock 吞吐锚点 1 项失败；该类远端复跑 8 项全部通过。750P/750D、64g JVM、3,000/10,000 QPS 的 BATCH 与 NON_BATCH 共 4 个场景通过 Master/client P99 < 50 ms 及吞吐 ≥ 98% 的门槛。[完整验证记录](evidence/response-completion-executor-2026-10-06.json)。
 
+质量复审补充：执行登记不等于响应获胜；PublicationPermit 使用 consumeForSelection / abandonIfUnused 表达一次选择机会。执行器区分异步 worker 与同步 caller，提交前锁检查失败归还登记，主线程池关闭失败仍尝试关闭恢复线程池。新增异常路径覆盖后 Sync 全量 UT 1,633 项通过，重点 UT 72 项通过，复审及格式检查通过；本轮未重复性能测试。
+
 ### 8.4 已有 SchedulerRuntime 的停机顺序
 
 整体顺序由现有 `SchedulerRuntime.shutdown()` 维护。RequestScheduler 只暴露自身各关闭步骤，不再增加一个整体 shutdown owner。保留当前顺序及故障下继续执行剩余步骤的行为：

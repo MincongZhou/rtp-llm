@@ -220,5 +220,35 @@
     "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BalanceContext.java": "111281de12d02a7eb05d7f40ea645e6ae6e2415dc2fc056eeb4c99daecfa7f4f",
     "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ResponseCompletionExecutor.java": "bcf35db09c435c7bdcbc96b31436452a0d0dec7096928f9394ceb9ec39f5476f",
     "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java": "085adc8cf63940daf500f3a57845e67b71d2286e1648a23c0bbd00dbb5ee181d"
+  },
+  "qualityReviewFollowup": {
+    "reviewedCommit": "a99eeb0241",
+    "responsibilities": "Scheduler owns response protocol and lock checks; Context owns response selection; executor owns task registration and lifecycle.",
+    "fixes": [
+      "Distinguish async worker execution and synchronous caller execution in documentation.",
+      "Name completionWorkers, rejectedTaskWorker, owner, insideCompletion, closeResult and operation explicitly.",
+      "Name permit consumption consumeForSelection/abandonIfUnused; consuming does not select a response winner.",
+      "Remove test-only null-permit branch; executor-only tests exercise Future completion directly.",
+      "Return registration when async submission lock precondition fails; synchronous precondition runs inside executor finally.",
+      "Attempt both worker shutdowns even when the first fails."
+    ],
+    "verification": {
+      "syncTests": 1633,
+      "upstreamTests": 278,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "focusedTests": 72,
+      "spotless": "passed",
+      "independentReviewer": "no remaining required fixes"
+    },
+    "performance": "Not rerun for this quality followup; performance rows above cover initial refactor, queue timing and normal response protocol unchanged.",
+    "artifactDirectory": "/tmp/flexlb-response-quality-20261006",
+    "productionSources": {
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/SchedulerRuntime.java": "540a7a4636a633eaf3630d1859add24fbfa4f62083271e968c7361ca0ecd9c25",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BalanceContext.java": "62c23a351ffd587b2bbd81f7c4f57811a749cf25c9c82d9dc36c8937f82d094e",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ResponseCompletionExecutor.java": "8145c51e3d6656d3131e6527bbd7e55cda3664a52c5db284565ece07bd8f8c7f",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java": "bbbb34b4e78c1f22c1f42f746202570deb39b68886de0624b26f5d277914655d"
+    }
   }
 }

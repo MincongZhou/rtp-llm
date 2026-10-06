@@ -1059,19 +1059,17 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 } catch (Throwable failure) {
                     Logger.error("Delivery ACK reporting failed request_id={}", delivery.item().requestId(), failure);
                 }
-                return completeResponse(BalanceContext.selectPublication(delivery.item().ctx(), delivery.publication(),
+                return completeFutureResult(BalanceContext.selectPublication(delivery.item().ctx(), delivery.publication(),
                         ResponseCompletion.RESPONSE, delivery.response(), null, false));
             });
         } catch (RuntimeException | Error failure) {
-            delivery.publication().abandonIfUnclaimed();
+            delivery.publication().abandonIfUnused();
             throw failure;
         }
     }
 
-    static boolean completeResponse(SelectedResponse response) {
-        if (response.permit() != null) {
-            response.permit().requestContext().requireOutsideContextLock("response completion");
-        }
+    static boolean completeFutureResult(SelectedResponse response) {
+        response.permit().requestContext().requireOutsideContextLock("response completion");
         if (response.result() == null) { return false; }
         var result = response.result();
         return switch (result.completion()) {
@@ -1082,13 +1080,17 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     private void submitSelectedResponse(SelectedResponse response) {
-        response.permit().requestContext().requireOutsideContextLock("response submission");
-        responseCompletions.submit(response.permit().registration, () -> completeResponse(response));
+        try {
+            response.permit().requestContext().requireOutsideContextLock("response submission");
+            responseCompletions.submit(response.permit().registration, () -> completeFutureResult(response));
+        } catch (RuntimeException | Error failure) {
+            response.permit().closePublication();
+            throw failure;
+        }
     }
 
-    private boolean completeSelectedResponse(SelectedResponse response) {
-        response.permit().requestContext().requireOutsideContextLock("response completion");
-        return responseCompletions.completeNow(response.permit().registration, () -> completeResponse(response));
+    private boolean completeSelectedResponseNow(SelectedResponse response) {
+        return responseCompletions.completeNow(response.permit().registration, () -> completeFutureResult(response));
     }
 
     // ── 响应：本地结束、结果仲裁与发布交接 ──
@@ -1121,7 +1123,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 TerminalOutcome.cancel(CancelReason.CLIENT_CANCELLED.getMessage());
         };
         PublicationPermit permit = terminateLocallyAndAcquirePublication(ctx, outcome);
-        return permit != null && completeSelectedResponse(BalanceContext.selectPublication(ctx, permit, completion, response, error, interrupt));
+        return permit != null && completeSelectedResponseNow(BalanceContext.selectPublication(ctx, permit, completion, response, error, interrupt));
     }
 
     /**
@@ -1145,18 +1147,18 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             permit = requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL);
             try {
                 if (ctx.cancellationReason() == null && !ctx.recordCancellationLocked(CancelReason.CLIENT_CANCELLED, CancelReason.CLIENT_CANCELLED.getMessage())) {
-                    permit.abandonIfUnclaimed();
+                    permit.abandonIfUnused();
                     return false;
                 }
                 ctx.selectQueuedCancellation(interrupt);
                 localControl = local ? ctx.item() : null;
             } catch (RuntimeException | Error failure) {
-                permit.abandonIfUnclaimed();
+                permit.abandonIfUnused();
                 throw failure;
             }
         }
         try {
-            return completeSelectedResponse(BalanceContext.selectPublication(ctx, permit, ResponseCompletion.CANCELLATION, null, null, interrupt));
+            return completeSelectedResponseNow(BalanceContext.selectPublication(ctx, permit, ResponseCompletion.CANCELLATION, null, null, interrupt));
         } catch (RuntimeException | Error failure) {
             ctx.future().cancelOwned(interrupt);
             throw failure;

@@ -1119,7 +1119,7 @@ public class BalanceContext {
         if (permit.requestContext != ctx || completion != ResponseCompletion.RESPONSE && permit.kind != PublicationKind.TERMINAL) {
             throw new IllegalArgumentException("incompatible publication permit");
         }
-        permit.claim();
+        permit.consumeForSelection();
         try {
             synchronized (ctx) {
                 return new SelectedResponse(permit, ctx.future(), ctx.claimPublicationResultLocked(permit.kind, completion, response, failure, mayInterruptIfRunning));
@@ -1130,7 +1130,11 @@ public class BalanceContext {
         }
     }
 
-    /** Request-bound response claim, separate from executor admission and drain. */
+    /**
+     * Single-use response selection attempt for an exact request and publication kind.
+     * Consuming this permit does not select a winner; selectedResponse records that decision.
+     * The associated execution registration keeps shutdown waiting until completion or abandonment.
+     */
     static final class PublicationPermit {
 
         final ResponseCompletionExecutor.CompletionRegistration registration;
@@ -1139,7 +1143,7 @@ public class BalanceContext {
 
         final PublicationKind kind;
 
-        private final AtomicBoolean claimed = new AtomicBoolean();
+        private final AtomicBoolean consumed = new AtomicBoolean();
 
         PublicationPermit(ResponseCompletionExecutor.CompletionRegistration registration, BalanceContext requestContext, PublicationKind kind) {
             this.registration = Objects.requireNonNull(registration);
@@ -1156,15 +1160,15 @@ public class BalanceContext {
         /**
          * Abandon a permit only when no other submitter consumed it.
          */
-        void abandonIfUnclaimed() {
-            if (claimed.compareAndSet(false, true)) {
+        void abandonIfUnused() {
+            if (consumed.compareAndSet(false, true)) {
                 closePublication();
             }
         }
 
-        void claim() {
-            if (!claimed.compareAndSet(false, true)) {
-                throw new IllegalStateException("publication permit already consumed for request " + requestContext.getRequestId());
+        void consumeForSelection() {
+            if (!consumed.compareAndSet(false, true)) {
+                throw new IllegalStateException("response selection permit already consumed for request " + requestContext.getRequestId());
             }
         }
     }
@@ -1338,7 +1342,7 @@ public class BalanceContext {
             return action;
         } finally {
             if (!transferred && permit != null) {
-                permit.abandonIfUnclaimed();
+                permit.abandonIfUnused();
             }
         }
     }
@@ -1361,7 +1365,7 @@ public class BalanceContext {
             return null;
         }
         this.selectedResponse = new ResponseResult(ResponseCompletion.RESPONSE, response, null, false);
-        permit.claim();
+        permit.consumeForSelection();
         return new SelectedResponse(permit, this.future(), this.selectedResponse);
     }
 
@@ -1562,7 +1566,7 @@ public class BalanceContext {
     RequestState finishTerminal(TerminalAction action) {
         requireContextLock("terminal commit");
         if (stage != RequestStage.FINALIZING || action.requestContext() != this || item != action.item()) {
-            if (action.publication() != null) { action.publication().abandonIfUnclaimed(); }
+            if (action.publication() != null) { action.publication().abandonIfUnused(); }
             throw new IllegalStateException("terminal context identity changed: request_id=" + getRequestId());
         }
         RequestState terminal = snapshot();
@@ -2092,7 +2096,7 @@ public class BalanceContext {
             DeliveryPublication publication = this.acknowledgeDelivery(permit, nowMs);
             return scheduler.deliveryEffects(this, publication, signal);
         } catch (RuntimeException | Error failure) {
-            permit.abandonIfUnclaimed();
+            permit.abandonIfUnused();
             throw failure;
         }
     }
