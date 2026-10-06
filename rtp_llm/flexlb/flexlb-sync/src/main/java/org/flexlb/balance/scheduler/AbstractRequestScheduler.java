@@ -1,12 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.config.FlexlbConfig;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.function.Consumer;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -24,23 +17,32 @@ import org.flexlb.balance.scheduler.BalanceContext.DeliveryClaim;
 import org.flexlb.balance.scheduler.BalanceContext.DeliveryPublication;
 import org.flexlb.balance.scheduler.BalanceContext.PendingPrefillRetirement;
 import org.flexlb.balance.scheduler.BalanceContext.PublicationKind;
+import org.flexlb.balance.scheduler.BalanceContext.PublicationPermit;
 import org.flexlb.balance.scheduler.BalanceContext.RequestFuture;
 import org.flexlb.balance.scheduler.BalanceContext.RequestStage;
+import org.flexlb.balance.scheduler.BalanceContext.ResponseCompletion;
+import org.flexlb.balance.scheduler.BalanceContext.SelectedResponse;
 import org.flexlb.balance.scheduler.ExpirationTimer.DecisionDeadline;
-import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.RequestDeadline;
-import org.flexlb.balance.scheduler.RequestCompletionPublisher.PublicationPermit;
-import org.flexlb.balance.scheduler.RequestCompletionPublisher.ResponseCompletion;
-import org.flexlb.balance.scheduler.RequestCompletionPublisher.SelectedPublication;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
+
 import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 
 /** Shared request protocol; concrete schedulers own their mode-specific placement algorithm. */
@@ -49,7 +51,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     protected final SchedulerRuntime runtime;
     protected final FlexlbConfig config;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
-    private final RequestCompletionPublisher completionPublisher;
+    private final ResponseCompletionExecutor responseCompletions;
     private final RequestContinuationExecutor continuations;
     private final ExpirationTimer expirationTimer;
     private final Object admissionQuiescenceMonitor = new Object();
@@ -61,7 +63,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         this.config = Objects.requireNonNull(config);
         this.requests = runtime.requests();
         this.recentCacheKeyTraceReporter = runtime.recentCacheKeyTraceReporter();
-        this.completionPublisher = runtime.publisher();
+        this.responseCompletions = runtime.responseCompletions();
         this.continuations = runtime.continuations();
         this.expirationTimer = runtime.timer();
         this.requestReporter = runtime.requestReporter();
@@ -202,7 +204,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-
     /** Endpoint accounting is committed before these exact facts enter request transitions. */
     public void onPrefillStatus(PrefillEndpoint source, RoleType role,
                                 List<PrefillState.WorkerStatusFact> facts) {
@@ -326,7 +327,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return response;
     }
 
-
     public boolean isAdmissionOpen(long requestId, CompletableFuture<?> future) {
         if (requests.isClosed()) {
             return false;
@@ -443,13 +443,11 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return prefill == null ? null : new CancelTarget(prefill.getServerIp(), prefill.getGrpcPort());
     }
 
-
     /**
      * Retain registered IDs, including terminal records, during endpoint orphan cleanup.
      * Called under endpoint locks: never acquire a context lock here. Read the current
      * directory rather than a snapshot, which could miss a newly registered request.
      */
-
 
     public void onQueuedItemExpired(RequestRoute exact) {
         BalanceContext requestContext = findRouteContext(exact);
@@ -522,7 +520,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return requestContext != null && requestContext.ownsFuture(future) && terminateLocallyAndPublishResponse(requestContext, response);
     }
 
-
     void closeOutstandingAndTerminalize() {
         if (!requests.isClosed()) {
             throw new IllegalStateException("admission must close before terminal shutdown");
@@ -550,7 +547,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
         });
     }
-
 
     PlacementResult.Status commitRoute(RequestRoute exact, ProvisionalRoute.Publication publication) {
         Objects.requireNonNull(publication, "publication");
@@ -641,7 +637,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
         Failures.rethrow(failure, "request cleanup failed");
     }
-
 
     /**
      * Eligibility and preparation are one transaction; null means prepared, otherwise the result is the exact rejection.
@@ -734,7 +729,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         synchronized (ctx) {
             if (!ctx.acceptDeliveryClaim(claim) || ctx.hasTerminalAction() || ctx.hasCleanup()) { return null; }
             if (result.failed()) {
-                SelectedPublication response = ctx.selectDeliveryFailureLocked(claim.item, result.status(),
+                SelectedResponse response = ctx.selectDeliveryFailureLocked(claim.item, result.status(),
                         "Delivery failed: " + detailOf(result.cause()), () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
                 return () -> publishFailureAndCleanUp(ctx, claim.item, result.status(), response);
             }
@@ -755,7 +750,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     public void failDeliveryPreparation(RequestRoute exact, Throwable cause) {
         BalanceContext ctx = exact.ctx();
-        SelectedPublication response;
+        SelectedResponse response;
         synchronized (ctx) {
             if (!ownsPreparedDeliveryLocked(ctx, exact)) {
                 return;
@@ -766,8 +761,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     private void publishFailureAndCleanUp(BalanceContext ctx, RequestRoute exact,
-                                         DeliveryResult.Status source, SelectedPublication response) {
-        Throwable failure = Failures.run(null, response == null ? null : () -> completionPublisher.submit(response));
+                                         DeliveryResult.Status source, SelectedResponse response) {
+        Throwable failure = Failures.run(null, response == null ? null : () -> submitSelectedResponse(response));
         failure = Failures.run(failure, () -> cleanUpRequest(ctx, exact, source));
         Failures.rethrow(failure, "request cleanup failed");
     }
@@ -799,7 +794,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             return ctx.claimPrefillRetirementLocked(new PendingPrefillRetirement(source, exact, detail));
         }
     }
-
 
     /**
      * Return the resulting request snapshot; accepting cancellation does not imply immediate cleanup.
@@ -957,11 +951,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     /** Both fenced-Cancel and typed worker cancellation settle the same request claim. */
 
-
     /**
      * Retain an end event while admission or preemption still owns the request.
      */
-
 
     /**
      * The only close gate: no event may discard an outstanding cleanup obligation.
@@ -985,7 +977,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     private void publishTerminal(TerminalAction action) {
         if (action.publication() != null && action.response() != null) {
-            completionPublisher.submit(BalanceContext.selectPublication(action.requestContext(), action.publication(),
+            submitSelectedResponse(BalanceContext.selectPublication(action.requestContext(), action.publication(),
                     ResponseCompletion.RESPONSE, action.response(), null, false));
         }
     }
@@ -1012,8 +1004,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
         Runnable archive = () -> {
             Throwable failure = Failures.run(settledCleanupFailure, () -> releaseEndpoints(action));
-            if (failure != null) { recordFailure(failure); }
-            else { commitTerminalRecord(context, action); }
+            if (failure != null) { recordFailure(failure); } else { commitTerminalRecord(context, action); }
         };
         if (delivery == null || delivery.cleanupComplete()) {
             archive.run();
@@ -1041,11 +1032,63 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     Runnable deliveryEffects(BalanceContext ctx, DeliveryPublication delivery, PreemptionRegistration signal) {
         return () -> {
-            Throwable failure = Failures.run(null, () -> completionPublisher.submitDelivery(delivery));
+            Throwable failure = Failures.run(null, () -> submitDeliveryResponse(delivery));
             failure = Failures.run(failure, signal == null ? null
                     : () -> signal.signalTerminal(new VictimTerminal(ctx.getRequestId())));
             Failures.rethrow(failure, "request cleanup failed");
         };
+    }
+
+    /** Keep ACK selection on the response execution queue, so newer terminal facts can win. */
+    private void submitDeliveryResponse(DeliveryPublication delivery) {
+        try {
+            delivery.item().ctx().requireOutsideContextLock("delivery response submission");
+            try {
+                if (delivery.requestDeadline() != null) { delivery.requestDeadline().cancel(); }
+            } catch (Throwable failure) {
+                Logger.error("Delivery deadline cancellation failed request_id={}", delivery.item().requestId(), failure);
+            }
+            responseCompletions.submit(delivery.publication().registration, () -> {
+                try {
+                    if (delivery.batchEnqueueStartedAtMs() > 0L && delivery.item().ctx().getAckAtMs() > 0L) {
+                        runtime.batchReporter().reportLatency(BatchSchedulerReporter.Latency.DISPATCH_ACK,
+                                RoleType.PREFILL.name(),
+                                delivery.item().prefillEp() == null ? "" : delivery.item().prefillEp().getIp(),
+                                Math.max(0L, delivery.item().ctx().getAckAtMs() - delivery.batchEnqueueStartedAtMs()));
+                    }
+                } catch (Throwable failure) {
+                    Logger.error("Delivery ACK reporting failed request_id={}", delivery.item().requestId(), failure);
+                }
+                return completeResponse(BalanceContext.selectPublication(delivery.item().ctx(), delivery.publication(),
+                        ResponseCompletion.RESPONSE, delivery.response(), null, false));
+            });
+        } catch (RuntimeException | Error failure) {
+            delivery.publication().abandonIfUnclaimed();
+            throw failure;
+        }
+    }
+
+    static boolean completeResponse(SelectedResponse response) {
+        if (response.permit() != null) {
+            response.permit().requestContext().requireOutsideContextLock("response completion");
+        }
+        if (response.result() == null) { return false; }
+        var result = response.result();
+        return switch (result.completion()) {
+            case RESPONSE -> response.future().completeOwned(result.response());
+            case FAILURE -> response.future().completeExceptionallyOwned(result.failure());
+            case CANCELLATION -> response.future().cancelOwned(result.interrupt());
+        };
+    }
+
+    private void submitSelectedResponse(SelectedResponse response) {
+        response.permit().requestContext().requireOutsideContextLock("response submission");
+        responseCompletions.submit(response.permit().registration, () -> completeResponse(response));
+    }
+
+    private boolean completeSelectedResponse(SelectedResponse response) {
+        response.permit().requestContext().requireOutsideContextLock("response completion");
+        return responseCompletions.completeNow(response.permit().registration, () -> completeResponse(response));
     }
 
     // ── 响应：本地结束、结果仲裁与发布交接 ──
@@ -1054,7 +1097,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         if (permit == null) {
             return false;
         }
-        completionPublisher.submit(BalanceContext.selectPublication(ctx, permit, ResponseCompletion.RESPONSE, response, null, false));
+        submitSelectedResponse(BalanceContext.selectPublication(ctx, permit, ResponseCompletion.RESPONSE, response, null, false));
         return true;
     }
 
@@ -1078,7 +1121,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 TerminalOutcome.cancel(CancelReason.CLIENT_CANCELLED.getMessage());
         };
         PublicationPermit permit = terminateLocallyAndAcquirePublication(ctx, outcome);
-        return permit != null && completionPublisher.publishNow(BalanceContext.selectPublication(ctx, permit, completion, response, error, interrupt));
+        return permit != null && completeSelectedResponse(BalanceContext.selectPublication(ctx, permit, completion, response, error, interrupt));
     }
 
     /**
@@ -1113,7 +1156,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
         }
         try {
-            return completionPublisher.publishNow(BalanceContext.selectPublication(ctx, permit, ResponseCompletion.CANCELLATION, null, null, interrupt));
+            return completeSelectedResponse(BalanceContext.selectPublication(ctx, permit, ResponseCompletion.CANCELLATION, null, null, interrupt));
         } catch (RuntimeException | Error failure) {
             ctx.future().cancelOwned(interrupt);
             throw failure;
@@ -1144,16 +1187,13 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     PublicationPermit requirePublicationPermitLocked(BalanceContext ctx, PublicationKind kind) {
-        PublicationPermit permit = completionPublisher.tryReservePublication(ctx, kind);
-        if (permit == null || permit.requestContext() != ctx) {
-            if (permit != null) {
-                permit.abandonIfUnclaimed();
-            }
+        ctx.requireContextLock("publication registration");
+        var registration = responseCompletions.tryRegister();
+        if (registration == null) {
             throw new IllegalStateException("frontend publication is closed for request " + ctx.getRequestId());
         }
-        return permit;
+        return new PublicationPermit(registration, ctx, kind);
     }
-
 
     // ── 共同收尾：清理、提交记录、发布结果 ──
 
@@ -1259,9 +1299,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         cleanUpRequest(ctx, exact, source);
     }
 
-
 }
-
 
 /**
  * Endpoint that emitted the terminal fact; Decode facts follow its ledger update.

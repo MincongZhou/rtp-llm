@@ -108,7 +108,7 @@ class EndpointCleanupDeadlockTest {
             AbstractRequestScheduler registry = mock(AbstractRequestScheduler.class);
             ExpirationTimer timer = new ExpirationTimer(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry));
             BalanceContext requestContext = RequestProtocolTestSupport.context(config, 992L);
-            AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(RequestCompletionPublisher.class), requestContext, timer);
+            AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(ResponseCompletionExecutor.class), requestContext, timer);
 
             CountDownLatch contextHeld = new CountDownLatch(1);
             CountDownLatch closeReachesContexts = new CountDownLatch(1);

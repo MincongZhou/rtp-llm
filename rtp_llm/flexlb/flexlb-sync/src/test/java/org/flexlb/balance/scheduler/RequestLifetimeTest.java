@@ -612,7 +612,7 @@ class RequestLifetimeTest {
         config.getRequestLifecycle().getDecision().setLifetime(lifetime);
         SchedulingTestConfig.useNonBatchDispatcher(config);
         BalanceContext context = RequestProtocolTestSupport.context(config, 101L);
-        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(RequestCompletionPublisher.class), context, mock(ExpirationTimer.class));
+        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(ResponseCompletionExecutor.class), context, mock(ExpirationTimer.class));
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         DecodeEndpoint decode = separateDecode ? mock(DecodeEndpoint.class) : null;
         DecodeEndpoint.ReservationHandle reservation = separateDecode ? new DecodeEndpoint.ReservationHandle(1L, 101L, 1L) : null;

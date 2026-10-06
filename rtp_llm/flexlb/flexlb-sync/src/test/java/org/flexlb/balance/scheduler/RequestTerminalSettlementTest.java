@@ -27,7 +27,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -45,7 +44,7 @@ class RequestTerminalSettlementTest {
         var queue = mock(QueuedRequestScheduler.class);
         var timeoutEvidence = java.util.Map.<String, Object>of("cause", "DECODE placement unavailable");
         when(queue.getLatestQueueWaitSnapshot()).thenReturn(timeoutEvidence);
-        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(RequestCompletionPublisher.class), context, mock(ExpirationTimer.class));
+        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(ResponseCompletionExecutor.class), context, mock(ExpirationTimer.class));
         org.mockito.Mockito.doReturn(timeoutEvidence).when((QueuedRequestScheduler) requestOwner).getLatestQueueWaitSnapshot();
         var admission = RequestProtocolTestSupport.beginAdmission(requestOwner, context);
         assertNotNull(admission);
@@ -60,7 +59,7 @@ class RequestTerminalSettlementTest {
     @Test
     void oldDecodeRetirementCannotRemoveANewSchedulingGeneration() {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 4202L);
-        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(RequestCompletionPublisher.class), context, mock(ExpirationTimer.class));
+        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(ResponseCompletionExecutor.class), context, mock(ExpirationTimer.class));
         requestOwner.onDecodeGenerationRetired(mock(DecodeEndpoint.class), java.util.List.of(new DecodeEndpoint.ReservationHandle(1L, 4202L, 7L)));
         requestOwner.runtime.continuations().awaitIdle();
         assertTrue(context.isOpen());
@@ -296,22 +295,16 @@ class RequestTerminalSettlementTest {
     private static Fixture fixture(boolean finishAdmission, boolean queueScheduling) {
         var config = SchedulingTestConfig.newConfig();
         BalanceContext context = RequestProtocolTestSupport.context(config, RESERVATION.requestId());
-        var publisher = mock(RequestCompletionPublisher.class);
+        var publisher = mock(ResponseCompletionExecutor.class);
         var timer = mock(ExpirationTimer.class);
         AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(publisher, context, timer);
         when(requestOwner.runtime.cancelChannel().cancel(any(), anyLong(), any(), anyLong()))
                 .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED));
-        when(publisher.tryReservePublication(any(), any())).thenAnswer(call -> new RequestCompletionPublisher.PublicationPermit(publisher, context, call.getArgument(1)));
+        when(publisher.tryRegister()).thenAnswer(call -> new ResponseCompletionExecutor.CompletionRegistration(publisher));
         doAnswer(call -> {
-            ((RequestCompletionPublisher.SelectedPublication) call.getArgument(0)).complete();
+            ((java.util.function.BooleanSupplier) call.getArgument(1)).getAsBoolean();
             return null;
-        }).when(publisher).submit(any());
-        doAnswer(call -> {
-            BalanceContext.DeliveryPublication delivery = call.getArgument(0);
-            BalanceContext.selectPublication(context, delivery.publication(),
-                    RequestCompletionPublisher.ResponseCompletion.RESPONSE, delivery.response(), null, false).complete();
-            return null;
-        }).when(publisher).submitDelivery(any());
+        }).when(publisher).submit(any(), any());
         RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null, mock(PrefillEndpoint.class), mock(DecodeEndpoint.class), RESERVATION, System.currentTimeMillis());
         context.configureInactivityTimeout(60_000L);
         AdmissionHandle admission = RequestProtocolTestSupport.beginAdmission(requestOwner, context);

@@ -3,10 +3,10 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Failures;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -48,13 +48,13 @@ public final class SchedulerRuntime {
     }
 
     private final RequestContinuationExecutor continuations = new RequestContinuationExecutor();
-    private final RequestCompletionPublisher publisher;
+    private final ResponseCompletionExecutor responseCompletions;
     private final ExpirationTimer timer;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     RequestRepository requests() { return requests; }
     RequestContinuationExecutor continuations() { return continuations; }
-    RequestCompletionPublisher publisher() { return publisher; }
+    ResponseCompletionExecutor responseCompletions() { return responseCompletions; }
     ExpirationTimer timer() { return timer; }
     BatchSchedulerReporter batchReporter() { return reporter; }
     RequestSchedulerReporter requestReporter() { return admissionReporter; }
@@ -133,7 +133,7 @@ public final class SchedulerRuntime {
         this.config = Objects.requireNonNull(config, "config");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.recentCacheKeyTraceReporter = Objects.requireNonNull(recentCacheKeyTraceReporter);
-        this.publisher = new RequestCompletionPublisher(config.loadBalanceConfig().getInternalRuntime().getBatchDispatchCompletionThreads(), reporter);
+        this.responseCompletions = new ResponseCompletionExecutor(config.loadBalanceConfig().getInternalRuntime().getBatchDispatchCompletionThreads());
         this.timer = new ExpirationTimer(requests);
     }
 
@@ -229,7 +229,7 @@ public final class SchedulerRuntime {
     void closeRequestExecutors() {
         Throwable failure = null;
         try { continuations.close(); } catch (Throwable cause) { failure = cause; }
-        try { publisher.close(); } catch (Throwable cause) { failure = Failures.append(failure, cause); }
+        try { responseCompletions.close(); } catch (Throwable cause) { failure = Failures.append(failure, cause); }
         cleanupExecutor.shutdown();
         boolean interrupted = false;
         while (!cleanupExecutor.isTerminated()) {

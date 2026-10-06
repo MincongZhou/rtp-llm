@@ -36,7 +36,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -50,27 +49,26 @@ class RequestCompletionPublicationRaceTest {
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     @Timeout(15)
     void nestedSynchronousPublicationKeepsOuterCloseReentrant(boolean asyncOuter) throws Exception {
-        var publisher = new RequestCompletionPublisher(1, mock(BatchSchedulerReporter.class));
+        var publisher = new ResponseCompletionExecutor(1);
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 510L);
         context.bindScheduler(RequestProtocolTestSupport.directOwner(mock(AbstractRequestScheduler.class)));
-        var outerPermit = publisher.tryReservePublication(context, BalanceContext.PublicationKind.TERMINAL);
-        var innerPermit = publisher.tryReservePublication(context, BalanceContext.PublicationKind.TERMINAL);
+        var outerPermit = publisher.tryRegister();
+        var innerPermit = publisher.tryRegister();
         var outer = new BalanceContext.RequestFuture((completion, response, failure, interrupt) -> false);
         var inner = new BalanceContext.RequestFuture((completion, response, failure, interrupt) -> false);
-        var result = new BalanceContext.ResponseResult(RequestCompletionPublisher.ResponseCompletion.RESPONSE,
+        var result = new BalanceContext.ResponseResult(BalanceContext.ResponseCompletion.RESPONSE,
                 new Response(), null, false);
         var innerCallback = inner.thenRun(publisher::close);
         var outerCallback = outer.thenRun(() -> {
-            assertTrue(publisher.publishNow(new RequestCompletionPublisher.SelectedPublication(innerPermit, inner, result)));
+            assertTrue(publisher.completeNow(innerPermit, () -> AbstractRequestScheduler.completeResponse(new BalanceContext.SelectedResponse(null, inner, result))));
             innerCallback.join();
             // Inner publication has returned, but this outer callback still owns its permit.
             publisher.close();
         });
         try {
-            var publication = new RequestCompletionPublisher.SelectedPublication(outerPermit, outer, result);
+            var publication = new BalanceContext.SelectedResponse(null, outer, result);
             var execution = CompletableFuture.runAsync(() -> {
-                if (asyncOuter) { publisher.submit(publication); }
-                else { assertTrue(publisher.publishNow(publication)); }
+                if (asyncOuter) { publisher.submit(outerPermit, () -> AbstractRequestScheduler.completeResponse(publication)); } else { assertTrue(publisher.completeNow(outerPermit, () -> AbstractRequestScheduler.completeResponse(publication))); }
             });
             outerCallback.get(3, TimeUnit.SECONDS);
             execution.get(3, TimeUnit.SECONDS);
@@ -79,8 +77,8 @@ class RequestCompletionPublicationRaceTest {
                     .getField(publisher, "executor");
             assertTrue(executor.isTerminated());
         } finally {
-            innerPermit.closePublication();
-            outerPermit.closePublication();
+            innerPermit.close();
+            outerPermit.close();
             publisher.close();
         }
     }
@@ -89,21 +87,20 @@ class RequestCompletionPublicationRaceTest {
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     @Timeout(15)
     void foreignPublicationRejectionReturnsTheOriginalOwnersPermit(boolean async) {
-        try (var owner = new RequestCompletionPublisher(1, mock(BatchSchedulerReporter.class));
-             var other = new RequestCompletionPublisher(1, mock(BatchSchedulerReporter.class))) {
+        try (var owner = new ResponseCompletionExecutor(1);
+             var other = new ResponseCompletionExecutor(1)) {
             var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 511L);
             context.bindScheduler(RequestProtocolTestSupport.directOwner(mock(AbstractRequestScheduler.class)));
-            var permit = owner.tryReservePublication(context, BalanceContext.PublicationKind.TERMINAL);
+            var permit = owner.tryRegister();
             try {
-                var publication = new RequestCompletionPublisher.SelectedPublication(permit, null, null);
+                var publication = new BalanceContext.SelectedResponse(null, null, null);
                 assertThrows(IllegalStateException.class, () -> {
-                    if (async) { other.submit(publication); }
-                    else { other.publishNow(publication); }
+                    if (async) { other.submit(permit, () -> AbstractRequestScheduler.completeResponse(publication)); } else { other.completeNow(permit, () -> AbstractRequestScheduler.completeResponse(publication)); }
                 });
                 assertTrue(((java.util.Set<?>) org.springframework.test.util.ReflectionTestUtils
-                        .getField(owner, "publications")).isEmpty());
+                        .getField(owner, "registrations")).isEmpty());
             } finally {
-                permit.closePublication();
+                permit.close();
             }
         }
     }
@@ -118,8 +115,8 @@ class RequestCompletionPublicationRaceTest {
                 mock(RecentCacheKeyTraceReporter.class));
         try {
             CompletableFuture<Response> future = registry.register(RequestProtocolTestSupport.context(config, 503L), StrategyErrorType.BATCH_SLO_EXPIRED);
-            var publisher = (RequestCompletionPublisher) org.springframework.test.util.ReflectionTestUtils
-                    .getField(registry, "completionPublisher");
+            var publisher = (ResponseCompletionExecutor) org.springframework.test.util.ReflectionTestUtils
+                    .getField(registry, "responseCompletions");
             var executor = (ExecutorService) org.springframework.test.util.ReflectionTestUtils
                     .getField(publisher, "executor");
             executor.shutdown();
@@ -152,8 +149,8 @@ class RequestCompletionPublicationRaceTest {
         AbstractRequestScheduler scheduler = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service,
                 mock(BatchSchedulerReporter.class), mock(RequestSchedulerReporter.class),
                 mock(RecentCacheKeyTraceReporter.class));
-        var publisher = (RequestCompletionPublisher) org.springframework.test.util.ReflectionTestUtils
-                .getField(scheduler, "completionPublisher");
+        var publisher = (ResponseCompletionExecutor) org.springframework.test.util.ReflectionTestUtils
+                .getField(scheduler, "responseCompletions");
         int count = 256;
         var callbacks = new java.util.ArrayList<CompletableFuture<Void>>(count);
         var depth = new java.util.concurrent.atomic.AtomicInteger();
@@ -166,7 +163,7 @@ class RequestCompletionPublicationRaceTest {
                 boolean last = index == count - 1;
                 callbacks.add(future.thenAccept(response -> {
                     assertFalse(Thread.holdsLock(context));
-                    assertTrue(Thread.currentThread().getName().startsWith("request-completion-publisher-"));
+                    assertTrue(Thread.currentThread().getName().startsWith("response-completion-"));
                     assertEquals(1, depth.incrementAndGet(), "asynchronous publications must not recurse");
                     try {
                         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), response.getCode());
@@ -198,7 +195,7 @@ class RequestCompletionPublicationRaceTest {
     @org.junit.jupiter.params.provider.ValueSource(booleans = { false, true })
     @Timeout(15)
     void concurrentPublisherCloseSharesResultAndPreservesInterrupt(boolean shutdownFails) throws Exception {
-        var publisher = new RequestCompletionPublisher(1, mock(BatchSchedulerReporter.class));
+        var publisher = new ResponseCompletionExecutor(1);
         var executor = (ExecutorService) org.springframework.test.util.ReflectionTestUtils
                 .getField(publisher, "executor");
         RuntimeException failure = shutdownFails ? new IllegalStateException("shutdown failed") : null;
@@ -210,7 +207,7 @@ class RequestCompletionPublicationRaceTest {
         }
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 504L);
         context.bindScheduler(RequestProtocolTestSupport.directOwner(mock(AbstractRequestScheduler.class)));
-        var permit = publisher.tryReservePublication(context, BalanceContext.PublicationKind.TERMINAL);
+        var permit = publisher.tryRegister();
         assertNotNull(permit);
         var owner = new java.util.concurrent.atomic.AtomicReference<Thread>();
         var follower = new java.util.concurrent.atomic.AtomicReference<Thread>();
@@ -228,7 +225,7 @@ class RequestCompletionPublicationRaceTest {
             });
             RequestProtocolTestSupport.awaitCondition(() -> owner.get() != null
                     && owner.get().getState() == Thread.State.WAITING);
-            assertNull(publisher.tryReservePublication(context, BalanceContext.PublicationKind.TERMINAL),
+            assertNull(publisher.tryRegister(),
                     "close must reject new reservations while an earlier publication is pending");
             var second = closers.submit(() -> {
                 follower.set(Thread.currentThread());
@@ -246,7 +243,7 @@ class RequestCompletionPublicationRaceTest {
                     && follower.get().getState() == Thread.State.WAITING);
             assertFalse(first.isDone());
             assertFalse(second.isDone());
-            permit.abandonIfUnclaimed();
+            permit.close();
             assertSame(failure, first.get(5, TimeUnit.SECONDS));
             assertSame(failure, second.get(5, TimeUnit.SECONDS));
             assertTrue(interruptPreserved.get());
@@ -258,7 +255,7 @@ class RequestCompletionPublicationRaceTest {
                 assertTrue(executor.isTerminated());
             }
         } finally {
-            permit.abandonIfUnclaimed();
+            permit.close();
             closers.shutdownNow();
             assertTrue(closers.awaitTermination(5, TimeUnit.SECONDS));
             executor.shutdownNow();
@@ -383,11 +380,56 @@ class RequestCompletionPublicationRaceTest {
     }
 
     @Test
+    @Timeout(15)
+    void terminalInvalidatesAcknowledgementQueuedBehindAnotherRequestsCallback() throws Exception {
+        try (var completions = new ResponseCompletionExecutor(1)) {
+            Fixture fixture = fixture(completions);
+            var entered = new CountDownLatch(1);
+            var resume = new CountDownLatch(1);
+            var blockedFuture = new BalanceContext.RequestFuture((kind, response, failure, interrupt) -> false);
+            var blockedCallback = blockedFuture.thenRun(() -> {
+                entered.countDown();
+                await(resume);
+            });
+            var registration = completions.tryRegister();
+            completions.submit(registration, () -> blockedFuture.completeOwned(new Response()));
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                fixture.scheduler().deliveryEffects(fixture.requestContext(), fixture.delivery(), null).run();
+                assertNull(fixture.requestContext().selectedResponse(), "queued ACK must remain unselected");
+                assertFalse(fixture.requestContext().future().isDone());
+                Response failure = new Response();
+                failure.setSuccess(false);
+                TerminalAction terminal;
+                synchronized (fixture.requestContext()) {
+                    terminal = RequestProtocolTestSupport.claimTerminal(fixture.scheduler(), fixture.requestContext(),
+                            TerminalOutcome.fail("worker failed while response executor was busy"), failure, true);
+                    assertNotNull(terminal.publication());
+                    fixture.scheduler().commitTerminalRecord(fixture.requestContext(), terminal);
+                }
+                var selected = BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(),
+                        BalanceContext.ResponseCompletion.RESPONSE, failure, null, false);
+                completions.submit(selected.permit().registration, () -> AbstractRequestScheduler.completeResponse(selected));
+                resume.countDown();
+                blockedCallback.get(2, TimeUnit.SECONDS);
+                assertSame(failure, fixture.requestContext().future().get(2, TimeUnit.SECONDS));
+            } finally {
+                resume.countDown();
+                completions.close();
+                assertTrue(((java.util.Set<?>) org.springframework.test.util.ReflectionTestUtils
+                        .getField(completions, "registrations")).isEmpty());
+                fixture.scheduler().runtime.timer().close();
+                fixture.scheduler().runtime.closeRequestExecutors();
+            }
+        }
+    }
+
+    @Test
     void deliverySelectedBeforeExpiryKeepsItsResponseEvenBeforeTheFutureIsCompleted() {
         Fixture fixture = fixture();
         Response success = new Response();
         success.setSuccess(true);
-        RequestCompletionPublisher.SelectedPublication publishSuccess = BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, success, null, false);
+        BalanceContext.SelectedResponse publishSuccess = BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), BalanceContext.ResponseCompletion.RESPONSE, success, null, false);
         assertFalse(fixture.requestContext().future().isDone());
         CompletableFuture<Void> callback = fixture.requestContext().future().thenAccept(response ->
                 assertFalse(Thread.holdsLock(fixture.requestContext())));
@@ -399,7 +441,7 @@ class RequestCompletionPublicationRaceTest {
             fixture.scheduler().commitTerminalRecord(fixture.requestContext(), terminal);
             assertEquals(RequestState.Phase.TIMED_OUT, fixture.requestContext().snapshot().state());
         }
-        assertTrue(publishSuccess.complete());
+        assertTrue(AbstractRequestScheduler.completeResponse(publishSuccess));
         assertSame(success, fixture.requestContext().future().join());
         callback.join();
     }
@@ -409,12 +451,12 @@ class RequestCompletionPublicationRaceTest {
         Fixture fixture = fixture();
         Response success = new Response();
         success.setSuccess(true);
-        RequestCompletionPublisher.SelectedPublication selected = BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, success, null, false);
+        BalanceContext.SelectedResponse selected = BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), BalanceContext.ResponseCompletion.RESPONSE, success, null, false);
 
         assertFalse(fixture.requestContext().future().cancel(false));
         assertFalse(fixture.requestContext().future().isDone());
         assertEquals(RequestState.Phase.ACKNOWLEDGED, fixture.requestContext().snapshot().state());
-        assertTrue(selected.complete());
+        assertTrue(AbstractRequestScheduler.completeResponse(selected));
         assertSame(success, fixture.requestContext().future().join());
     }
 
@@ -433,18 +475,18 @@ class RequestCompletionPublicationRaceTest {
         }
         Response success = new Response();
         success.setSuccess(true);
-        assertFalse(BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, success, null, false).complete());
+        assertFalse(AbstractRequestScheduler.completeResponse(BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), BalanceContext.ResponseCompletion.RESPONSE, success, null, false)));
         assertFalse(fixture.requestContext().future().isDone());
         CompletableFuture<Void> callback = fixture.requestContext().future().handle((response, error) -> {
             assertFalse(Thread.holdsLock(fixture.requestContext()));
             return null;
         });
-        RequestCompletionPublisher.SelectedPublication publication = switch (form) {
-            case RESPONSE -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), RequestCompletionPublisher.ResponseCompletion.RESPONSE, failure, null, false);
-            case FAILURE -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), RequestCompletionPublisher.ResponseCompletion.FAILURE, null, new IllegalStateException("worker failed"), false);
-            case CANCELLATION -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), RequestCompletionPublisher.ResponseCompletion.CANCELLATION, null, null, false);
+        BalanceContext.SelectedResponse publication = switch (form) {
+            case RESPONSE -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), BalanceContext.ResponseCompletion.RESPONSE, failure, null, false);
+            case FAILURE -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), BalanceContext.ResponseCompletion.FAILURE, null, new IllegalStateException("worker failed"), false);
+            case CANCELLATION -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), BalanceContext.ResponseCompletion.CANCELLATION, null, null, false);
         };
-        assertTrue(publication.complete());
+        assertTrue(AbstractRequestScheduler.completeResponse(publication));
         callback.join();
         assertTrue(fixture.requestContext().future().isDone());
         if (form == TerminalForm.RESPONSE) {
@@ -459,7 +501,7 @@ class RequestCompletionPublicationRaceTest {
     @EnumSource(TerminalForm.class)
     void externalFutureOperationUnderContextLockLeavesRequestUnchanged(TerminalForm form) {
         BalanceContext requestContext = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 702L);
-        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(RequestCompletionPublisher.class), requestContext, mock(ExpirationTimer.class));
+        AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(ResponseCompletionExecutor.class), requestContext, mock(ExpirationTimer.class));
         synchronized (requestContext) {
             assertThrows(IllegalStateException.class, () -> {
                 switch (form) {
@@ -478,11 +520,15 @@ class RequestCompletionPublicationRaceTest {
     }
 
     private static Fixture fixture() {
-        RequestCompletionPublisher publisher = mock(RequestCompletionPublisher.class);
+        var executor = mock(ResponseCompletionExecutor.class);
+        when(executor.tryRegister()).thenAnswer(invocation -> new ResponseCompletionExecutor.CompletionRegistration(executor));
+        return fixture(executor);
+    }
+
+    private static Fixture fixture(ResponseCompletionExecutor publisher) {
         var config = SchedulingTestConfig.batchConfig();
         BalanceContext context = RequestProtocolTestSupport.context(config, 701L);
         AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(publisher, context, mock(ExpirationTimer.class));
-        when(publisher.tryReservePublication(eq(context), any())).thenAnswer(invocation -> new RequestCompletionPublisher.PublicationPermit(publisher, context, invocation.getArgument(1)));
         RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null, null, null, null, context.createdAtMs());
         BalanceContext.DeliveryPublication delivery;
         AdmissionHandle admission;
@@ -492,15 +538,11 @@ class RequestCompletionPublicationRaceTest {
         }
         assertEquals(org.flexlb.balance.PlacementResult.Status.SUCCESS, requestOwner.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
         admission.finish();
-        Runnable acknowledgement;
         synchronized (context) {
             RequestProtocolTestSupport.startBatchDelivery(requestOwner, context, 801L);
-            acknowledgement = RequestProtocolTestSupport.acknowledge(requestOwner, context);
+            var permit = requestOwner.requirePublicationPermitLocked(context, BalanceContext.PublicationKind.DELIVERY);
+            delivery = context.acknowledgeDelivery(permit, System.currentTimeMillis());
         }
-        acknowledgement.run();
-        var captured = org.mockito.ArgumentCaptor.forClass(BalanceContext.DeliveryPublication.class);
-        org.mockito.Mockito.verify(publisher).submitDelivery(captured.capture());
-        delivery = captured.getValue();
         assertNotNull(delivery);
         return new Fixture(requestOwner, context, delivery);
     }

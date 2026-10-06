@@ -231,11 +231,15 @@ Timer.close 保持以下次序：关闭注册入口，等待在途注册结束�
 
 `awaitIdle` 只证明当时为空。只有生产者已经停止，才能用它参与停机完成判断。不要为了消除 Context 引用而改为裸 requestId 排队，避免身份复用串线。
 
-### 8.3 RequestCompletionPublisher
+### 8.3 ResponseCompletionExecutor（2026-10-06）
 
-继续维护 publication permit、已接受发布计数、内部异步发布和外部同步 Future 操作。它消费冻结的响应选择，不仲裁 ACK、timeout、cancel。用户回调必须在请求锁和 endpoint 临界区外执行。
+运行时内部的响应执行设施，由 SchedulerRuntime 创建和关闭。执行器仅维护不含请求身份或响应类型的 CompletionRegistration、任务执行、拒绝恢复、在途排空、并发关闭和回调重入关闭；不依赖 BalanceContext、ACK、deadline 或 reporter。
 
-保留发布拒绝恢复、重入 close、并发 close 共享结果和中断恢复。关闭统计的对象是已接受的发布义务，不能只检查线程池队列长度。
+Scheduler 持有响应协议和完成操作：ACK 对应的请求 deadline 在排队前取消；ACK 指标上报及响应复验仍在原响应执行队列实际执行时发生，避免提前冻结成功结果，也避免指标上报阻塞请求续接线程。Context 的 PublicationPermit 保存请求身份、响应种类和一次认领，与执行登记分开；SelectedResponse 是冻结的数据。已选终态响应直接提交完成操作，外部 Future 操作仍同步执行，调用方回调均在请求锁外。
+
+执行器运行 Scheduler 提供的完成操作，而非只接收提前选定的 ACK 响应：这保留“响应线程被其他回调占用时，后到终态可以使排队 ACK 失效”的既有竞争边界。任务执行和异常退出均通过 finally 归还执行登记；排空不能只看线程池队列长度。
+
+验证：3 个独立 reviewer 的复审无阻断问题；所有权/关闭重点 UT 70 项通过，Sync 全量 UT 1,631 项通过。完整本地 reactor 共 2,484 项，1 项跳过，Mock 吞吐锚点 1 项失败；该类远端复跑 8 项全部通过。750P/750D、64g JVM、3,000/10,000 QPS 的 BATCH 与 NON_BATCH 共 4 个场景通过 Master/client P99 < 50 ms 及吞吐 ≥ 98% 的门槛。[完整验证记录](evidence/response-completion-executor-2026-10-06.json)。
 
 ### 8.4 已有 SchedulerRuntime 的停机顺序
 

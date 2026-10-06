@@ -52,7 +52,6 @@ final class RequestProtocolTestSupport {
         return member;
     }
 
-
     static boolean closeAdmissionAndAwaitMutations(AbstractRequestScheduler scheduler) {
         if (!org.flexlb.balance.scheduler.SchedulerTestSupport.repository(scheduler).closeRegistration()) { return false; }
         scheduler.awaitAdmissionMutations();
@@ -152,13 +151,13 @@ final class RequestProtocolTestSupport {
                 }));
     }
 
-    static AbstractRequestScheduler initialize(RequestCompletionPublisher publisher, BalanceContext context, ExpirationTimer timer) {
+    static AbstractRequestScheduler initialize(ResponseCompletionExecutor publisher, BalanceContext context, ExpirationTimer timer) {
         var config = org.mockito.Mockito.mock(org.flexlb.config.ConfigService.class);
         org.mockito.Mockito.when(config.loadBalanceConfig()).thenReturn(context.getConfig());
         var owner = SchedulerTestSupport.create(config, org.mockito.Mockito.mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
                 org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
                 org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class));
-        ReflectionTestUtils.setField(owner, "completionPublisher", publisher);
+        ReflectionTestUtils.setField(owner, "responseCompletions", publisher);
         ReflectionTestUtils.setField(owner, "expirationTimer", timer);
         register(owner, context);
         return owner;

@@ -134,7 +134,11 @@ classDiagram
     BalanceContext *-- RequestFuture : 唯一响应目标
     RequestScheduler --> ExpirationTimer : 注册与触发回调
     RequestScheduler --> RequestContinuationExecutor : 请求内串行事实
-    RequestScheduler --> RequestCompletionPublisher : 发布已选响应
+    RequestScheduler --> ResponseCompletionExecutor : 提交响应完成操作
+    SchedulerRuntime *-- ResponseCompletionExecutor : 创建与关闭
+    BalanceContext *-- PublicationPermit : 请求身份与响应认领
+    PublicationPermit --> CompletionRegistration : 执行登记
+    ResponseCompletionExecutor o-- CompletionRegistration : 在途任务与排空
 ```
 
 `AdmissionHandle`、`CleanupProgress`、`RequestFuture` 及投递句柄 `DeliveryClaim` 是 Context 的静态嵌套类型；批次和跨 victim 事务仍由原有组件负责。Timer 经 `RequestAccess` 获取关闭门槛、精确目录快照和触发回调，不持有具体 Scheduler。维护每轮读取一次动态 TTL，先清终态记录再清孤儿。整体关闭仍只有 SchedulerRuntime 一个 owner。

@@ -15,9 +15,6 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ExpirationTimer.DecisionDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.RequestDeadline;
-import org.flexlb.balance.scheduler.RequestCompletionPublisher.PublicationPermit;
-import org.flexlb.balance.scheduler.RequestCompletionPublisher.ResponseCompletion;
-import org.flexlb.balance.scheduler.RequestCompletionPublisher.SelectedPublication;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -1117,7 +1114,7 @@ public class BalanceContext {
         public SendOutcome sendOutcome() { synchronized (owner) { return sendOutcome; } }
     }
 
-    static SelectedPublication selectPublication(BalanceContext ctx, PublicationPermit permit, ResponseCompletion completion, Response response, Throwable failure, boolean mayInterruptIfRunning) {
+    static SelectedResponse selectPublication(BalanceContext ctx, PublicationPermit permit, ResponseCompletion completion, Response response, Throwable failure, boolean mayInterruptIfRunning) {
         ctx.requireOutsideContextLock("response selection");
         if (permit.requestContext != ctx || completion != ResponseCompletion.RESPONSE && permit.kind != PublicationKind.TERMINAL) {
             throw new IllegalArgumentException("incompatible publication permit");
@@ -1125,13 +1122,62 @@ public class BalanceContext {
         permit.claim();
         try {
             synchronized (ctx) {
-                return new SelectedPublication(permit, ctx.future(), ctx.claimPublicationResultLocked(permit.kind, completion, response, failure, mayInterruptIfRunning));
+                return new SelectedResponse(permit, ctx.future(), ctx.claimPublicationResultLocked(permit.kind, completion, response, failure, mayInterruptIfRunning));
             }
         } catch (RuntimeException | Error selectionFailure) {
             permit.closePublication();
             throw selectionFailure;
         }
     }
+
+    /** Request-bound response claim, separate from executor admission and drain. */
+    static final class PublicationPermit {
+
+        final ResponseCompletionExecutor.CompletionRegistration registration;
+
+        final BalanceContext requestContext;
+
+        final PublicationKind kind;
+
+        private final AtomicBoolean claimed = new AtomicBoolean();
+
+        PublicationPermit(ResponseCompletionExecutor.CompletionRegistration registration, BalanceContext requestContext, PublicationKind kind) {
+            this.registration = Objects.requireNonNull(registration);
+            this.requestContext = requestContext;
+            this.kind = kind;
+        }
+
+        BalanceContext requestContext() {
+            return requestContext;
+        }
+
+        void closePublication() { registration.close(); }
+
+        /**
+         * Abandon a permit only when no other submitter consumed it.
+         */
+        void abandonIfUnclaimed() {
+            if (claimed.compareAndSet(false, true)) {
+                closePublication();
+            }
+        }
+
+        void claim() {
+            if (!claimed.compareAndSet(false, true)) {
+                throw new IllegalStateException("publication permit already consumed for request " + requestContext.getRequestId());
+            }
+        }
+    }
+
+    enum ResponseCompletion {
+
+        RESPONSE, FAILURE, CANCELLATION
+    }
+
+    /**
+     * Frozen response selection; a null result publishes nothing.
+     */
+    record SelectedResponse(PublicationPermit permit, RequestFuture future, ResponseResult result) { }
 
     record ResponseResult(ResponseCompletion completion, Response response, Throwable failure, boolean interrupt) { }
 
@@ -1297,7 +1343,7 @@ public class BalanceContext {
         }
     }
     /** 投递失败可先发布错误，再在 FINALIZING 中等待资源结算；不得据此立即归档请求。 */
-    SelectedPublication selectDeliveryFailureLocked(RequestRoute exact, DeliveryResult.Status source, String detail, Supplier<PublicationPermit> publication) {
+    SelectedResponse selectDeliveryFailureLocked(RequestRoute exact, DeliveryResult.Status source, String detail, Supplier<PublicationPermit> publication) {
         this.requireContextLock("request failure");
         if (!this.ownsActiveItem(exact) || this.cleanup != null) {
             return null;
@@ -1316,7 +1362,7 @@ public class BalanceContext {
         }
         this.selectedResponse = new ResponseResult(ResponseCompletion.RESPONSE, response, null, false);
         permit.claim();
-        return new SelectedPublication(permit, this.future(), this.selectedResponse);
+        return new SelectedResponse(permit, this.future(), this.selectedResponse);
     }
 
     /** 注册时冻结调度需求并安装受控 Future；RequestRepository 在此后发布 context。 */
@@ -2115,6 +2161,6 @@ record DeferredTerminal(Kind kind, StrategyErrorType errorType, String detail, W
  * 一次终态执行任务：领取时存入 context.terminalAction 防止重复领取，随后交给 Scheduler。
  * 包含精确路由、定时器和可选发布许可；不是可重新计算或任意重试的普通结果对象。
  */
-record TerminalAction(BalanceContext requestContext, RequestRoute item, DeliveryClaimKind deliveryKind, boolean endpointsSettled, PreemptionRegistration preemption, ExpirationTimer.DetachedDeadlines terminalResources, DeferredTerminal event, Response response, RequestCompletionPublisher.PublicationPermit publication) {
+record TerminalAction(BalanceContext requestContext, RequestRoute item, DeliveryClaimKind deliveryKind, boolean endpointsSettled, PreemptionRegistration preemption, ExpirationTimer.DetachedDeadlines terminalResources, DeferredTerminal event, Response response, BalanceContext.PublicationPermit publication) {
 
 }
