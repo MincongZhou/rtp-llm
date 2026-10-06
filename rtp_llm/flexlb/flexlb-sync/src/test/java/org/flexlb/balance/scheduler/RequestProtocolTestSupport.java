@@ -272,11 +272,11 @@ final class RequestProtocolTestSupport {
 
     // State-only fixtures deliberately seed a phase without executing publication or timers.
     static void startRouteDelivery(AbstractRequestScheduler scheduler, BalanceContext requestContext) {
-        assertNotNull(scheduler.claimDelivery(requestContext.activeItem(), DeliveryClaimKind.ROUTE_DECISION, 0L, RequestProtocolTestSupport.handoff(() -> true)));
+        assertNotNull(scheduler.claimDelivery(requestContext.activeRoute(), DeliveryClaimKind.ROUTE_DECISION, 0L, RequestProtocolTestSupport.handoff(() -> true)));
     }
 
     static void startBatchDelivery(AbstractRequestScheduler scheduler, BalanceContext requestContext, long batchId) {
-        assertNotNull(scheduler.claimDelivery(requestContext.activeItem(), DeliveryClaimKind.BATCH_ENQUEUE, batchId, RequestProtocolTestSupport.handoff(() -> true)));
+        assertNotNull(scheduler.claimDelivery(requestContext.activeRoute(), DeliveryClaimKind.BATCH_ENQUEUE, batchId, RequestProtocolTestSupport.handoff(() -> true)));
     }
 
     static void markAcknowledged(BalanceContext requestContext) {

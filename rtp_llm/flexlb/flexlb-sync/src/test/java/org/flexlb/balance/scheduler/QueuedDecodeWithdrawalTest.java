@@ -166,7 +166,7 @@ class QueuedDecodeWithdrawalTest {
             assertSame(future, offered.getValue().future());
             assertSame(context, offered.getValue().ctx());
             if (accepted) {
-                assertSame(offered.getValue(), registry.findRequestContext(100).activeItem());
+                assertSame(offered.getValue(), registry.findRequestContext(100).activeRoute());
                 assertFalse(future.isDone());
                 assertEquals(replacement.get(), decode.reservationHandle(100));
             } else {
@@ -189,7 +189,7 @@ class QueuedDecodeWithdrawalTest {
         doAnswer(call -> {
             assertNull(decode.reservationHandle(1));
             assertNotNull(decode.reservationHandle(100));
-            assertNull(registry.findRequestContext(1).activeItem());
+            assertNull(registry.findRequestContext(1).activeRoute());
             assertFalse(item.future().isDone());
             return true;
         }).when(queue).requeue(item);
@@ -215,7 +215,7 @@ class QueuedDecodeWithdrawalTest {
             assertTrue((registry.commitRoute(next, RequestProtocolTestSupport.publication(() -> true)) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
         }
         RequestProtocolTestSupport.observeDecode(registry, decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0));
-        assertSame(next, registry.findRequestContext(1).activeItem());
+        assertSame(next, registry.findRequestContext(1).activeRoute());
         assertFalse(item.future().isDone(), "old reservation evidence must not terminate the new route");
     }
 
@@ -227,7 +227,7 @@ class QueuedDecodeWithdrawalTest {
         assertNotNull(permit);
         assertFalse(replace(item));
         verify(item.prefillEp()).signalRouteReady();
-        assertSame(item, registry.findRequestContext(2).activeItem());
+        assertSame(item, registry.findRequestContext(2).activeRoute());
         assertFalse(item.future().isDone());
         assertTrue(RequestProtocolTestSupport.prepareMember(registry, item));
         verify(queue, never()).requeue(any());
@@ -239,7 +239,7 @@ class QueuedDecodeWithdrawalTest {
         var item = queued(3);
         assertNull(org.flexlb.balance.scheduler.SchedulerTestSupport.eviction(registry).replaceQueuedDecodeReservations(decode, List.of(item.decodeReservation()),
                 100, 16, 16, 30, capacity));
-        assertSame(item, registry.findRequestContext(3).activeItem());
+        assertSame(item, registry.findRequestContext(3).activeRoute());
         assertNotNull(decode.reservationHandle(3));
         verify(queue, never()).requeue(any());
     }
@@ -267,7 +267,7 @@ class QueuedDecodeWithdrawalTest {
         var stale = new DecodeEndpoint.ReservationHandle(item.decodeReservation().endpointGenerationId(),
                 5, item.decodeReservation().reservationToken() + 1);
         assertNull(org.flexlb.balance.scheduler.SchedulerTestSupport.eviction(registry).replaceQueuedDecodeReservations(decode, List.of(stale), 100, 16, 16, 80, capacity));
-        assertSame(item, registry.findRequestContext(5).activeItem());
+        assertSame(item, registry.findRequestContext(5).activeRoute());
         assertTrue(RequestProtocolTestSupport.prepareMember(registry, item));
         verify(item.prefillEp(), never()).removeQueued(any(), anyString());
     }
@@ -288,7 +288,7 @@ class QueuedDecodeWithdrawalTest {
                 item.decodeReservation().endpointGenerationId(), 999, 1);
         assertNull(org.flexlb.balance.scheduler.SchedulerTestSupport.eviction(registry).replaceQueuedDecodeReservations(decode,
                 List.of(item.decodeReservation(), missing), 100, 16, 16, 80, capacity));
-        assertSame(item, registry.findRequestContext(7).activeItem());
+        assertSame(item, registry.findRequestContext(7).activeRoute());
         assertNotNull(decode.reservationHandle(7));
         assertNull(decode.reservationHandle(100));
         assertTrue(RequestProtocolTestSupport.prepareMember(registry, item),
@@ -372,7 +372,7 @@ class QueuedDecodeWithdrawalTest {
         };
         int priority = mismatch.equals("equalPriority") ? 30 : mismatch.equals("lowerPriority") ? 29 : 80;
         assertNull(registry.claimQueuedRoute(source, attempted, priority));
-        assertSame(item, item.ctx().activeItem());
+        assertSame(item, item.ctx().activeRoute());
         assertEquals(BalanceContext.RequestStage.READY_TO_DELIVER, item.ctx().stage());
         assertEquals(reservation, decode.reservationHandle(91L));
         assertEquals(1, decode.routingView().totalLoad());

@@ -120,13 +120,13 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     }
 
     /** Return the exact item currently owned by a fixture request context. */
-    public RequestRoute activeItem(long requestId) {
+    public RequestRoute activeRoute(long requestId) {
         BalanceContext requestContext = requests.findActive(requestId);
         if (requestContext == null) {
             return null;
         }
         synchronized (requestContext) {
-            return requestContext.activeItem();
+            return requestContext.activeRoute();
         }
     }
 

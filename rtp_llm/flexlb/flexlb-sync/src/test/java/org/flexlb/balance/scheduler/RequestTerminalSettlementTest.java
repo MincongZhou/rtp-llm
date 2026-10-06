@@ -197,7 +197,7 @@ class RequestTerminalSettlementTest {
         f.scheduler().runtime.continuations().awaitIdle();
         assertTrue((requestContext.stage() == BalanceContext.RequestStage.FINISHED));
         assertTrue(claim.isFinished());
-        assertNull(requestContext.activeItem());
+        assertNull(requestContext.activeRoute());
         assertEquals(CancelReason.CLIENT_CANCELLED, requestContext.cancellationReason(),
                 "finished context preserves the original cancellation fact");
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, () -> delivery.complete(DeliveryResult.delivered()));

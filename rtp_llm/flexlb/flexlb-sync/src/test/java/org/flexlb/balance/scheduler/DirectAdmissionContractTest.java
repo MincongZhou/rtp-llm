@@ -338,7 +338,7 @@ class DirectAdmissionContractTest {
             BalanceContext requestContext = requests.findRequestContext(requestId);
             assertNotNull(requestContext);
             synchronized (requestContext) {
-                assertNull(requestContext.activeItem(), "this Engine observation must precede item binding");
+                assertNull(requestContext.activeRoute(), "this Engine observation must precede item binding");
             }
         }
 

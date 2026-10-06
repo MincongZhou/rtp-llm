@@ -798,8 +798,8 @@ class TransientCapacityQueueContractTest {
             assertEquals(2, completedResponses(admitted));
 
             List<RequestRoute> delivered = List.of(
-                    fixture.runtime.activeItem(800L),
-                    fixture.runtime.activeItem(801L));
+                    fixture.runtime.activeRoute(800L),
+                    fixture.runtime.activeRoute(801L));
             assertEquals(2, delivered.size());
             for (RequestRoute item : delivered) {
                 assertTrue(item != null);

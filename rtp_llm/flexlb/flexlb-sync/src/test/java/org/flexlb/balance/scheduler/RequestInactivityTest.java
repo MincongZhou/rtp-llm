@@ -256,7 +256,7 @@ class RequestInactivityTest {
     private void assertLiveAndCharged() {
         assertEquals(1, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).liveRequestCount());
         synchronized (requestContext) {
-            assertSame(item, requestContext.activeItem());
+            assertSame(item, requestContext.activeRoute());
             assertFalse(requestContext.snapshot().state().isTerminal());
         }
         verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK));

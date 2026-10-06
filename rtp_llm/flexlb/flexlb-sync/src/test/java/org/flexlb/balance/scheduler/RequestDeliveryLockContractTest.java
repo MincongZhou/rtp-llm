@@ -159,7 +159,7 @@ class RequestDeliveryLockContractTest {
             assertTrue(contenderEntered.await(5, TimeUnit.SECONDS),
                     "context operations must proceed during endpoint publication");
             synchronized (requestContext) {
-                assertSame(registered.item(), requestContext.activeItem());
+                assertSame(registered.item(), requestContext.activeRoute());
             }
             assertFalse(RequestProtocolTestSupport.prepareMember(lifecycle, registered.item()),
                     "ROUTING cannot be claimed during queue publication");
@@ -202,7 +202,7 @@ class RequestDeliveryLockContractTest {
             assertFalse((lifecycle.commitRoute(
                     registered.item(), RequestProtocolTestSupport.publication(() -> false)) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
             synchronized (requestContext) {
-                assertNull(requestContext.activeItem());
+                assertNull(requestContext.activeRoute());
             }
         }
     }
@@ -227,7 +227,7 @@ class RequestDeliveryLockContractTest {
                             })));
             assertSame(expected, actual);
             synchronized (requestContext) {
-                assertNull(requestContext.activeItem());
+                assertNull(requestContext.activeRoute());
             }
         }
     }

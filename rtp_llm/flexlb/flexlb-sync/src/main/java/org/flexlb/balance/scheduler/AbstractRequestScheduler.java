@@ -185,7 +185,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 return null;
             }
             synchronized (requestContext) {
-                RequestRoute item = requestContext.item();
+                RequestRoute item = requestContext.route();
                 if (item == null || item.priority() >= incomingPriority
                         || item.decodeEp() != endpoint || !Objects.equals(item.decodeReservation(), victim)
                         || !requests.isCurrent(requestContext) || !requestContext.ownsPreparedDeliveryLocked(item)
@@ -284,7 +284,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 Runnable work;
                 synchronized (context) {
                     work = context.ownsDecodeFactLocked(source, exact)
-                            ? context.processRequestEndLocked(context.item(), DeferredTerminal.decodeGenerationRetired(
+                            ? context.processRequestEndLocked(context.route(), DeferredTerminal.decodeGenerationRetired(
                                     "Decode endpoint generation retired: generation=" + exact.endpointGenerationId()))
                             : null;
                 }
@@ -433,7 +433,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             return Optional.empty();
         }
         synchronized (context) {
-            CancelTarget target = cancelTarget(context.activeItemForReservation(reservationToken));
+            CancelTarget target = cancelTarget(context.activeRouteForReservation(reservationToken));
             return target == null || !target.isRoutable() ? Optional.empty() : Optional.of(target);
         }
     }
@@ -504,7 +504,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     private BalanceContext findRouteContext(RequestRoute item) {
         BalanceContext context = item.ctx();
         synchronized (context) {
-            return isCurrentContext(context) && context.ownsActiveItem(item) ? context : null;
+            return isCurrentContext(context) && context.ownsActiveRoute(item) ? context : null;
         }
     }
 
@@ -695,7 +695,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         BalanceContext ctx = claim.item.ctx();
         DecisionDeadline obsolete;
         synchronized (ctx) {
-            if (!ctx.ownsActiveItem(claim.item)) {
+            if (!ctx.ownsActiveRoute(claim.item)) {
                 return;
             }
             obsolete = ctx.updateDeliveryPredictionLocked(work, predictedMs, System.currentTimeMillis());
@@ -709,7 +709,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         Runnable effect;
         DecisionDeadline obsolete;
         synchronized (ctx) {
-            if (!ctx.ownsActiveItem(claim.item)) {
+            if (!ctx.ownsActiveRoute(claim.item)) {
                 return;
             }
             if (ctx.deliveryClaimKind() != DeliveryClaimKind.ROUTE_DECISION) {
@@ -733,7 +733,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         "Delivery failed: " + detailOf(result.cause()), () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
                 return () -> publishFailureAndCleanUp(ctx, claim.item, result.status(), response);
             }
-            if (!ctx.ownsActiveItem(claim.item)) {
+            if (!ctx.ownsActiveRoute(claim.item)) {
                 return null;
             }
             if (result.status() == DeliveryResult.Status.DELIVERED) {
@@ -894,7 +894,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     void recordSchedulingFailure(BalanceContext ctx, StrategyErrorType error, String detail) {
         Runnable work;
         synchronized (ctx) {
-            work = ctx.processRequestEndLocked(ctx.activeItem(), DeferredTerminal.failure(error, detail));
+            work = ctx.processRequestEndLocked(ctx.activeRoute(), DeferredTerminal.failure(error, detail));
         }
         execute(ctx, work);
     }
@@ -1140,7 +1140,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         synchronized (ctx) {
             globalControl = ctx.queueOwner() != null
                     && (ctx.stage() == RequestStage.QUEUED || ctx.stage() == RequestStage.ROUTING);
-            boolean local = ctx.queueOwner() != null && ctx.stage() == RequestStage.READY_TO_DELIVER && ctx.item() != null && ctx.item().prefillEp() != null;
+            boolean local = ctx.queueOwner() != null && ctx.stage() == RequestStage.READY_TO_DELIVER && ctx.route() != null && ctx.route().prefillEp() != null;
             if (!globalControl && !local) {
                 return null;
             }
@@ -1159,7 +1159,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     return false;
                 }
                 ctx.selectQueuedCancellation(interrupt);
-                routeToCancel = local ? ctx.item() : null;
+                routeToCancel = local ? ctx.route() : null;
             } catch (RuntimeException | Error failure) {
                 permit.abandonIfUnused();
                 throw failure;
@@ -1310,7 +1310,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (!ctx.hasCleanup()) {
                 return;
             }
-            exact = ctx.item();
+            exact = ctx.route();
             source = ctx.cleanupSource();
         }
         cleanUpRequest(ctx, exact, source);

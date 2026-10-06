@@ -333,7 +333,7 @@ public class BalanceContext {
     /**
      * Routing identity survives handoff and is used to reject late facts.
      */
-    private RequestRoute item;
+    private RequestRoute route;
 
     /**
      * The sole writable request stage; public Phase is projected from this and exact facts.
@@ -426,22 +426,22 @@ public class BalanceContext {
         return this.stage == RequestStage.DELIVERING || this.deliveryClaimKind() != DeliveryClaimKind.NONE ? RequestState.Phase.DISPATCHING : RequestState.Phase.QUEUED;
     }
 
-    RequestRoute activeItem() {
+    RequestRoute activeRoute() {
         synchronized (this) {
-            return this.ownsActiveGenerationLocked() ? this.item : null;
+            return this.ownsActiveGenerationLocked() ? this.route : null;
         }
     }
 
-    boolean ownsActiveItem(RequestRoute expected) {
+    boolean ownsActiveRoute(RequestRoute expected) {
         synchronized (this) {
-            return this.ownsActiveGenerationLocked() && this.item == expected;
+            return this.ownsActiveGenerationLocked() && this.route == expected;
         }
     }
 
-    RequestRoute activeItemForReservation(long reservationToken) {
+    RequestRoute activeRouteForReservation(long reservationToken) {
         synchronized (this) {
-            DecodeEndpoint.ReservationHandle reservation = this.item == null ? null : this.item.decodeReservation();
-            return this.ownsActiveGenerationLocked() && reservation != null && reservation.reservationToken() == reservationToken ? this.item : null;
+            DecodeEndpoint.ReservationHandle reservation = this.route == null ? null : this.route.decodeReservation();
+            return this.ownsActiveGenerationLocked() && reservation != null && reservation.reservationToken() == reservationToken ? this.route : null;
         }
     }
 
@@ -482,9 +482,9 @@ public class BalanceContext {
     private void assertInvariantLocked() {
         this.requireContextLock("request context invariant");
         boolean inconsistentRoute = switch (stage) {
-            case QUEUED -> item != null && admission == null;
-            case READY_TO_DELIVER -> item == null || delivery != null;
-            case DELIVERING -> item == null || deliveryClaimKind() == DeliveryClaimKind.NONE;
+            case QUEUED -> route != null && admission == null;
+            case READY_TO_DELIVER -> route == null || delivery != null;
+            case DELIVERING -> route == null || deliveryClaimKind() == DeliveryClaimKind.NONE;
             default -> false;
         };
         if (inconsistentRoute) {
@@ -499,7 +499,7 @@ public class BalanceContext {
         if (this.stage != RequestStage.FINISHED) {
             return;
         }
-        if (this.item != null || preemption != null || admission != null || this.requestDeadline != null || this.decisionDeadline != null || this.inactivityDeadline != null) {
+        if (this.route != null || preemption != null || admission != null || this.requestDeadline != null || this.decisionDeadline != null || this.inactivityDeadline != null) {
             throw new IllegalStateException("terminal record retains request-owned state for " + this.getRequestId());
         }
         if (this.finalOutcome == null) {
@@ -526,12 +526,12 @@ public class BalanceContext {
 
     boolean ownsPrefillFactLocked(PrefillEndpoint source, RequestRoute expected) {
         this.requireContextLock("Prefill fact ownership lookup");
-        return this.ownsResourceTrackingLocked() && this.item == expected && expected.prefillEp() == source;
+        return this.ownsResourceTrackingLocked() && this.route == expected && expected.prefillEp() == source;
     }
 
     boolean ownsDecodeFactLocked(DecodeEndpoint source, DecodeEndpoint.ReservationHandle reservation) {
         this.requireContextLock("Decode fact ownership lookup");
-        return this.ownsResourceTrackingLocked() && this.item != null && this.item.decodeEp() == source && reservation.equals(this.item.decodeReservation());
+        return this.ownsResourceTrackingLocked() && this.route != null && this.route.decodeEp() == source && reservation.equals(this.route.decodeReservation());
     }
 
     DecisionDeadline markDecodeAcceptedLocked() {
@@ -561,7 +561,7 @@ public class BalanceContext {
             return null;
         }
         // READY_TO_DELIVER guarantees a route and no delivery claim.
-        return item.prefillEp() == null ? null : item;
+        return route.prefillEp() == null ? null : route;
     }
 
     boolean hasPendingGlobalControl() {
@@ -673,14 +673,14 @@ public class BalanceContext {
         if (this.deliveryPredictionConsumed) {
             throw new IllegalStateException("delivery prediction already consumed");
         }
-        double lifetime = this.item.ctx().getConfig().getRequestLifecycle().getDecision().getLifetime();
+        double lifetime = this.route.ctx().getConfig().getRequestLifecycle().getDecision().getLifetime();
         if (!Double.isFinite(lifetime) || lifetime < 1.0) {
             throw new IllegalArgumentException("invalid decision lifetime");
         }
         this.deliveryPredictionConsumed = true;
         if (!this.decodeAccepted) {
             if (this.prefillCompletedAtMs > 0L) {
-                if (this.item.decodeEp() != null) {
+                if (this.route.decodeEp() != null) {
                     this.decisionExpiresAtMs = OptionalLong.of(deadlineAfter(this.prefillCompletedAtMs, DECODE_HANDOFF_GRACE_MS));
                 }
             } else if (!this.prefillObserved) {
@@ -694,7 +694,7 @@ public class BalanceContext {
             }
         }
         // Reconcile the exact reservation in this decision. Engine acceptance overrides the prediction.
-        if (this.item.decodeEp() != null && this.item.decodeEp().isAcceptedByEngine(this.item.decodeReservation())) {
+        if (this.route.decodeEp() != null && this.route.decodeEp().isAcceptedByEngine(this.route.decodeReservation())) {
             this.lastWorkerStatusAtMs = Math.max(this.lastWorkerStatusAtMs, nowMs);
             return this.markDecodeAcceptedLocked();
         }
@@ -743,7 +743,7 @@ public class BalanceContext {
     }
 
     boolean needsDecisionConfirmationLocked() {
-        return this.ownsActiveGenerationLocked() && this.item != null && this.cancellationReason == null && (this.decisionExpired && (!this.decodeAccepted && (!this.prefillObserved || this.prefillCompletedAtMs > 0L)));
+        return this.ownsActiveGenerationLocked() && this.route != null && this.cancellationReason == null && (this.decisionExpired && (!this.decodeAccepted && (!this.prefillObserved || this.prefillCompletedAtMs > 0L)));
     }
 
     void markAwaitingConfirmationLocked(String message) {
@@ -792,7 +792,7 @@ public class BalanceContext {
 
     PreemptionRegistration tryInstallPreemption(long reservationToken, long attemptToken, String detail) {
         synchronized (this) {
-            DecodeEndpoint.ReservationHandle reservation = this.item == null ? null : this.item.decodeReservation();
+            DecodeEndpoint.ReservationHandle reservation = this.route == null ? null : this.route.decodeReservation();
             if (!this.ownsActiveGenerationLocked() || admission != null || preemption != null || this.cancellationReason != null || reservation == null || reservation.reservationToken() != reservationToken || (this.deliveryClaimKind() == DeliveryClaimKind.ROUTE_DECISION && !this.deliveryAcknowledged)) {
                 return null;
             }
@@ -820,7 +820,7 @@ public class BalanceContext {
 
     void requireCleanupOwner(TerminalAction action) {
         synchronized (this) {
-            if (this.stage != RequestStage.FINALIZING || action.requestContext() != this || action.item() != this.item) {
+            if (this.stage != RequestStage.FINALIZING || action.requestContext() != this || action.item() != this.route) {
                 throw new IllegalStateException("cleanup does not own request " + this.getRequestId());
             }
         }
@@ -1354,7 +1354,7 @@ public class BalanceContext {
                 claimedPreemption.tryFinish();
             }
             ExpirationTimer.DetachedDeadlines terminalResources = this.detachDeadlines();
-            TerminalAction action = new TerminalAction(this, this.item, this.deliveryClaimKind(), this.cleanup != null, claimedPreemption, terminalResources, event, publishable ? response : null, permit);
+            TerminalAction action = new TerminalAction(this, this.route, this.deliveryClaimKind(), this.cleanup != null, claimedPreemption, terminalResources, event, publishable ? response : null, permit);
             terminalAction = action;
             // The selected outcome is visible while unlocked endpoint cleanup runs.
             this.beginFinalizationLocked(transition);
@@ -1371,7 +1371,7 @@ public class BalanceContext {
     /** 投递失败可先发布错误，再在 FINALIZING 中等待资源结算；不得据此立即归档请求。 */
     SelectedResponse selectDeliveryFailureLocked(RequestRoute exact, DeliveryResult.Status source, String detail, Supplier<PublicationPermit> publication) {
         this.requireContextLock("request failure");
-        if (!this.ownsActiveItem(exact) || this.cleanup != null) {
+        if (!this.ownsActiveRoute(exact) || this.cleanup != null) {
             return null;
         }
         CancelReason cancellation = this.cancellationReason;
@@ -1420,7 +1420,7 @@ public class BalanceContext {
     DeliveryResult.Status cleanupSource() { requireContextLock("cleanup lookup"); return cleanup.source; }
 
     synchronized AdmissionHandle beginAdmission(BiConsumer<AdmissionHandle, Response> completion) {
-        if (stage != RequestStage.QUEUED || !isOpen() || item != null || admission != null || preemption != null) {
+        if (stage != RequestStage.QUEUED || !isOpen() || route != null || admission != null || preemption != null) {
             return null;
         }
         admission = new AdmissionHandle(this, completion);
@@ -1441,10 +1441,10 @@ public class BalanceContext {
 
     void detachWithdrawnRoute(AdmissionHandle operation, RequestRoute exact) {
         requireContextLock("route withdrawal");
-        if (admission != operation || item != exact) {
+        if (admission != operation || route != exact) {
             throw new IllegalStateException("route withdrawal lost its owner: " + getRequestId());
         }
-        item = null;
+        route = null;
         detail = "queued after Decode reservation withdrawal";
         updatedAtMs = System.currentTimeMillis();
         assertInvariantLocked();
@@ -1452,26 +1452,26 @@ public class BalanceContext {
 
     boolean bindRoute(RequestRoute exact) {
         requireContextLock("route binding");
-        if (stage != RequestStage.ROUTING || !isOpen() || item != null || admission == null || exact.requestId() != getRequestId()) {
+        if (stage != RequestStage.ROUTING || !isOpen() || route != null || admission == null || exact.requestId() != getRequestId()) {
             return false;
         }
-        item = exact;
+        route = exact;
         assertInvariantLocked();
         return true;
     }
 
     void rejectRoutePublication(RequestRoute exact) {
         requireContextLock("route publication rollback");
-        if (stage != RequestStage.ROUTING || item != exact || admission == null) {
-            throw new IllegalStateException("request item publication ownership changed for " + getRequestId());
+        if (stage != RequestStage.ROUTING || route != exact || admission == null) {
+            throw new IllegalStateException("request route publication ownership changed for " + getRequestId());
         }
-        item = null;
+        route = null;
         assertInvariantLocked();
     }
 
     void confirmRoutePublication(RequestRoute exact) {
         requireContextLock("route publication confirmation");
-        if (item != exact || stage != RequestStage.ROUTING) {
+        if (route != exact || stage != RequestStage.ROUTING) {
             throw new IllegalStateException("route publication lost its owner for " + getRequestId());
         }
         advanceStageLocked(RequestStage.READY_TO_DELIVER);
@@ -1484,8 +1484,8 @@ public class BalanceContext {
         admission = null;
         exact.withdrawingRoute = null;
         if (stage == RequestStage.ROUTING) {
-            advanceStageLocked(item == null ? RequestStage.QUEUED : RequestStage.READY_TO_DELIVER);
-            return item;
+            advanceStageLocked(route == null ? RequestStage.QUEUED : RequestStage.READY_TO_DELIVER);
+            return route;
         }
         return null;
     }
@@ -1518,7 +1518,7 @@ public class BalanceContext {
 
     boolean ownsPreparedDeliveryLocked(RequestRoute exact) {
         requireContextLock("delivery eligibility");
-        if (stage != RequestStage.READY_TO_DELIVER || item != exact || !isOpen()) {
+        if (stage != RequestStage.READY_TO_DELIVER || route != exact || !isOpen()) {
             return false;
         }
         if (preemption != null) {
@@ -1556,11 +1556,11 @@ public class BalanceContext {
     /** 锁内记录 ACK 并移交调度定时器；返回的发布任务和定时器取消由调用方执行。 */
     DeliveryPublication acknowledgeDelivery(PublicationPermit permit, long nowMs) {
         requireContextLock("delivery acknowledgement");
-        Response response = buildSuccessResponse(item.routeResponse(), deliveryClaimKind() == DeliveryClaimKind.BATCH_ENQUEUE);
+        Response response = buildSuccessResponse(route.routeResponse(), deliveryClaimKind() == DeliveryClaimKind.BATCH_ENQUEUE);
         deliveryAcknowledged = true;
         detail = deliveryClaimKind() == DeliveryClaimKind.BATCH_ENQUEUE ? "batch enqueue acknowledged" : "route decision delivered";
         updatedAtMs = nowMs;
-        DeliveryPublication result = new DeliveryPublication(item, response, permit, requestDeadline, batchEnqueueStartedAtMs);
+        DeliveryPublication result = new DeliveryPublication(route, response, permit, requestDeadline, batchEnqueueStartedAtMs);
         requestDeadline = null;
         assertInvariantLocked();
         return result;
@@ -1593,12 +1593,12 @@ public class BalanceContext {
     /** 终态 action 的本地清理完成后提交 FINISHED；此前仍保留 route 以匹配迟到事件。 */
     RequestState finishTerminal(TerminalAction action) {
         requireContextLock("terminal commit");
-        if (stage != RequestStage.FINALIZING || action.requestContext() != this || item != action.item()) {
+        if (stage != RequestStage.FINALIZING || action.requestContext() != this || route != action.item()) {
             if (action.publication() != null) { action.publication().abandonIfUnused(); }
             throw new IllegalStateException("terminal context identity changed: request_id=" + getRequestId());
         }
         RequestState terminal = snapshot();
-        item = null;
+        route = null;
         advanceStageLocked(RequestStage.FINISHED);
         assertInvariantLocked();
         return terminal;
@@ -1632,7 +1632,7 @@ public class BalanceContext {
 
     CleanupPass beginCleanup(RequestRoute exact) {
         requireContextLock("cleanup pass");
-        CleanupProgress progress = item == exact ? cleanup : null;
+        CleanupProgress progress = route == exact ? cleanup : null;
         if (progress != null && admission != null) { return null; }
         if (progress != null && (progress.phase == CleanupProgress.Phase.RUNNING || progress.phase == CleanupProgress.Phase.RUN_AGAIN)) {
             progress.phase = CleanupProgress.Phase.RUN_AGAIN;
@@ -1677,7 +1677,8 @@ public class BalanceContext {
 
     long batchId() { return batchId; }
 
-    RequestRoute item() { return item; }
+    /** Bound route identity, retained through resource finalization to match late facts. */
+    RequestRoute route() { return route; }
 
     RequestStage stage() { return stage; }
 
@@ -1705,7 +1706,7 @@ public class BalanceContext {
         if (!this.ownsActiveGenerationLocked() || this.admission() != null || this.cancellationReason() == null) {
             return null;
         }
-        RequestRoute active = this.activeItem();
+        RequestRoute active = this.activeRoute();
         if (active != null && !this.canFinalizeBeforeExecutionLocked()) {
             return null;
         }
@@ -1744,7 +1745,7 @@ public class BalanceContext {
             if (kind != DeferredTerminal.Kind.FAILURE) { message = terminalDetail; }
         } else if (kind == DeferredTerminal.Kind.WORKER && event.workerSuccessful()) {
             return this.claimFinalizationLocked(event, TerminalOutcome.complete("decode completed"),
-                    buildSuccessResponse(this.activeItem().routeResponse(),
+                    buildSuccessResponse(this.activeRoute().routeResponse(),
                             this.deliveryClaimKind() == DeliveryClaimKind.BATCH_ENQUEUE), true, publication);
         } else {
             error = switch (kind) {
@@ -1791,11 +1792,11 @@ public class BalanceContext {
         }
         Map<String, Object> diagnostics = null;
         if (reason == CancelReason.DEADLINE_EXCEEDED && this.queueOwner() != null) {
-            RequestRoute item = this.activeItem();
+            RequestRoute route = this.activeRoute();
             if (this.deliveryClaimKind() != DeliveryClaimKind.NONE) {
                 diagnostics = Map.of("cause", message);
-            } else if (item != null && item.prefillEp() != null) {
-                diagnostics = item.prefillEp().getLatestQueueWaitSnapshot();
+            } else if (route != null && route.prefillEp() != null) {
+                diagnostics = route.prefillEp().getLatestQueueWaitSnapshot();
             } else {
                 diagnostics = this.queueOwner().getLatestQueueWaitSnapshot();
             }
@@ -1875,7 +1876,7 @@ public class BalanceContext {
             case COMPLETED ->
                 {
                     if (!decodeAccepted && prefillCompletedAtMs == 0L) {
-                        boolean separateDecode = role != RoleType.PDFUSION && item.decodeEp() != null;
+                        boolean separateDecode = role != RoleType.PDFUSION && route.decodeEp() != null;
                         prefillCompletedAtMs = nowMs;
                         setDecisionDeadlineLocked(separateDecode && deliveryPredictionConsumed
                                 ? OptionalLong.of(deadlineAfter(nowMs, DECODE_HANDOFF_GRACE_MS)) : OptionalLong.empty());
@@ -1915,7 +1916,7 @@ public class BalanceContext {
                     setDecisionDeadlineLocked(OptionalLong.empty());
                     decodeAccepted = true;
                 }
-                work = this.processRequestEndLocked(this.item(), DeferredTerminal.worker(
+                work = this.processRequestEndLocked(this.route(), DeferredTerminal.worker(
                         WorkerTerminalSource.DECODE_ENDPOINT, fact.errorCode() == 0L, fact.errorCode()));
                 obsolete = this.detachObsoleteDecisionDeadlineLocked();
             } else if (!this.hasCleanup()) {
@@ -1943,7 +1944,7 @@ public class BalanceContext {
         boolean inactive = retained.inactive();
         DeferredTerminal pending = retained.terminal();
         PendingPrefillRetirement retirement = retained.retirement();
-        if (this.item() == null && pending != null && pending.kind() == DeferredTerminal.Kind.FAILURE) {
+        if (this.route() == null && pending != null && pending.kind() == DeferredTerminal.Kind.FAILURE) {
             if (failure == null) {
                 failure = buildErrorResponse(pending.errorType(), pending.detail());
             }
@@ -1954,7 +1955,7 @@ public class BalanceContext {
         }
         // Authoritative completion takes precedence over retirement and admission failure.
         if (pending != null && pending.authoritativeWorker()) {
-            return this.processRequestEndLocked(this.item(), pending);
+            return this.processRequestEndLocked(this.route(), pending);
         }
         TerminalAction retired = this.claimPrefillRetirementLocked(retirement);
         if (retired != null) {
@@ -1965,7 +1966,7 @@ public class BalanceContext {
         }
         Runnable effect = null;
         if (pending != null) {
-            effect = this.processRequestEndLocked(this.item(), pending);
+            effect = this.processRequestEndLocked(this.route(), pending);
         } else if (failure != null) {
             String message = pendingCancellation != null ? pendingCancellation.getMessage() : failure.getErrorMessage() == null ? "eviction admission failed" : failure.getErrorMessage();
             TerminalOutcome outcome = pendingCancellation == null ? TerminalOutcome.fail(message) : TerminalOutcome.cancellation(pendingCancellation, message);
@@ -2024,7 +2025,7 @@ public class BalanceContext {
     Runnable processRequestEndLocked(RequestRoute expected, DeferredTerminal event) {
         this.requireContextLock("request end");
         boolean workerProof = event.authoritativeWorker();
-        if (expected == null || !this.ownsResourceTrackingLocked() || this.item() != expected || !workerProof && !this.ownsActiveItem(expected)) {
+        if (expected == null || !this.ownsResourceTrackingLocked() || this.route() != expected || !workerProof && !this.ownsActiveRoute(expected)) {
             return null;
         }
         if (this.hasCleanup()) {
@@ -2065,7 +2066,7 @@ public class BalanceContext {
         if (!terminalWins && (transportUnknown || !exact.hasPendingDeliveryConfirmation())) {
             return null;
         }
-        RequestRoute active = this.activeItem();
+        RequestRoute active = this.activeRoute();
         DecodeEndpoint decode = active == null ? null : active.decodeEp();
         // Decode terminal facts already committed its ledger; all other evidence must reconcile it first.
         if (decode != null && !(terminalWins && terminal.decodeTerminalAlreadyApplied())
@@ -2095,7 +2096,7 @@ public class BalanceContext {
 
     Runnable acknowledgeDeliveryLocked(PreemptionRegistration signal) {
         this.requireContextLock("delivery acknowledgement");
-        if (this.item() == null || !this.ownsActiveItem(this.item())) {
+        if (this.route() == null || !this.ownsActiveRoute(this.route())) {
             return null;
         }
         this.confirmDelivery();

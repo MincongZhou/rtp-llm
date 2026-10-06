@@ -185,7 +185,7 @@ class RequestLifetimeTest {
             when(exact.deadlineAtMs()).thenReturn(fixture.requestContext.decisionDeadlineAtMs().orElseThrow());
             assertTrue(fixture.requestContext.installDecisionDeadline(exact));
             fixture.requestContext.onDecisionVisibilityDeadline(exact);
-            assertSame(fixture.item, fixture.requestContext.activeItem());
+            assertSame(fixture.item, fixture.requestContext.activeRoute());
             assertTrue(RequestProtocolTestSupport.<Boolean>field(fixture.requestContext, "decisionExpired"));
             assertTrue(RequestProtocolTestSupport.<java.util.OptionalLong>field(fixture.requestContext, "decisionExpiresAtMs").isEmpty());
             assertNull(fixture.requestContext.decisionDeadline());
@@ -293,7 +293,7 @@ class RequestLifetimeTest {
             assertEquals(RequestState.Phase.DISPATCHING, fixture.requestContext.snapshot().state());
             assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.requestContext, "consumeInactivityDeadlineLocked", deadline));
             assertTrue(fixture.requestContext.inactivityDeadlineAtMs().isPresent());
-            assertSame(fixture.item, fixture.requestContext.activeItem());
+            assertSame(fixture.item, fixture.requestContext.activeRoute());
         }
     }
 
@@ -646,7 +646,7 @@ class RequestLifetimeTest {
         assertSame(installed, fixture.requestContext.decisionDeadline());
         assertEquals(deadline, RequestProtocolTestSupport.<java.util.OptionalLong>field(fixture.requestContext, "decisionExpiresAtMs"));
         assertEquals(expired, RequestProtocolTestSupport.<Boolean>field(fixture.requestContext, "decisionExpired"));
-        assertSame(fixture.item, fixture.requestContext.activeItem());
+        assertSame(fixture.item, fixture.requestContext.activeRoute());
     }
 
     private static void expireDecision(Fixture fixture) {

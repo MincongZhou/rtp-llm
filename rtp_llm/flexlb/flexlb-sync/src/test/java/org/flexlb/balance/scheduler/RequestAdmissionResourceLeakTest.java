@@ -66,7 +66,7 @@ class RequestAdmissionResourceLeakTest {
             assertNotNull(admission);
             assertEquals(PlacementResult.Status.BLOCKED,
                     lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> false)));
-            assertNull(activeItem(1L));
+            assertNull(activeRoute(1L));
             assertTrue(lifecycle.isAdmissionOpen(1L, registered.future()));
             verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
         }
@@ -79,7 +79,7 @@ class RequestAdmissionResourceLeakTest {
             assertNotNull(admission);
             assertThrows(IllegalStateException.class, () -> lifecycle.commitRoute(
                     registered.item(), RequestProtocolTestSupport.publication(() -> { throw new IllegalStateException("publication failed"); })));
-            assertNull(activeItem(2L));
+            assertNull(activeRoute(2L));
             assertTrue(lifecycle.isAdmissionOpen(2L, registered.future()));
         }
     }
@@ -90,7 +90,7 @@ class RequestAdmissionResourceLeakTest {
         RequestProtocolTestSupport.bindRoute(lifecycle, registered);
         assertEquals(PlacementResult.Status.CLOSED,
                 lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> true)));
-        assertSame(registered.item(), activeItem(3L));
+        assertSame(registered.item(), activeRoute(3L));
         verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
         lifecycle.cancel(3L, 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), registered.future().join().getCode());
@@ -224,10 +224,10 @@ class RequestAdmissionResourceLeakTest {
                         .map(reason -> org.junit.jupiter.params.provider.Arguments.of(outcome, reason)));
     }
 
-    private RequestRoute activeItem(long requestId) {
+    private RequestRoute activeRoute(long requestId) {
         BalanceContext requestContext = lifecycle.findRequestContext(requestId);
         synchronized (requestContext) {
-            return requestContext.activeItem();
+            return requestContext.activeRoute();
         }
     }
 

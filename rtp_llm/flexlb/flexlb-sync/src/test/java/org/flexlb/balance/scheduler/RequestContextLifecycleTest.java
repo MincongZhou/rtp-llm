@@ -290,7 +290,7 @@ class RequestContextLifecycleTest {
             assertEquals(timer ? CancelReason.DEADLINE_EXCEEDED : null, context.cancellationReason());
             assertSame(timer ? null : deadline, context.requestDeadline());
             assertEquals(RequestStage.DELIVERING, context.stage());
-            assertSame(item, context.item());
+            assertSame(item, context.route());
             assertFalse(future.isDone(), "admission owner must settle the timer fact");
         }
     }
@@ -308,7 +308,7 @@ class RequestContextLifecycleTest {
             assertNotNull(admission);
             assertSame(failure, assertThrows(IllegalStateException.class,
                     () -> lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true))));
-            assertSame(item, context.item());
+            assertSame(item, context.route());
             assertEquals(RequestStage.READY_TO_DELIVER, context.stage());
             assertEquals(0, failure.getSuppressed().length, "committed binding must not be rolled back");
         }
@@ -331,7 +331,7 @@ class RequestContextLifecycleTest {
              var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertSame(failure, assertThrows(IllegalStateException.class,
                     () -> lifecycle.commitRoute(item, publication)));
-            assertSame(item, context.item());
+            assertSame(item, context.route());
             assertEquals(RequestStage.READY_TO_DELIVER, context.stage());
             verify(prefill).signalRouteReady();
         }
@@ -353,7 +353,7 @@ class RequestContextLifecycleTest {
             } else {
                 assertEquals(PlacementResult.Status.BLOCKED, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> false)));
             }
-            assertNull(context.item());
+            assertNull(context.route());
             assertEquals(RequestStage.ROUTING, context.stage());
         }
         assertEquals(RequestStage.QUEUED, context.stage());
@@ -447,7 +447,7 @@ class RequestContextLifecycleTest {
     void publicQueriesOwnTheirLockAndPrivateDecisionsStillRequireIt() {
         RequestProtocolTestSupport.register(lifecycle, context(102L));
         BalanceContext requestContext = lifecycle.findRequestContext(102L);
-        assertNull(requestContext.activeItem());
+        assertNull(requestContext.activeRoute());
         assertTrue(requestContext.isOpen());
         assertTrue(requestContext.isLiveGeneration());
         IllegalStateException failure = assertThrows(IllegalStateException.class, () -> org.springframework.test.util.ReflectionTestUtils.invokeMethod(requestContext, "recordCancellationLocked", CancelReason.CLIENT_CANCELLED, "client cancelled"));
@@ -484,7 +484,7 @@ class RequestContextLifecycleTest {
                     throw new AssertionError("foreign scheduler published the route");
                 })));
                 assertEquals(BalanceContext.RequestStage.ROUTING, item.ctx().stage());
-                assertNull(item.ctx().item());
+                assertNull(item.ctx().route());
                 assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
             }
             Runnable prepare = mock(Runnable.class);
@@ -523,7 +523,7 @@ class RequestContextLifecycleTest {
             assertNotNull(admission);
             assertEquals(PlacementResult.Status.BLOCKED, lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> false)));
             assertEquals("ROUTING", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(requestContext, "stage")));
-            assertNull(requestContext.activeItem());
+            assertNull(requestContext.activeRoute());
             assertEquals(RequestState.Phase.QUEUED, requestContext.snapshot().state());
             assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> true)));
             assertEquals("READY_TO_DELIVER", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(requestContext, "stage")));
@@ -602,8 +602,8 @@ class RequestContextLifecycleTest {
             lifecycle.closeOutstandingAndTerminalize();
             lifecycle.runtime.continuations().awaitIdle();
             assertEquals("FINISHED", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(requestContext, "stage")));
-            assertNull(requestContext.activeItem());
-            assertNull(requestContext.item());
+            assertNull(requestContext.activeRoute());
+            assertNull(requestContext.route());
             assertNull(requestContext.requestDeadline());
             assertNull(requestContext.decisionDeadline());
             assertNull(RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(requestContext, "inactivityDeadline"));
