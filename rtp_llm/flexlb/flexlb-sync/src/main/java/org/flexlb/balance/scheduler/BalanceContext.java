@@ -481,7 +481,13 @@ public class BalanceContext {
 
     private void assertInvariantLocked() {
         this.requireContextLock("request context invariant");
-        if (this.stage == RequestStage.QUEUED && this.item != null && admission == null || this.stage == RequestStage.READY_TO_DELIVER && this.item == null || this.stage == RequestStage.DELIVERING && (this.item == null || this.deliveryClaimKind() == DeliveryClaimKind.NONE)) {
+        boolean inconsistentRoute = switch (stage) {
+            case QUEUED -> item != null && admission == null;
+            case READY_TO_DELIVER -> item == null || delivery != null;
+            case DELIVERING -> item == null || deliveryClaimKind() == DeliveryClaimKind.NONE;
+            default -> false;
+        };
+        if (inconsistentRoute) {
             throw new IllegalStateException("request stage has inconsistent route for " + this.getRequestId());
         }
         if (admission != null && preemption != null) {
@@ -544,19 +550,18 @@ public class BalanceContext {
         return detachedDeadline;
     }
 
-    boolean needsWorkerQueueCancellationLocked() {
+    /** Returns the exact route whose pending cancellation the Worker queue can process now. */
+    RequestRoute pendingWorkerQueueCancellationLocked() {
         requireContextLock("worker queue cancellation");
         if (queueOwner() == null || stage != RequestStage.READY_TO_DELIVER) {
-            return false;
+            return null;
         }
         // Admission and preemption must settle before the queue can cancel this route.
-        if (admission != null || preemption != null || deliveryClaimKind() != DeliveryClaimKind.NONE) {
-            return false;
+        if (admission != null || preemption != null || cancellationReason == null) {
+            return null;
         }
-        if (item == null || item.prefillEp() == null) {
-            return false;
-        }
-        return cancellationReason != null;
+        // READY_TO_DELIVER guarantees a route and no delivery claim.
+        return item.prefillEp() == null ? null : item;
     }
 
     boolean hasPendingGlobalControl() {
@@ -583,9 +588,16 @@ public class BalanceContext {
         return reason == CancelReason.DEADLINE_EXCEEDED ? StrategyErrorType.BATCH_SLO_EXPIRED : StrategyErrorType.REQUEST_CANCELLED;
     }
 
-    boolean canClaimLocalTerminalLocked(boolean queuedExternalCancel) {
+    /** A cancelled Future still needs resource finalization; other completed Futures do not. */
+    boolean canFinalizeBeforeExecutionLocked() {
         this.requireContextLock("local terminal eligibility");
-        return this.ownsActiveGenerationLocked() && (!this.future().isDone() || queuedExternalCancel && this.future().isCancelled()) && admission == null && preemption == null && !this.decodeAccepted && !this.deliveryAcknowledged && !this.deliveryClaimKind().isClaimed();
+        if (!ownsActiveGenerationLocked() || admission != null || preemption != null) {
+            return false;
+        }
+        if (decodeAccepted || deliveryAcknowledged || deliveryClaimKind().isClaimed()) {
+            return false;
+        }
+        return !future().isDone() || future().isCancelled();
     }
 
     boolean installRequestDeadline(RequestDeadline exact) {
@@ -1506,8 +1518,14 @@ public class BalanceContext {
 
     boolean ownsPreparedDeliveryLocked(RequestRoute exact) {
         requireContextLock("delivery eligibility");
-        return stage == RequestStage.READY_TO_DELIVER && item == exact && isOpen() && preemption == null
-                && (admission == null || admission.withdrawingRoute == null) && deliveryClaimKind() == DeliveryClaimKind.NONE;
+        if (stage != RequestStage.READY_TO_DELIVER || item != exact || !isOpen()) {
+            return false;
+        }
+        if (preemption != null) {
+            return false;
+        }
+        // Delivery may race admission completion, but never route withdrawal.
+        return admission == null || admission.withdrawingRoute == null;
     }
 
     DeliveryClaim beginDelivery(RequestRoute exact, DeliveryClaimKind kind, long correlationId, long nowMs,
@@ -1688,7 +1706,7 @@ public class BalanceContext {
             return null;
         }
         RequestRoute active = this.activeItem();
-        if (active != null && !this.canClaimLocalTerminalLocked(true)) {
+        if (active != null && !this.canFinalizeBeforeExecutionLocked()) {
             return null;
         }
         String message = this.cancellationReason().getMessage();
@@ -1755,7 +1773,7 @@ public class BalanceContext {
                 this.retainAdmissionTerminalLocked(DeferredTerminal.failure(StrategyErrorType.DISPATCH_FAILED, message));
                 return null;
             }
-            if (!this.canClaimLocalTerminalLocked(true)) {
+            if (!this.canFinalizeBeforeExecutionLocked()) {
                 return null;
             }
             if (this.cancellationReason() != null) {
@@ -1810,8 +1828,7 @@ public class BalanceContext {
             work = applyPrefillStatusLocked(role, fact, nowMs);
             obsolete = cleaning ? null : this.detachObsoleteDecisionDeadlineLocked();
             resume = previous != null && this.preemption() == null && this.hasCleanup() && work == null;
-            routeToCancel = previous != null && this.preemption() == null && this.needsWorkerQueueCancellationLocked()
-                    ? this.item() : null;
+            routeToCancel = previous == null ? null : pendingWorkerQueueCancellationLocked();
         }
         return () -> {
             if (resume) {
@@ -1958,7 +1975,7 @@ public class BalanceContext {
         if (effect != null || pendingCancellation == null || !this.ownsActiveGenerationLocked()) {
             return effect;
         }
-        if (this.needsWorkerQueueCancellationLocked() && !inactive) {
+        if (!inactive && pendingWorkerQueueCancellationLocked() != null) {
             return effect;
         }
         TerminalAction cancelled = pendingCancellation == CancelReason.DEADLINE_EXCEEDED || this.requestInactiveLocked(System.currentTimeMillis()) ? this.decideRequestEndLocked(DeferredTerminal.inactivityExpired(pendingCancellation.getMessage()), () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)) : this.tryTerminateCancellationLocked(() -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL));

@@ -610,7 +610,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         effect = ctx.settleAdmissionLocked(exact, failureResponse);
                     }
                     cleanupPending = ctx.hasCleanup();
-                    routeToCancel = !cleanupPending && effect == null && ctx.needsWorkerQueueCancellationLocked() ? ctx.item() : null;
+                    routeToCancel = cleanupPending || effect != null ? null : ctx.pendingWorkerQueueCancellationLocked();
                 }
                 if (restoredRoute != null && restoredRoute.prefillEp() != null) {
                     restoredRoute.prefillEp().signalRouteReady();
@@ -835,7 +835,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             String message = deadline != null && ctx.admission() != null
                     ? "request scheduling deadline exceeded during admission" : reason.getMessage();
             accepted = ctx.recordCancellationLocked(reason, message);
-            routeToCancel = accepted && ctx.needsWorkerQueueCancellationLocked() ? ctx.item() : null;
+            routeToCancel = accepted ? ctx.pendingWorkerQueueCancellationLocked() : null;
             boolean globalControl = ctx.queueOwner() != null
                     && ctx.stage() == RequestStage.QUEUED && ctx.admission() == null;
             if (accepted && routeToCancel == null && !globalControl) {
@@ -874,7 +874,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     void cancelInWorkerQueue(BalanceContext ctx, RequestRoute exact) {
         TerminalAction action;
         synchronized (ctx) {
-            if (ctx.item() != exact || !ctx.needsWorkerQueueCancellationLocked()) {
+            if (exact == null || ctx.pendingWorkerQueueCancellationLocked() != exact) {
                 return;
             }
             action = ctx.tryTerminateCancellationLocked(
@@ -934,7 +934,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             ctx.detachPreemptionOwnerLocked(claim);
             cleanupPending = ctx.hasCleanup();
             work = cleanupPending ? null : ctx.processPendingEventsUnderPreemptionLocked(claim, false, claim);
-            routeToCancel = !cleanupPending && work == null && ctx.needsWorkerQueueCancellationLocked() ? ctx.item() : null;
+            routeToCancel = cleanupPending || work != null ? null : ctx.pendingWorkerQueueCancellationLocked();
         }
         if (cleanupPending) { resumeCleanup(ctx); } else { execute(ctx, work); }
         if (routeToCancel != null) { scheduleWorkerQueueCancellation(ctx, routeToCancel); }
@@ -1144,8 +1144,12 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (!globalControl && !local) {
                 return null;
             }
-            boolean admissionPending = ctx.admission() != null && ctx.ownsActiveGenerationLocked() && !ctx.future().isDone() && ctx.preemption() == null && !ctx.decodeAccepted() && !ctx.deliveryClaimKind().isClaimed();
-            if (!(ctx.canClaimLocalTerminalLocked(false) || admissionPending) || ctx.selectedResponse() != null || ctx.cancellationReason() == CancelReason.DEADLINE_EXCEEDED) {
+            // External Future.cancel cannot select another response after any completion.
+            if (ctx.future().isDone()) {
+                return false;
+            }
+            boolean admissionPending = ctx.admission() != null && ctx.ownsActiveGenerationLocked() && ctx.preemption() == null && !ctx.decodeAccepted() && !ctx.deliveryClaimKind().isClaimed();
+            if (!(ctx.canFinalizeBeforeExecutionLocked() || admissionPending) || ctx.selectedResponse() != null || ctx.cancellationReason() == CancelReason.DEADLINE_EXCEEDED) {
                 return false;
             }
             permit = requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL);
@@ -1184,7 +1188,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     private PublicationPermit terminateLocallyAndAcquirePublication(BalanceContext ctx, TerminalOutcome transition) {
         TerminalAction action;
         synchronized (ctx) {
-            if (ctx.selectedResponse() != null || ctx.cancellationReason() != null || !ctx.canClaimLocalTerminalLocked(false) || transition.phase() == RequestState.Phase.COMPLETED && ctx.deliveryClaimKind() == DeliveryClaimKind.NONE) {
+            if (ctx.future().isDone() || ctx.selectedResponse() != null) {
+                return null;
+            }
+            if (ctx.cancellationReason() != null || !ctx.canFinalizeBeforeExecutionLocked()) {
+                return null;
+            }
+            if (transition.phase() == RequestState.Phase.COMPLETED
+                    && ctx.deliveryClaimKind() == DeliveryClaimKind.NONE) {
                 return null;
             }
             action = ctx.claimFinalizationLocked(null, transition, null, true, () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
