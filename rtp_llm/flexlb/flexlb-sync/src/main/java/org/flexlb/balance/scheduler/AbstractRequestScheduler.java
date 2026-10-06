@@ -459,7 +459,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     void onQueuedItemControl(RequestRoute exact) {
         BalanceContext requestContext = findRouteContext(exact);
         if (requestContext != null) {
-            processQueuedControl(requestContext, exact);
+            cancelInWorkerQueue(requestContext, exact);
         }
     }
 
@@ -496,7 +496,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     public void onQueueOfferFailure(RequestRoute exact, Throwable error) {
         BalanceContext requestContext = findRouteContext(exact);
         if (requestContext != null) {
-            processQueuedControl(requestContext, exact);
+            cancelInWorkerQueue(requestContext, exact);
             recordSchedulingFailure(requestContext, StrategyErrorType.DISPATCH_FAILED, "Worker scheduling queue rejected request: " + (error == null ? "endpoint publication failed" : error.getMessage()));
         }
     }
@@ -602,7 +602,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             try {
                 Runnable effect = null;
                 boolean cleanupPending;
-                RequestRoute localControl;
+                RequestRoute routeToCancel;
                 RequestRoute restoredRoute = null;
                 synchronized (ctx) {
                     if (ctx.admission() == exact) {
@@ -610,7 +610,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         effect = ctx.settleAdmissionLocked(exact, failureResponse);
                     }
                     cleanupPending = ctx.hasCleanup();
-                    localControl = !cleanupPending && effect == null && ctx.queuedLocalControlLocked() ? ctx.item() : null;
+                    routeToCancel = !cleanupPending && effect == null && ctx.needsWorkerQueueCancellationLocked() ? ctx.item() : null;
                 }
                 if (restoredRoute != null && restoredRoute.prefillEp() != null) {
                     restoredRoute.prefillEp().signalRouteReady();
@@ -618,8 +618,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 if (cleanupPending) {
                     resumeCleanup(ctx);
                 } else {
-                    if (localControl != null) {
-                        signalOrSettleLocalControl(ctx, localControl);
+                    if (routeToCancel != null) {
+                        scheduleWorkerQueueCancellation(ctx, routeToCancel);
                     }
                     execute(ctx, effect);
                 }
@@ -818,7 +818,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         TerminalAction action = null;
         RequestState result;
         boolean accepted;
-        RequestRoute localControl;
+        RequestRoute routeToCancel;
         synchronized (ctx) {
             if (deadline != null) {
                 if (!ctx.consumeRequestDeadline(deadline)) { return null; }
@@ -835,10 +835,10 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             String message = deadline != null && ctx.admission() != null
                     ? "request scheduling deadline exceeded during admission" : reason.getMessage();
             accepted = ctx.recordCancellationLocked(reason, message);
-            localControl = accepted && ctx.queuedLocalControlLocked() ? ctx.item() : null;
+            routeToCancel = accepted && ctx.needsWorkerQueueCancellationLocked() ? ctx.item() : null;
             boolean globalControl = ctx.queueOwner() != null
                     && ctx.stage() == RequestStage.QUEUED && ctx.admission() == null;
-            if (accepted && localControl == null && !globalControl) {
+            if (accepted && routeToCancel == null && !globalControl) {
                 action = ctx.tryTerminateCancellationLocked(() -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
             }
             result = deadline == null ? ctx.snapshot() : null;
@@ -858,23 +858,27 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
         }
         if (accepted) { onCancellationRecorded(ctx); }
-        if (localControl != null) {
-            signalOrSettleLocalControl(ctx, localControl);
+        if (routeToCancel != null) {
+            scheduleWorkerQueueCancellation(ctx, routeToCancel);
         }
         executeFinalization(action);
         return result;
     }
 
-    void signalOrSettleLocalControl(BalanceContext ctx, RequestRoute exact) {
+    void scheduleWorkerQueueCancellation(BalanceContext ctx, RequestRoute exact) {
         if (!exact.prefillEp().signalQueuedControl(exact)) {
-            continuations.submit(ctx, () -> processQueuedControl(ctx, exact));
+            continuations.submit(ctx, () -> cancelInWorkerQueue(ctx, exact));
         }
     }
 
-    void processQueuedControl(BalanceContext ctx, RequestRoute exact) {
+    void cancelInWorkerQueue(BalanceContext ctx, RequestRoute exact) {
         TerminalAction action;
         synchronized (ctx) {
-            action = ctx.item() == exact && ctx.queuedLocalControlLocked() ? ctx.tryTerminateCancellationLocked(() -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)) : null;
+            if (ctx.item() != exact || !ctx.needsWorkerQueueCancellationLocked()) {
+                return;
+            }
+            action = ctx.tryTerminateCancellationLocked(
+                    () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
         }
         executeFinalization(action);
     }
@@ -924,16 +928,16 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         BalanceContext ctx = claim.owner;
         Runnable work;
         boolean cleanupPending;
-        RequestRoute localControl;
+        RequestRoute routeToCancel;
         synchronized (ctx) {
             if (!isCurrentContext(ctx) || !ctx.ownsResourceTrackingLocked() || ctx.preemption() != claim || !claim.isReleasable()) { return false; }
             ctx.detachPreemptionOwnerLocked(claim);
             cleanupPending = ctx.hasCleanup();
             work = cleanupPending ? null : ctx.processPendingEventsUnderPreemptionLocked(claim, false, claim);
-            localControl = !cleanupPending && work == null && ctx.queuedLocalControlLocked() ? ctx.item() : null;
+            routeToCancel = !cleanupPending && work == null && ctx.needsWorkerQueueCancellationLocked() ? ctx.item() : null;
         }
         if (cleanupPending) { resumeCleanup(ctx); } else { execute(ctx, work); }
-        if (localControl != null) { signalOrSettleLocalControl(ctx, localControl); }
+        if (routeToCancel != null) { scheduleWorkerQueueCancellation(ctx, routeToCancel); }
         return true;
     }
 
@@ -1131,7 +1135,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
      */
     private Boolean cancelQueuedExternal(BalanceContext ctx, boolean interrupt) {
         PublicationPermit permit;
-        RequestRoute localControl;
+        RequestRoute routeToCancel;
         boolean globalControl;
         synchronized (ctx) {
             globalControl = ctx.queueOwner() != null
@@ -1151,7 +1155,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     return false;
                 }
                 ctx.selectQueuedCancellation(interrupt);
-                localControl = local ? ctx.item() : null;
+                routeToCancel = local ? ctx.item() : null;
             } catch (RuntimeException | Error failure) {
                 permit.abandonIfUnused();
                 throw failure;
@@ -1163,8 +1167,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             ctx.future().cancelOwned(interrupt);
             throw failure;
         } finally {
-            if (localControl != null) {
-                signalOrSettleLocalControl(ctx, localControl);
+            if (routeToCancel != null) {
+                scheduleWorkerQueueCancellation(ctx, routeToCancel);
             }
             if (globalControl) {
                 ctx.queueOwner().signalControl(ctx);

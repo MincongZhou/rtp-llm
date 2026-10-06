@@ -544,9 +544,19 @@ public class BalanceContext {
         return detachedDeadline;
     }
 
-    boolean queuedLocalControlLocked() {
-        this.requireContextLock("queued control ownership");
-        return queueOwner() != null && this.stage == RequestStage.READY_TO_DELIVER && admission == null && this.item != null && this.item.prefillEp() != null && this.cancellationReason != null && preemption == null && this.deliveryClaimKind() == DeliveryClaimKind.NONE;
+    boolean needsWorkerQueueCancellationLocked() {
+        requireContextLock("worker queue cancellation");
+        if (queueOwner() == null || stage != RequestStage.READY_TO_DELIVER) {
+            return false;
+        }
+        // Admission and preemption must settle before the queue can cancel this route.
+        if (admission != null || preemption != null || deliveryClaimKind() != DeliveryClaimKind.NONE) {
+            return false;
+        }
+        if (item == null || item.prefillEp() == null) {
+            return false;
+        }
+        return cancellationReason != null;
     }
 
     boolean hasPendingGlobalControl() {
@@ -1790,7 +1800,7 @@ public class BalanceContext {
         Runnable work;
         DecisionDeadline obsolete;
         boolean resume;
-        RequestRoute localControl;
+        RequestRoute routeToCancel;
         synchronized (this) {
             if (!this.ownsPrefillFactLocked(source, fact.item())) {
                 return null;
@@ -1800,7 +1810,7 @@ public class BalanceContext {
             work = applyPrefillStatusLocked(role, fact, nowMs);
             obsolete = cleaning ? null : this.detachObsoleteDecisionDeadlineLocked();
             resume = previous != null && this.preemption() == null && this.hasCleanup() && work == null;
-            localControl = previous != null && this.preemption() == null && this.queuedLocalControlLocked()
+            routeToCancel = previous != null && this.preemption() == null && this.needsWorkerQueueCancellationLocked()
                     ? this.item() : null;
         }
         return () -> {
@@ -1809,8 +1819,8 @@ public class BalanceContext {
             } else {
                 scheduler.executeEngineEffects(this, work, obsolete);
             }
-            if (localControl != null) {
-                scheduler.signalOrSettleLocalControl(this, localControl);
+            if (routeToCancel != null) {
+                scheduler.scheduleWorkerQueueCancellation(this, routeToCancel);
             }
         };
     }
@@ -1948,7 +1958,7 @@ public class BalanceContext {
         if (effect != null || pendingCancellation == null || !this.ownsActiveGenerationLocked()) {
             return effect;
         }
-        if (this.queuedLocalControlLocked() && !inactive) {
+        if (this.needsWorkerQueueCancellationLocked() && !inactive) {
             return effect;
         }
         TerminalAction cancelled = pendingCancellation == CancelReason.DEADLINE_EXCEEDED || this.requestInactiveLocked(System.currentTimeMillis()) ? this.decideRequestEndLocked(DeferredTerminal.inactivityExpired(pendingCancellation.getMessage()), () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)) : this.tryTerminateCancellationLocked(() -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL));
