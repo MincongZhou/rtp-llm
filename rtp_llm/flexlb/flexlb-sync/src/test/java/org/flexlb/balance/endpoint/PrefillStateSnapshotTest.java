@@ -647,6 +647,30 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
+    void foreignPreparationCannotCommitOrRollbackTheSameRequestId() {
+        PrefillState other = new PrefillState(new ReentrantLock(), PrefillActiveIndex.disabled(), clock::get);
+        RequestRoute localRequest = item(1), otherRequest = item(1);
+        var localReservation = state.reserveUnqueuedRoute(localRequest, 10L, 1L).reservation();
+        var otherReservation = other.reserveUnqueuedRoute(otherRequest, 20L, 1L).reservation();
+        try (var localPreparation = EndpointTestSupport.preparation(localReservation);
+             var otherPreparation = EndpointTestSupport.preparation(otherReservation);
+             var permit = generation.tryAcquireHandoff()) {
+            assertThrows(IllegalArgumentException.class, () -> other.rollbackPreparation(localReservation));
+            assertThrows(IllegalArgumentException.class, () -> EndpointTestSupport.commitRoutes(other,
+                    List.of(otherRequest), List.of(localReservation), permit));
+            assertEquals(1L, state.observedRequestCount());
+            assertEquals(1L, other.observedRequestCount());
+            try (var handoff = EndpointTestSupport.commitRoutes(other,
+                    List.of(otherRequest), List.of(otherReservation), permit)) {
+                assertTrue(other.releaseRequest(otherRequest) == PrefillState.RequestRelease.COMMITTED);
+            }
+            assertEquals(1L, state.observedRequestCount(), "foreign settlement cannot release the local owner");
+        }
+        assertEquals(0L, state.observedRequestCount());
+        assertEquals(0L, other.observedRequestCount());
+    }
+
+    @Test
     void staleRouteCannotCommitOrReleaseReplacementWithTheSameRequestId() {
         RequestRoute first = item(1), replacement = item(1);
         enqueue(first);

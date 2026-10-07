@@ -278,7 +278,6 @@ final class DecodeState {
         }
         removeRequestOwnershipLocked(requestId, state);
         // Use a history-only entry, so no old exact token remains live.
-        decodeRequests.remove(requestId, state);
         rememberSettledLocked(requestId, System.currentTimeMillis());
         admissionVersion++;
         return true;
