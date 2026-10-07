@@ -1,5 +1,6 @@
 package org.flexlb.httpserver;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import ch.qos.logback.classic.Level;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1149,7 +1150,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.DECODE)) {
             DecodeEndpoint endpoint = (DecodeEndpoint) endpointRegistry.get(RoleType.DECODE, address);
-            DecodeEndpoint.ResourceSnapshot view = endpoint.resourceSnapshot();
+            DecodeResources.ResourceSnapshot view = endpoint.resourceSnapshot();
             assertTrue(view.reservedCount() == 0, address + " retained Decode reservations");
             assertTrue(view.confirmedCount() == 0, address + " retained Decode ownership");
             assertEquals(0, view.activeDispatchPermits(), address + " retained Decode delivery permits");

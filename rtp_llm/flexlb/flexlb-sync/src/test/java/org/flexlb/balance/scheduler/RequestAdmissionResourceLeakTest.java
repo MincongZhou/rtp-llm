@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.BalanceContext.AdmissionHandle;
@@ -68,7 +69,7 @@ class RequestAdmissionResourceLeakTest {
                     lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> false)));
             assertNull(activeRoute(1L));
             assertTrue(lifecycle.isAdmissionOpen(1L, registered.future()));
-            verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
+            verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
         }
     }
 
@@ -91,12 +92,12 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(PlacementResult.Status.CLOSED,
                 lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> true)));
         assertSame(registered.item(), activeRoute(3L));
-        verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
+        verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
         lifecycle.cancel(3L, 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), registered.future().join().getCode());
         verify(registered.item().decodeEp(), times(1)).release(
                 registered.item().decodeReservation(),
-                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
     }
 
     @Test
@@ -108,12 +109,12 @@ class RequestAdmissionResourceLeakTest {
                 lifecycle.commitRoute(registered.item(), RequestProtocolTestSupport.publication(() -> true)));
         assertEquals(RequestState.Phase.CANCEL_REQUESTED,
                 lifecycle.cancel(4L, 0L, CancelReason.CLIENT_CANCELLED).state());
-        verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
+        verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
         admission.finish();
         registered.future().join();
         verify(registered.item().decodeEp(), times(1)).release(
                 registered.item().decodeReservation(),
-                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
     }
 
     @Test
@@ -136,7 +137,7 @@ class RequestAdmissionResourceLeakTest {
                 canceled.get(5, TimeUnit.SECONDS);
                 completed.get(5, TimeUnit.SECONDS);
                 verify(registered.item().decodeEp(), timeout(1000).times(1))
-                        .release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                        .release(registered.item().decodeReservation(), DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
             }
         }
     }
@@ -149,11 +150,11 @@ class RequestAdmissionResourceLeakTest {
         lifecycle.closeOutstandingAndTerminalize();
         verify(registered.item().decodeEp(), times(1)).release(
                 registered.item().decodeReservation(),
-                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
         lifecycle.closeOutstandingAndTerminalize();
         verify(registered.item().decodeEp(), times(1)).release(
                 registered.item().decodeReservation(),
-                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle).timer().close();
         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle).closeRequestExecutors();
     }
@@ -171,7 +172,7 @@ class RequestAdmissionResourceLeakTest {
         lifecycle.cancel(61L, 0L, CancelReason.CLIENT_CANCELLED);
         verify(victim.item().decodeEp(), times(1)).release(
                 victim.item().decodeReservation(),
-                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
         assertTrue(lifecycle.isAdmissionOpen(62L, incoming.future()));
     }
 
@@ -213,7 +214,7 @@ class RequestAdmissionResourceLeakTest {
         org.junit.jupiter.api.Assertions.assertFalse(lifecycle.isAdmissionOpen(71L, registered.future()));
         verify(registered.item().decodeEp(), times(publicationOutcome.equals("SUCCESS") ? 1 : 0)).release(
                 registered.item().decodeReservation(), reason == CancelReason.DEADLINE_EXCEEDED
-                        ? DecodeEndpoint.ReleaseReason.EXPIRED : DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                        ? DecodeResources.ReleaseReason.EXPIRED : DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
         lifecycle.cancel(71L, 0L, CancelReason.SHUTDOWN);
         assertSame(response, registered.future().join());
     }
@@ -234,8 +235,8 @@ class RequestAdmissionResourceLeakTest {
     private Registered registerItem(long requestId) {
         BalanceContext context = RequestProtocolTestSupport.context(config, requestId);
         var future = RequestProtocolTestSupport.register(lifecycle, context);
-        DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        var reservation = new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
+        DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
+        var reservation = new DecodeResources.ReservationHandle(1L, requestId, 1L);
         context.setFuture(future);
         return new Registered(org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null,
                 null, decode, reservation, System.currentTimeMillis()), future);

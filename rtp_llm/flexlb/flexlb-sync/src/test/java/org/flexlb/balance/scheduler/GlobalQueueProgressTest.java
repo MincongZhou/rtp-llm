@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -475,7 +476,7 @@ class GlobalQueueProgressTest {
         try (Fixture f = new Fixture(RoleType.DECODE, true)) {
             long id = 1101L;
             DecodeEndpoint decode = f.blockDecodeAdmission(id);
-            var reservation = new DecodeEndpoint.ReservationHandle(1L, id, 7L);
+            var reservation = new DecodeResources.ReservationHandle(1L, id, 7L);
             var result = new PreemptionResult(reservation, false, "committed");
             var reply = new CompletableFuture<PreemptionResult>();
             CountDownLatch invoked = new CountDownLatch(1);
@@ -565,7 +566,7 @@ class GlobalQueueProgressTest {
         try (Fixture f = new Fixture(RoleType.DECODE, true)) {
             long id = 1104L;
             DecodeEndpoint decode = f.blockDecodeAdmission(id);
-            var reservation = new DecodeEndpoint.ReservationHandle(3L, id, 17L);
+            var reservation = new DecodeResources.ReservationHandle(3L, id, 17L);
             var reply = new CompletableFuture<PreemptionResult>();
             CountDownLatch invoked = new CountDownLatch(1);
             when(f.eviction.tryReserve(any(), any(), eq(decode))).thenAnswer(call -> {
@@ -588,7 +589,7 @@ class GlobalQueueProgressTest {
                     awaitCondition(() -> f.admitted.contains(1105L));
                 }
                 reply.complete(new PreemptionResult(reservation, false, "late committed result"));
-                verify(decode, timeout(1000).times(1)).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                verify(decode, timeout(1000).times(1)).release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
                 verify(f.routes.get(id), timeout(1000).times(1)).close();
                 verify(f.mutations.get(id), timeout(1000).times(1)).finish();
                 verify(f.routes.get(id), never()).adoptDecodeReservation(any(), any());
@@ -782,7 +783,7 @@ class GlobalQueueProgressTest {
         }
 
         private DecodeEndpoint blockDecodeAdmission(long requestId) {
-            DecodeEndpoint decode = mock(DecodeEndpoint.class);
+            DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
             AtomicInteger attempts = new AtomicInteger();
             onSelection = id -> SchedulingTestConfig.freezeInputs(contexts.get(id));
             onAdmission = id -> {

@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -71,12 +72,12 @@ class RequestInactivityTest {
         requestContext = registry.findRequestContext(REQUEST_ID);
         registeredAtMs = requestContext.createdAtMs();
         prefill = mock(PrefillEndpoint.class);
-        decode = mock(DecodeEndpoint.class);
+        decode = RequestProtocolTestSupport.decodeEndpoint();
         ServerStatus prefillStatus = new ServerStatus();
         prefillStatus.setRole(RoleType.PREFILL);
         prefillStatus.setServerIp("127.0.0.1");
         prefillStatus.setGrpcPort(8081);
-        var reservation = new DecodeEndpoint.ReservationHandle(1L, REQUEST_ID, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, REQUEST_ID, 1L);
         context.setFuture(future);
         item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), prefillStatus, null,
                 prefill, decode, reservation, registeredAtMs);
@@ -125,8 +126,8 @@ class RequestInactivityTest {
 
         // A delayed status or timer callback cannot reopen or double-release this generation.
         RequestProtocolTestSupport.observePrefill(registry, prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
-        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()));
-        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0L));
+        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeResources.WorkerStatusFact.active(item.decodeReservation()));
+        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeResources.WorkerStatusFact.terminal(item.decodeReservation(), 0L));
         RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, lastStatusAt + 2L * TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
     }
@@ -214,9 +215,9 @@ class RequestInactivityTest {
             Runnable observation = switch (source) {
                 case PREFILL_ENDPOINT -> requestContext.acceptPrefillStatus(mock(PrefillEndpoint.class), RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item), lateStatusAt);
                 case PREFILL_ITEM -> requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(item.ctx()), item.routeResponse(), item.prefill(), null, prefill, decode, item.decodeReservation(), registeredAtMs)), lateStatusAt);
-                case DECODE_ENDPOINT -> requestContext.acceptDecodeStatus(mock(DecodeEndpoint.class), DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), lateStatusAt);
-                case DECODE_GENERATION -> requestContext.acceptDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(new DecodeEndpoint.ReservationHandle(2L, REQUEST_ID, 1L)), lateStatusAt);
-                case DECODE_RESERVATION -> requestContext.acceptDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(new DecodeEndpoint.ReservationHandle(1L, REQUEST_ID, 2L)), lateStatusAt);
+                case DECODE_ENDPOINT -> requestContext.acceptDecodeStatus(RequestProtocolTestSupport.decodeEndpoint(), DecodeResources.WorkerStatusFact.active(item.decodeReservation()), lateStatusAt);
+                case DECODE_GENERATION -> requestContext.acceptDecodeStatus(decode, DecodeResources.WorkerStatusFact.active(new DecodeResources.ReservationHandle(2L, REQUEST_ID, 1L)), lateStatusAt);
+                case DECODE_RESERVATION -> requestContext.acceptDecodeStatus(decode, DecodeResources.WorkerStatusFact.active(new DecodeResources.ReservationHandle(1L, REQUEST_ID, 2L)), lateStatusAt);
             };
             org.junit.jupiter.api.Assertions.assertNull(observation);
             assertTrue(RequestProtocolTestSupport.<Boolean>inspect(registry, requestContext, "requestInactiveLocked", lateStatusAt));
@@ -248,7 +249,7 @@ class RequestInactivityTest {
             if (source == RoleType.PREFILL) {
                 requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item), nowMs);
             } else {
-                requestContext.acceptDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), nowMs);
+                requestContext.acceptDecodeStatus(decode, DecodeResources.WorkerStatusFact.active(item.decodeReservation()), nowMs);
             }
         }
     }
@@ -259,9 +260,9 @@ class RequestInactivityTest {
             assertSame(item, requestContext.activeRoute());
             assertFalse(requestContext.snapshot().state().isTerminal());
         }
-        verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK));
-        verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP));
-        verify(prefill, never()).releaseCommittedItem(any());
+        verify(decode, never()).release(any(), eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
+        verify(decode, never()).release(any(), eq(DecodeResources.ReleaseReason.REMOTE_CLEANUP));
+        verify(prefill, never()).releaseRequest(any());
     }
 
     private void acknowledgeDelivery() throws Exception {
@@ -285,8 +286,8 @@ class RequestInactivityTest {
         synchronized (requestContext) {
             assertFalse(requestContext.isLiveGeneration());
         }
-        verify(decode, times(1)).release(item.decodeReservation(), DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP);
-        verify(prefill, times(1)).releaseCommittedItem(item);
+        verify(decode, times(1)).release(item.decodeReservation(), DecodeResources.ReleaseReason.REMOTE_CLEANUP);
+        verify(prefill, times(1)).releaseRequest(item);
     }
 
     private enum StaleFact {

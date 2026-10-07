@@ -1,12 +1,12 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
 import org.flexlb.balance.projection.WorkSnapshot;
@@ -26,7 +26,6 @@ import org.flexlb.balance.scheduler.ExpirationTimer.DecisionDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.RequestDeadline;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
@@ -174,7 +173,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         Failures.rethrow(failure, "queued route withdrawal failed");
     }
 
-    public AdmissionHandle claimQueuedRoute(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle victim, int incomingPriority) {
+    public AdmissionHandle claimQueuedRoute(DecodeEndpoint endpoint, DecodeResources.ReservationHandle victim, int incomingPriority) {
         if (!enterAdmissionHandleGate()) {
             return null;
         }
@@ -215,7 +214,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         });
     }
 
-    public void onDecodeStatus(DecodeEndpoint source, List<DecodeEndpoint.WorkerStatusFact> facts) {
+    public void onDecodeStatus(DecodeEndpoint source, List<DecodeResources.WorkerStatusFact> facts) {
         forEachEndpointFact("Decode status", facts, fact -> {
             BalanceContext context = findRequestContext(fact.reservation().requestId());
             if (context != null) {
@@ -265,14 +264,13 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (context != null) {
                 DeliveryClaim delivery = context.delivery();
                 if (delivery != null && delivery.item == exact) { delivery.observeRetirement(source); }
-                TerminalAction action = acceptPrefillRetirement(context, source, exact);
-                submitContinuation(context, finalizationEffects(action, null));
+                submitContinuation(context, acceptPrefillRetirement(context, source, exact));
             }
         });
     }
 
     public void onDecodeGenerationRetired(DecodeEndpoint source,
-                                          List<DecodeEndpoint.ReservationHandle> reservations) {
+                                          List<DecodeResources.ReservationHandle> reservations) {
         if (source == null) {
             return;
         }
@@ -417,30 +415,11 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    public Optional<PreemptionRegistration> tryClaim(long requestId, long reservationToken, long attemptToken, String detail) {
-        BalanceContext context = findRequestContext(requestId);
-        if (context == null) {
-            return Optional.empty();
-        }
-        synchronized (context) {
-            return Optional.ofNullable(context.tryInstallPreemption(reservationToken, attemptToken, detail));
-        }
-    }
-
-    public Optional<CancelTarget> findCancelTarget(long requestId, long reservationToken) {
-        BalanceContext context = findRequestContext(requestId);
-        if (context == null) {
-            return Optional.empty();
-        }
-        synchronized (context) {
-            CancelTarget target = cancelTarget(context.activeRouteForReservation(reservationToken));
-            return target == null || !target.isRoutable() ? Optional.empty() : Optional.of(target);
-        }
-    }
-
-    private static CancelTarget cancelTarget(RequestRoute item) {
-        ServerStatus prefill = item == null ? null : item.prefill();
-        return prefill == null ? null : new CancelTarget(prefill.getServerIp(), prefill.getGrpcPort());
+    public Optional<PreemptionRegistration> tryClaim(DecodeResources.ReservationHandle exact, long attemptToken, String detail) {
+        Objects.requireNonNull(exact, "exact reservation");
+        BalanceContext context = findRequestContext(exact.requestId());
+        return context == null ? Optional.empty()
+                : Optional.ofNullable(context.tryInstallPreemption(exact, attemptToken, detail));
     }
 
     /**
@@ -531,7 +510,11 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 actions.add(action);
             }
         }
-        actions.forEach(this::executeFinalization);
+        Throwable failure = null;
+        for (TerminalAction action : actions) {
+            failure = Failures.run(failure, () -> executeFinalization(action));
+        }
+        Failures.rethrow(failure, "request shutdown finalization failed");
     }
 
     ExpirationTimer expirationTimer() { return expirationTimer; }
@@ -615,14 +598,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 if (restoredRoute != null && restoredRoute.prefillEp() != null) {
                     restoredRoute.prefillEp().signalRouteReady();
                 }
-                if (cleanupPending) {
-                    resumeCleanup(ctx);
-                } else {
-                    if (routeToCancel != null) {
-                        scheduleWorkerQueueCancellation(ctx, routeToCancel);
-                    }
-                    execute(ctx, effect);
-                }
+                if (routeToCancel != null) { scheduleWorkerQueueCancellation(ctx, routeToCancel); }
+                if (effect != null) { execute(ctx, effect); }
+                else if (cleanupPending) { resumeCleanup(ctx); }
             } catch (Throwable settlementFailure) {
                 failure = settlementFailure;
             }
@@ -731,7 +709,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (result.failed()) {
                 SelectedResponse response = ctx.selectDeliveryFailureLocked(claim.item, result.status(),
                         "Delivery failed: " + detailOf(result.cause()), () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
-                return () -> publishFailureAndCleanUp(ctx, claim.item, result.status(), response);
+                return () -> publishFailureAndCleanUp(ctx, response);
             }
             if (!ctx.ownsActiveRoute(claim.item)) {
                 return null;
@@ -757,13 +735,12 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             response = ctx.selectDeliveryFailureLocked(exact, DeliveryResult.Status.NOT_SENT, "Delivery preparation failed: " + detailOf(cause), () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
         }
-        publishFailureAndCleanUp(ctx, exact, DeliveryResult.Status.NOT_SENT, response);
+        publishFailureAndCleanUp(ctx, response);
     }
 
-    private void publishFailureAndCleanUp(BalanceContext ctx, RequestRoute exact,
-                                         DeliveryResult.Status source, SelectedResponse response) {
+    private void publishFailureAndCleanUp(BalanceContext ctx, SelectedResponse response) {
         Throwable failure = Failures.run(null, response == null ? null : () -> submitSelectedResponse(response));
-        failure = Failures.run(failure, () -> cleanUpRequest(ctx, exact, source));
+        failure = Failures.run(failure, () -> resumeCleanup(ctx));
         Failures.rethrow(failure, "request cleanup failed");
     }
 
@@ -784,14 +761,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         Failures.rethrow(failure, "request cleanup failed");
     }
 
-    private TerminalAction acceptPrefillRetirement(BalanceContext ctx, PrefillEndpoint source, RequestRoute exact) {
+    private Runnable acceptPrefillRetirement(BalanceContext ctx, PrefillEndpoint source, RequestRoute exact) {
         String detail = "Prefill endpoint generation retired: " + source.ipPort() + "#" + source.getStatus().getGenerationId();
         synchronized (ctx) {
             if (ctx.hasCleanup() && ctx.ownsPrefillFactLocked(source, exact)) {
                 ctx.recordCleanupSettlement(true, false, false);
-                return ctx.tryFinishCleanupLocked();
+                return () -> resumeCleanup(ctx);
             }
-            return ctx.claimPrefillRetirementLocked(new PendingPrefillRetirement(source, exact, detail));
+            return finalizationEffects(ctx.claimPrefillRetirementLocked(new PendingPrefillRetirement(source, exact, detail)), null);
         }
     }
 
@@ -924,7 +901,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         Runnable work;
         synchronized (ctx) {
             if (!isCurrentContext(ctx) || !ctx.advancePreemption(claim, next)) { return false; }
-            work = ctx.hasCleanup() ? finalizationEffects(ctx.tryFinishCleanupLocked(), null)
+            work = ctx.hasCleanup() ? () -> resumeCleanup(ctx)
                     : switch (next) {
                         case NOT_FOUND_STALE -> ctx.processPendingEventsUnderPreemptionLocked(claim, false, claim);
                         case CANCEL_UNKNOWN -> ctx.processPendingEventsUnderPreemptionLocked(claim, true, claim);
@@ -964,30 +941,24 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return true;
     }
 
-    /** Both fenced-Cancel and typed worker cancellation settle the same request claim. */
-
-    /**
-     * Retain an end event while admission or preemption still owns the request.
-     */
-
     /**
      * The only close gate: no event may discard an outstanding cleanup obligation.
      */
 
     void commitTerminalRecord(BalanceContext ctx, TerminalAction action) {
-        RequestState actionTerminal;
-        synchronized (ctx) {
-            RequestState terminal = ctx.finishTerminal(action);
-            // Freeze the result under the request lock; archive outside it.
-            actionTerminal = terminal;
-        }
-        requests.archive(ctx, actionTerminal);
+        ExpirationTimer.DetachedDeadlines deadlines;
+        synchronized (ctx) { deadlines = ctx.detachDeadlines(); }
+        deadlines.release();
+        RequestState terminal;
+        synchronized (ctx) { terminal = ctx.finishTerminal(action); }
+        requests.archive(ctx, terminal);
     }
 
     private void executeFinalization(TerminalAction action) {
         if (action == null) { return; }
-        finishTerminal(action);
-        publishTerminal(action);
+        Throwable failure = Failures.run(null, () -> finishTerminal(action));
+        failure = Failures.run(failure, () -> publishTerminal(action));
+        Failures.rethrow(failure, "request finalization failed");
     }
 
     private void publishTerminal(TerminalAction action) {
@@ -1003,10 +974,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         Throwable cleanupFailure = null;
         cleanupFailure = Failures.run(cleanupFailure, () -> action.terminalResources().release());
         cleanupFailure = Failures.run(cleanupFailure, action.preemption() == null ? null : () -> action.preemption().signalTerminal(new VictimTerminal(context.getRequestId())));
-        Throwable settledCleanupFailure = cleanupFailure;
-        if (cleanupFailure != null) {
-            context.scheduler().recordFailure(cleanupFailure);
-        }
+        if (cleanupFailure != null) { recordFailure(cleanupFailure); }
         DeliveryClaim delivery = context.delivery();
         boolean successfulWorker = action.event() != null && action.event().kind() == DeferredTerminal.Kind.WORKER
                 && action.event().workerSuccessful();
@@ -1017,14 +985,18 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 delivery.abandon(context.cancellationReason() == null ? CancelReason.CLIENT_CANCELLED : context.cancellationReason());
             }
         }
-        Runnable archive = () -> {
-            Throwable failure = Failures.run(settledCleanupFailure, () -> releaseEndpoints(action));
-            if (failure != null) { recordFailure(failure); } else { commitTerminalRecord(context, action); }
-        };
-        if (delivery == null || delivery.cleanupComplete()) {
-            archive.run();
-        } else {
-            delivery.settlement().thenRun(() -> submitContinuation(context, archive));
+        boolean archive;
+        boolean batchDelivery;
+        synchronized (context) {
+            if (cleanupFailure == null) { context.finishTerminalEffectsLocked(action); }
+            archive = context.claimArchiveLocked(action);
+            batchDelivery = context.deliveryClaimKind() == DeliveryClaimKind.BATCH_ENQUEUE;
+        }
+        if (archive) { commitTerminalRecord(context, action); }
+        else if (batchDelivery) { enqueueCleanup(context); }
+        else {
+            Throwable releaseFailure = Failures.run(null, () -> resumeCleanup(context));
+            if (releaseFailure != null) { recordFailure(releaseFailure); }
         }
         return action.publication();
     }
@@ -1211,7 +1183,13 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             action = ctx.claimFinalizationLocked(null, transition, null, true, () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
         }
-        return action == null ? null : finishTerminal(action);
+        if (action == null) { return null; }
+        try {
+            return finishTerminal(action);
+        } catch (RuntimeException | Error failure) {
+            if (action.publication() != null) { Failures.run(failure, action.publication()::abandonIfUnused); }
+            throw failure;
+        }
     }
 
     PublicationPermit requirePublicationPermitLocked(BalanceContext ctx, PublicationKind kind) {
@@ -1223,108 +1201,87 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return new PublicationPermit(registration, ctx, kind);
     }
 
-    // ── 共同收尾：清理、提交记录、发布结果 ──
+    record Settlement(boolean prefillSettled, boolean decodeSettled, Throwable failure) { }
 
-    private void releaseEndpoints(TerminalAction action) {
-        if (action.endpointsSettled()) { return; }
-        DeliveryClaimKind delivery = action.deliveryKind();
-        RequestRoute exact = action.item();
-        if (exact == null) { return; }
-        DeferredTerminal event = action.event();
-        boolean expired = event != null && event.kind() == DeferredTerminal.Kind.INACTIVITY_EXPIRED;
-        DecodeEndpoint.ReleaseReason decodeReason = provenReleaseReason(exact,
-                expired ? DecodeEndpoint.ReleaseReason.EXPIRED : DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
-        boolean releasePrefill = event == null ? delivery != DeliveryClaimKind.BATCH_ENQUEUE
-                : switch (event.kind()) {
-                    case INACTIVITY_EXPIRED, DECODE_GENERATION_RETIRED, PRIORITY -> true;
-                    case WORKER -> event.workerSource() != WorkerTerminalSource.PREFILL_ENDPOINT
-                            && delivery != DeliveryClaimKind.BATCH_ENQUEUE;
-                    default -> delivery != DeliveryClaimKind.BATCH_ENQUEUE;
-                };
-        releasePrefill |= exact.ctx().delivery() != null && exact.ctx().delivery().cleanupComplete();
-        boolean removeQueued = delivery == DeliveryClaimKind.NONE;
-        var prefill = removeQueued
-                ? releasePrefill ? PrefillAdmissionResources.PrefillRelease.QUEUED_AND_COMMITTED : PrefillAdmissionResources.PrefillRelease.QUEUED
-                : releasePrefill ? PrefillAdmissionResources.PrefillRelease.COMMITTED : PrefillAdmissionResources.PrefillRelease.NONE;
-        var settlement = PrefillAdmissionResources.settle(exact,
-                new PrefillAdmissionResources.ReleasePlan(prefill, decodeReason, null), false, false);
-        Failures.rethrow(settlement.failure(), "request cleanup failed");
-    }
-
-    private static DecodeEndpoint.ReleaseReason provenReleaseReason(RequestRoute exact, DecodeEndpoint.ReleaseReason fallback) {
-        DeliveryClaim claim = exact.ctx().delivery();
-        DecodeEndpoint.ReleaseReason proof = claim == null ? null : claim.provenReleaseReason();
-        return proof == null ? fallback : proof;
-    }
-
-    // ── 派发失败：分别结算 Prefill 与 Decode ──
-    private void cleanUpRequest(BalanceContext ctx, RequestRoute exact, DeliveryResult.Status source) {
-        ctx.requireOutsideContextLock("request cleanup");
-        DeliveryClaim delivery = ctx.delivery();
-        if (delivery != null) {
-            delivery.abandon(ctx.cancellationReason() == null ? CancelReason.CLIENT_CANCELLED : ctx.cancellationReason());
-            if (!delivery.cleanupComplete()) {
-                if (delivery.attachCleanupContinuation()) {
-                    delivery.settlement().thenRun(() ->
-                            submitContinuation(ctx, () -> cleanUpRequest(ctx, exact, source)));
+    static Settlement releaseResources(RequestRoute exact, DecodeResources.ReleaseReason releaseReason,
+                             org.flexlb.balance.delivery.DeliveryResult.Status source,
+                             boolean prefillSettled, boolean decodeSettled) {
+        if (exact == null) { return new Settlement(true, true, null); }
+        Throwable failure = null;
+        try {
+            if (!prefillSettled && exact.prefillEp() != null) { exact.prefillEp().releaseRequest(exact); }
+            prefillSettled = true;
+        } catch (Throwable problem) { failure = problem; }
+        try {
+            if (!decodeSettled) {
+                if (exact.decodeEp() == null || exact.decodeReservation() == null) { decodeSettled = true; }
+                else if (releaseReason != null) {
+                    DecodeResources.ReservationReleaseResult released = Objects.requireNonNull(
+                            exact.decodeEp().release(exact.decodeReservation(), releaseReason), "Decode release result");
+                    decodeSettled = released == DecodeResources.ReservationReleaseResult.RELEASED
+                            || released == DecodeResources.ReservationReleaseResult.STALE;
+                } else {
+                    decodeSettled = exact.decodeEp().settleFailedRequest(exact.decodeReservation(), source);
                 }
-                return;
             }
-        }
+        } catch (Throwable problem) { failure = Failures.append(failure, problem); }
+        return new Settlement(prefillSettled, decodeSettled, failure);
+    }
 
+    /** Resume the one request cleanup owner when delivery release evidence becomes complete. */
+    void enqueueCleanup(BalanceContext ctx) {
+        BalanceContext.CleanupQueue queued;
+        synchronized (ctx) { queued = ctx.tryQueueCleanupLocked(); }
+        if (queued == null) { return; }
+        try {
+            submitContinuation(ctx, () -> {
+                synchronized (ctx) { ctx.releaseCleanupQueueLocked(queued); }
+                resumeCleanup(ctx);
+            });
+        } catch (RuntimeException | Error failure) {
+            synchronized (ctx) { ctx.releaseCleanupQueueLocked(queued); }
+            throw failure;
+        }
+    }
+
+    void resumeCleanup(BalanceContext ctx) {
+        ctx.requireOutsideContextLock("request cleanup");
+        DeliveryClaim delivery;
+        boolean failedDelivery;
+        synchronized (ctx) {
+            if (!ctx.hasCleanup()) { return; }
+            delivery = ctx.delivery();
+            failedDelivery = ctx.cleanupSource() != null;
+        }
+        if (delivery != null && failedDelivery) {
+            delivery.abandon(ctx.cancellationReason() == null ? CancelReason.CLIENT_CANCELLED : ctx.cancellationReason());
+        }
         Throwable error = null;
         try {
             while (true) {
                 CleanupPass pass;
-                synchronized (ctx) {
-                    pass = ctx.beginCleanup(exact);
-                }
+                synchronized (ctx) { pass = ctx.beginCleanup(); }
                 if (pass == null) { break; }
-                boolean prefillDone = pass.prefillSettled();
-                boolean decodeDone = pass.decodeSettled();
-                try {
-                    if (pass.requestDeadline() != null) {
-                        pass.requestDeadline().cancel();
-                    }
-                    ExpirationTimer.releaseDecisionDeadline(pass.decisionDeadline());
-                } catch (Throwable problem) {
-                    error = Failures.append(error, problem);
-                }
-                var plan = new PrefillAdmissionResources.ReleasePlan(
-                        pass.expired() ? PrefillAdmissionResources.PrefillRelease.QUEUED_AND_COMMITTED
-                                : PrefillAdmissionResources.PrefillRelease.FAILED,
-                        provenReleaseReason(exact, pass.expired() ? DecodeEndpoint.ReleaseReason.EXPIRED : null), source);
-                var settlement = PrefillAdmissionResources.settle(exact, plan, prefillDone, decodeDone);
-                prefillDone = settlement.prefillSettled();
-                decodeDone = settlement.decodeSettled();
+                error = Failures.run(error, pass.requestDeadline() == null ? null : pass.requestDeadline()::cancel);
+                error = Failures.run(error, () -> ExpirationTimer.releaseDecisionDeadline(pass.decisionDeadline()));
+                var settlement = releaseResources(pass.route(), pass.releaseReason(), pass.source(),
+                        pass.prefillSettled(), pass.decodeSettled());
                 error = Failures.append(error, settlement.failure());
-                TerminalAction action;
+                TerminalAction completed;
+                TerminalAction start;
                 synchronized (ctx) {
-                    CleanupNext next = ctx.finishCleanup(pass, prefillDone, decodeDone);
+                    CleanupNext next = ctx.finishCleanup(pass, settlement.prefillSettled(), settlement.decodeSettled());
                     if (next == CleanupNext.STALE) { break; }
                     if (next == CleanupNext.REPEAT) { continue; }
-                    action = ctx.tryFinishCleanupLocked();
+                    completed = ctx.completedCleanupActionLocked();
+                    start = completed == null ? ctx.tryFinishCleanupLocked() : null;
                 }
-                executeFinalization(action);
+                if (completed != null) { commitTerminalRecord(ctx, completed); }
+                else { executeFinalization(start); }
                 break;
             }
-        } catch (Throwable problem) {
-            error = Failures.append(error, problem);
-        }
+        } catch (Throwable problem) { error = Failures.append(error, problem); }
         Failures.rethrow(error, "request cleanup failed");
-    }
-
-    void resumeCleanup(BalanceContext ctx) {
-        RequestRoute exact;
-        DeliveryResult.Status source;
-        synchronized (ctx) {
-            if (!ctx.hasCleanup()) {
-                return;
-            }
-            exact = ctx.route();
-            source = ctx.cleanupSource();
-        }
-        cleanUpRequest(ctx, exact, source);
     }
 
 }

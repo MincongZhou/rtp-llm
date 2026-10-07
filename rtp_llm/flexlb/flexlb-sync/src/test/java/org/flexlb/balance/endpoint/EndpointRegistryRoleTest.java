@@ -144,7 +144,7 @@ class EndpointRegistryRoleTest {
         EndpointTestSupport.publishEndpoint(
                 registry, RoleType.DECODE, address, status);
 
-        DecodeEndpoint.DecodeRoutingView before =
+        DecodeResources.DecodeRoutingView before =
                 registry.decodeRoutingSnapshot(null).getFirst();
         assertEquals(address, before.address());
         assertEquals("group-a", before.topology().group());
@@ -157,7 +157,7 @@ class EndpointRegistryRoleTest {
             status.lock.unlock();
         }
 
-        DecodeEndpoint.DecodeRoutingView after =
+        DecodeResources.DecodeRoutingView after =
                 registry.decodeRoutingSnapshot(null).getFirst();
         assertNotSame(before, after,
                 "topology is an independent routing-cache generation");
@@ -174,7 +174,7 @@ class EndpointRegistryRoleTest {
         WorkerStatus oldStatus = status(RoleType.DECODE, 8020);
         EndpointTestSupport.publishEndpoint(
                 registry, RoleType.DECODE, address, oldStatus);
-        DecodeEndpoint.DecodeRoutingView oldView =
+        DecodeResources.DecodeRoutingView oldView =
                 registry.decodeRoutingSnapshot(null).getFirst();
 
         retire(RoleType.DECODE, address, oldStatus);
@@ -188,7 +188,7 @@ class EndpointRegistryRoleTest {
 
         assertNull(registry.captureDecodeGeneration(oldView),
                 "an old view must not pin a same-address replacement");
-        DecodeEndpoint.DecodeRoutingView replacementView =
+        DecodeResources.DecodeRoutingView replacementView =
                 registry.decodeRoutingSnapshot(null).getFirst();
         assertEquals(address, replacementView.address());
         assertTrue(oldView.generationId() != replacementView.generationId());
@@ -316,7 +316,7 @@ class EndpointRegistryRoleTest {
                 EndpointTestSupport.publishEndpoint(registry,
                         RoleType.DECODE, ipPort,
                         status(RoleType.DECODE, 8080));
-        DecodeEndpoint.ReservationHandle oldReservation;
+        DecodeResources.ReservationHandle oldReservation;
         try (WorkerEndpoint.GenerationPin pin =
                      oldEndpoint.tryPinGeneration()) {
             assertTrue(pin != null);
@@ -334,7 +334,7 @@ class EndpointRegistryRoleTest {
         assertNull(oldEndpoint.reservationHandle(oldReservation.requestId()),
                 "close must retire A's queued ownership before B is routable");
         assertNull(replacement.reservationHandle(oldReservation.requestId()));
-        replacement.release(oldReservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        replacement.release(oldReservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         assertTrue(replacement.resourceSnapshot().reservedCount() == 0,
                 "A's exact generation handle must never mutate same-address B");
     }

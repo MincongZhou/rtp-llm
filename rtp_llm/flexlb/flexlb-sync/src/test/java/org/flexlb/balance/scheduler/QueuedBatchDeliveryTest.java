@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillState;
 
@@ -91,13 +92,11 @@ class QueuedBatchDeliveryTest {
         when(prefill.getGrpcPort()).thenReturn(8090);
         when(prefill.reserveBatch(any(), anyLong(), anyInt())).thenAnswer(call ->
                 ledger.reserveBatch(call.getArgument(0), call.getArgument(1), call.getArgument(2)));
-        when(prefill.releaseCommittedItem(any())).thenAnswer(call -> {
+        when(prefill.releaseRequest(any())).thenAnswer(call -> {
             RequestRoute item = call.getArgument(0);
             assertFalse(Thread.holdsLock(registry.findRequestContext(item.requestId())));
-            return ledger.prefill.terminalizeCommittedItem(item);
+            return org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(ledger.prefill, item);
         });
-        doAnswer(call -> { prefill.releaseCommittedItem(call.getArgument(0)); return null; })
-                .when(prefill).settleFailedRequest(any());
         decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null,
                 "127.0.0.1", 8080, 8081, null), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry));
         CountDownLatch entered = new CountDownLatch(1);
@@ -371,7 +370,7 @@ class QueuedBatchDeliveryTest {
         context.setGenerateInputPb(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(id)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()).build().toByteString());
         var future = RequestProtocolTestSupport.register(registry, context);
-        DecodeEndpoint.ReservationHandle reservation;
+        DecodeResources.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
             reservation = decode.reserveUnqueued(pin, id, 1L, 2L, 50);
         }

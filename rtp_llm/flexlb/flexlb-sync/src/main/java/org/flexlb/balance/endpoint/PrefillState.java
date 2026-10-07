@@ -1,6 +1,5 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
@@ -49,7 +48,7 @@ public final class PrefillState {
         ENDPOINT_RETIRED
     }
 
-    public record ReservationResult<R extends AutoCloseable>(
+    public record ReservationResult<R extends Reservation>(
             CapacityStatus status,
             R reservation) {
         public ReservationResult {
@@ -167,7 +166,7 @@ public final class PrefillState {
     }
 
     /** Exact preparation capability, consumed by commit or rollback. */
-    public abstract class Reservation implements AutoCloseable {
+    public abstract class Reservation {
         /* guarded by PrefillState.lock; cleared when consumed or rolled back */
         final PrefillState owner = PrefillState.this;
         RequestEntry originalOwner;
@@ -177,18 +176,11 @@ public final class PrefillState {
             this.originalOwner = Objects.requireNonNull(
                     originalOwner, "originalOwner");
         }
-
-        /** Roll back only preparation; commit consumes this capability. */
-        @Override
-        public final void close() {
-            var rollback = rollbackPreparation(this);
-            if (rollback.generationHandoff() != null) { rollback.generationHandoff().close(); }
-        }
     }
 
     public final class RouteReservation extends Reservation {
         /* guarded by PrefillState.lock until the reservation commits */
-        private long predictedWorkMs;
+        private final long predictedWorkMs;
 
         private RouteReservation(RequestEntry originalOwner, long predictedWorkMs) {
             super(originalOwner);
@@ -329,12 +321,12 @@ public final class PrefillState {
                     && queueMembership != QueueMembership.STOP_DETACHED;
         }
 
-        private void commitIndividual(RouteReservation lease, long nowMs) {
-            if (!isActive() || reservation != lease) {
+        private void commitIndividual(long predictedMs, long nowMs) {
+            if (!isActive()) {
                 throw new IllegalStateException(
                         "request is not an ACTIVE route request_id=" + requestId);
             }
-            remainingWorkMs = lease.predictedWorkMs;
+            remainingWorkMs = boundedPrediction(predictedMs);
             phaseBaseMs = nowMs;
             queueMembership = QueueMembership.UNINDEXED;
             individualPhase = Phase.COMMITTED;
@@ -586,30 +578,6 @@ public final class PrefillState {
         return mutationVersion;
     }
 
-    /** Publish ACTIVE membership and its NON_BATCH lease in one ownership-lock transaction. */
-    public boolean enqueueForDeliveryLocked(RequestRoute item, long maxOutstandingRequests) {
-        requireLock();
-        if (!enqueueActiveLocked(item, maxOutstandingRequests)) {
-            return false;
-        }
-        boolean published = false;
-        try {
-            if (item.requiresRouteReservation()) {
-                if (item.prefillEp().isGenerationRetiringOrRetired()) {
-                    return false;
-                }
-                reserveRouteLocked(item, 0L);
-            }
-            published = true;
-            return true;
-        } finally {
-            if (!published) {
-                requireState(removeQueuedLocked(item),
-                        "fresh ACTIVE publication could not roll back: request_id=", item.requestId());
-            }
-        }
-    }
-
     public boolean enqueueActiveLocked(RequestRoute item, long maxOutstandingRequests) {
         requireLock();
         if (requests.containsKey(item.requestId())
@@ -638,44 +606,20 @@ public final class PrefillState {
         return true;
     }
 
-    private boolean removeSelectionBoundaryLocked(
-            RequestRoute item,
-            CapacityBoundary boundary,
-            long nowMs) {
+    /** Remove an exact, still waiting and unexpired queue owner in the current transaction. */
+    public boolean removeQueuedIfUnexpiredLocked(RequestRoute exact, long nowMs) {
         requireLock();
-        if (item == null
-                || boundary.unavailable()
-                || boundary == CapacityBoundary.OWNERSHIP_LOST) {
-            return false;
-        }
-        return activeIndex.contains(item)
-                && !item.requestExpired(nowMs)
-                && removeQueuedLocked(item);
+        return exact != null && !exact.requestExpired(nowMs) && removeQueuedLocked(exact);
     }
 
-    /** Finish the queue part of an already committed delivery under the same lock. */
-    public SelectionRemainder finishPreparedSelectionLocked(
-            RequestRoute blockedItem, CapacityBoundary blockedResult, long nowMs) {
+    /** Finish queue mutations after a committed selection and capture the resulting depth. */
+    public SelectionRemainder finishPreparedSelectionLocked(RequestRoute failedMember, long nowMs) {
         requireLock();
-        boolean removed = removeSelectionBoundaryLocked(blockedItem, blockedResult, nowMs);
+        boolean removed = removeQueuedIfUnexpiredLocked(failedMember, nowMs);
         return new SelectionRemainder(activeIndex.size(), removed);
     }
 
     public record SelectionRemainder(int queueDepth, boolean removedBoundary) { }
-
-    /** Resolve an empty prepared selection against the current queue head. */
-    public QueueBoundary resolveEmptySelectionLocked(
-            RequestRoute item, CapacityBoundary boundary, long nowMs) {
-        requireLock();
-        if (boundary != null && boundary.unavailable()) {
-            return activeIndex.peek() == item && !item.requestExpired(nowMs)
-                    ? QueueBoundary.BLOCKED : QueueBoundary.UNCHANGED;
-        }
-        return removeSelectionBoundaryLocked(item, boundary, nowMs)
-                ? QueueBoundary.REMOVED : QueueBoundary.UNCHANGED;
-    }
-
-    public enum QueueBoundary { UNCHANGED, BLOCKED, REMOVED }
 
     /** The queue part of a worker wait; the worker owns stop and control wakeups. */
     public boolean queueWaitCurrentLocked(
@@ -697,15 +641,15 @@ public final class PrefillState {
     public boolean removeQueuedLocked(RequestRoute item) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
-        if (entry == null || !entry.activeIdentity(item)) {
+        if (entry == null || !entry.activeIdentity(item)
+                || entry.queueMembership != QueueMembership.WAITING) {
             return false;
         }
         Reservation lease = entry.reservation;
         requireState(lease == null || lease.open,
                 "ACTIVE request owns a non-OPEN Prefill lease request_id=", item.requestId());
-        detachAdmissionIndexLocked(entry, item);
-        // BATCH preparation still owns its OPEN lease and generation handoff.
-        if (lease instanceof RouteReservation) { closeOpenLeaseLocked(lease); }
+        removeValidatedActiveIndexLocked(item);
+        // Batch preparation still owns its OPEN lease and generation handoff.
         removeRequestLocked(item.requestId(), entry);
         recordMutationLocked();
         return true;
@@ -787,8 +731,8 @@ public final class PrefillState {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
         return PriorityNormalizer.hasPriority(item.priority()) && item.priority() < priority
-                && !item.future().isDone() && entry != null && entry.activeIdentity(item)
-                && entry.reservation instanceof RouteReservation && entry.reservation.open;
+                && entry != null && entry.activeIdentity(item)
+                && entry.queueMembership == QueueMembership.WAITING && entry.reservation == null;
     }
 
     private long requestSlotsToReleaseLocked(long requestLimit) {
@@ -804,7 +748,7 @@ public final class PrefillState {
         List<RequestRoute> victims = queuedPreemptionVictimsLocked(incoming.priority(), requestLimit);
         if (victims.isEmpty()) { return victims; }
         // The selected victims fund this seat; the shared lock hides the temporary excess.
-        if (!enqueueForDeliveryLocked(incoming, 0L)) { return List.of(); }
+        if (!enqueueActiveLocked(incoming, 0L)) { return List.of(); }
         for (RequestRoute victim : victims) {
             requireState(removeQueuedLocked(victim), "queued preemption lost its exact victim");
         }
@@ -818,7 +762,6 @@ public final class PrefillState {
      * acknowledge the exact pending identity below.
      */
     public RequestRoute detachNextActiveForStop() {
-        boolean releasedRoute = false;
         lock.lock();
         try {
             RequestRoute item = activeIndex.peek();
@@ -831,10 +774,6 @@ public final class PrefillState {
                     "stopped ACTIVE request owns a non-OPEN Prefill lease request_id=", item.requestId());
             removeValidatedActiveIndexLocked(item);
             entry.queueMembership = QueueMembership.STOP_DETACHED;
-            if (lease instanceof RouteReservation) {
-                closeOpenLeaseLocked(lease);
-                releasedRoute = true;
-            }
             recordMutationLocked();
             return item;
         } finally {
@@ -846,8 +785,8 @@ public final class PrefillState {
     public boolean acknowledgeStopTerminalLocked(RequestRoute item) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
-        if (entry == null
-                || !entry.isActive() || entry.item != item
+        if (entry == null) { return true; }
+        if (!entry.isActive() || entry.item != item
                 || entry.queueMembership != QueueMembership.STOP_DETACHED
                 || activeIndex.contains(item)) {
             return false;
@@ -857,39 +796,6 @@ public final class PrefillState {
             recordMutationLocked();
         }
         return removed;
-    }
-
-    RouteReservation reserveRouteLocked(RequestRoute item, long predictedMs) {
-        requireLock();
-        RequestEntry entry = requests.get(item.requestId());
-        requireState(entry != null && entry.activeIdentity(item) && entry.reservation == null,
-                "route reservation requires an exact unreserved ACTIVE request");
-        RouteReservation lease = new RouteReservation(entry, predictedMs);
-        entry.reservation = lease;
-        recordMutationLocked();
-        return lease;
-    }
-
-    /** Borrow the canonical reservation for preparation; commit rechecks the exact lease. */
-    RouteReservation prepareRoute(RequestRoute item, long predictedMs) {
-        lock.lock();
-        try {
-            RequestEntry entry = requests.get(item.requestId());
-            if (entry == null || !entry.activeIdentity(item)
-                    || !(entry.reservation instanceof RouteReservation lease)
-                    || !lease.open) {
-                throw new IllegalStateException(
-                        "route prediction no longer owns ACTIVE request_id=" + item.requestId());
-            }
-            lease.predictedWorkMs = boundedPrediction(predictedMs);
-            if (entry.queueMembership == QueueMembership.UNINDEXED) {
-                committedWorkCapture = null;
-            }
-            recordMutationLocked();
-            return lease;
-        } finally {
-            lock.unlock();
-        }
     }
 
     ReservationResult<BatchReservation> reserveBatch(
@@ -953,25 +859,18 @@ public final class PrefillState {
             throw new IllegalArgumentException(
                     "route commit requires at least one reservation");
         }
-        List<RouteReservation> leases = new ArrayList<>(
-                exactReservations.size());
-        for (RouteReservation reservation : exactReservations) {
-            if (reservation == null || reservation.owner != this) {
-                throw new IllegalArgumentException(
-                        "route reservation belongs to another Prefill ledger");
-            }
-            leases.add(reservation);
-        }
         validateGroupLocked(items, false);
-        if (items.size() != leases.size()) {
+        if (items.size() != exactReservations.size()) {
             throw new IllegalArgumentException(
                     "route commit requires one exact lease per member");
         }
         for (int index = 0; index < items.size(); index++) {
             RequestEntry entry = requests.get(items.get(index).requestId());
-            RouteReservation lease = leases.get(index);
-            if (entry == null
-                    || entry.reservation != lease
+            RouteReservation lease = exactReservations.get(index);
+            if (lease == null || lease.owner != this) {
+                throw new IllegalArgumentException("route reservation belongs to another Prefill ledger");
+            }
+            if (entry.reservation != lease
                     || lease.originalOwner != entry
                     || !lease.open) {
                 throw new IllegalStateException(
@@ -982,17 +881,39 @@ public final class PrefillState {
         long nowMs = clock.getAsLong();
         CommittedHandoff committedHandoff = new CommittedHandoff(generationHandoff,
                 capturePrecedingWorkLocked(items, nowMs));
-        for (RequestRoute item : items) {
-            detachAdmissionIndexLocked(requests.get(item.requestId()), item);
-        }
-        // All validation and handoff allocation precede ownership changes. Queue removal
-        // and stop detachment share this lock; DIRECT has no published item lease.
+        // Every exact DIRECT token is validated before any ownership changes.
         for (int index = 0; index < items.size(); index++) {
             RequestRoute item = items.get(index);
             RequestEntry entry = requests.get(item.requestId());
-            RouteReservation lease = leases.get(index);
-            entry.commitIndividual(lease, nowMs);
+            RouteReservation lease = exactReservations.get(index);
+            entry.commitIndividual(lease.predictedWorkMs, nowMs);
             consumeReservationLocked(lease);
+        }
+        committedWorkCapture = null;
+        recordMutationLocked();
+        return committedHandoff;
+    }
+
+    /** Queued predictions belong to the transaction until exact queue ownership commits. */
+    CommittedHandoff commitQueuedRoutesLocked(
+            List<RequestRoute> items, long[] predictions,
+            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+        requireLock();
+        Objects.requireNonNull(generationHandoff, "generationHandoff");
+        if (items.size() != predictions.length) {
+            throw new IllegalArgumentException("route commit requires one prediction per member");
+        }
+        validateGroupLocked(items, true);
+        for (RequestRoute item : items) {
+            requireState(requests.get(item.requestId()).reservation == null,
+                    "queued route commit cannot consume another preparation request_id=", item.requestId());
+        }
+        long nowMs = clock.getAsLong();
+        CommittedHandoff committedHandoff = new CommittedHandoff(generationHandoff, captureWorkLocked(nowMs));
+        for (int index = 0; index < items.size(); index++) {
+            RequestRoute item = items.get(index);
+            removeValidatedActiveIndexLocked(item);
+            requests.get(item.requestId()).commitIndividual(predictions[index], nowMs);
         }
         committedWorkCapture = null;
         recordMutationLocked();
@@ -1065,7 +986,8 @@ public final class PrefillState {
                 requireState(activeIndex.contains(item),
                         "canonical ACTIVE request has no queue index request_id=", item.requestId());
             } else {
-                validateAdmissionIndexLocked(entry, item);
+                requireState(entry.queueMembership == QueueMembership.UNINDEXED && !activeIndex.contains(item),
+                        "immediate admission cannot have a queue index request_id=", item.requestId());
             }
         }
     }
@@ -1109,41 +1031,33 @@ public final class PrefillState {
         }
     }
 
-    private void validateAdmissionIndexLocked(RequestEntry entry, RequestRoute item) {
-        requireState(entry.queueMembership != QueueMembership.STOP_DETACHED,
-                "stopped admission cannot commit request_id=", item.requestId());
-        requireState(activeIndex.contains(item) == (entry.queueMembership == QueueMembership.WAITING),
-                "canonical admission and waiting index disagree request_id=", item.requestId());
-    }
+    enum RequestRelease { NONE, QUEUED, RESERVED, COMMITTED }
 
-    private void detachAdmissionIndexLocked(RequestEntry entry, RequestRoute item) {
-        validateAdmissionIndexLocked(entry, item);
-        if (entry.queueMembership == QueueMembership.WAITING) {
-            removeValidatedActiveIndexLocked(item);
-        }
-        // The caller removes this entry or commits it before releasing the lock.
-        // Keep its admission origin until then: removing queued-only work must
-        // not invalidate the immutable committed-work projection.
-    }
-
-    /**
-     * Total counterpart cleanup bound to one exact committed RequestRoute. A
-     * reused request id or an ACTIVE item is a no-op.
-     */
-    public boolean terminalizeCommittedItem(RequestRoute exactItem) {
+    /** Release only this exact request; preparations owned by a batch transaction survive. */
+    RequestRelease releaseRequest(RequestRoute exactItem) {
         lock.lock();
         try {
             RequestEntry entry = requests.get(exactItem.requestId());
-            if (entry == null || entry.isActive()
-                    || entry.item != exactItem) {
-                return false;
+            if (entry == null || entry.item != exactItem) { return RequestRelease.NONE; }
+            if (!entry.isActive()) {
+                settleLocked(entry, TerminalObservation.external(entry), clock.getAsLong());
+                return RequestRelease.COMMITTED;
             }
-            // Local cleanup does not prove that Engine omitted this member's work.
-            settleLocked(entry, TerminalObservation.external(entry), clock.getAsLong());
-            return true;
-        } finally {
-            lock.unlock();
-        }
+            if (entry.queueMembership == QueueMembership.UNINDEXED) {
+                requireState(entry.reservation instanceof RouteReservation && entry.reservation.open,
+                        "unqueued admission has no preparation request_id=", exactItem.requestId());
+                closeOpenLeaseLocked(entry.reservation);
+                return RequestRelease.RESERVED;
+            }
+            if (entry.queueMembership == QueueMembership.WAITING) {
+                removeValidatedActiveIndexLocked(exactItem);
+            }
+            // STOP_DETACHED still occupies a request seat. Its callback keeps the exact
+            // route independently; successful acknowledgement is idempotent after release.
+            removeRequestLocked(exactItem.requestId(), entry);
+            recordMutationLocked();
+            return RequestRelease.QUEUED;
+        } finally { lock.unlock(); }
     }
 
     public record HeartbeatReconciliation(List<WorkerStatusFact> schedulerFacts,

@@ -20,6 +20,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -120,12 +121,12 @@ class WorkerBatcherRequestCapacityTest {
             try {
                 assertTrue(EndpointTestSupport.offer(fixture.endpoint, first));
                 assertTrue(EndpointTestSupport.offer(fixture.endpoint, second));
-                // Two seats are required; a completed request cannot fund the replacement.
-                org.mockito.Mockito.doReturn(CompletableFuture.completedFuture(null)).when(first).future();
+                // Two seats are required; an equal-priority request cannot be a victim.
+                org.mockito.Mockito.doReturn(90).when(first).priority();
                 assertTrue(state.replaceQueuedRoutesLocked(incoming, 1L).isEmpty());
                 assertEquals(2L, state.observedRequestCount());
                 assertEquals(List.of(first, second), state.captureQueue(Integer.MAX_VALUE).items());
-                org.mockito.Mockito.doCallRealMethod().when(first).future();
+                org.mockito.Mockito.doCallRealMethod().when(first).priority();
                 assertEquals(List.of(second, first), state.replaceQueuedRoutesLocked(incoming, 1L));
                 assertEquals(List.of(incoming), state.captureQueue(Integer.MAX_VALUE).items());
                 assertEquals(1L, state.observedRequestCount());
@@ -140,8 +141,35 @@ class WorkerBatcherRequestCapacityTest {
     }
 
     @Test
+    void completedFrontendFutureDoesNotPreventReclaimingAnExactWaitingSeat() {
+        FlexlbConfig config = preemptionConfig();
+        try (Fixture fixture = fixture(config)) {
+            RequestRoute completed = item(config, fixture.endpoint, 1L, 10);
+            RequestRoute waiting = item(config, fixture.endpoint, 2L, 50);
+            RequestRoute incoming = item(config, fixture.endpoint, 3L, 90);
+            PrefillState state = (PrefillState) ReflectionTestUtils.getField(fixture.endpoint, "prefillState");
+            state.ownershipLock().lock();
+            try {
+                assertTrue(EndpointTestSupport.offer(fixture.endpoint, completed));
+                assertTrue(EndpointTestSupport.offer(fixture.endpoint, waiting));
+                Response frontendResult = Response.error(org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED);
+                assertTrue(completed.future().complete(frontendResult));
+                assertEquals(2L, state.observedRequestCount(), "frontend publication does not remove the waiting resource seat");
+                assertTrue(EndpointTestSupport.offer(fixture.endpoint, incoming));
+                assertEquals(List.of(incoming, waiting), state.captureQueue(Integer.MAX_VALUE).items());
+                assertEquals(2L, state.observedRequestCount());
+                assertSame(frontendResult, completed.future().join(), "reclaiming queue ownership cannot rewrite an already published result");
+                assertFalse(state.removeQueuedLocked(completed));
+                verify(fixture.runtime.events()).onQueuedItemPreempted(completed, incoming);
+            } finally {
+                state.ownershipLock().unlock();
+            }
+        }
+    }
+
+    @Test
     @Timeout(10)
-    void reservationFailureRollsBackOnlyTheFreshQueueEntry() {
+    void eligibilityFailureDoesNotPublishAFreshQueueEntry() {
         FlexlbConfig config = preemptionConfig();
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(WorkerStatus.createDiscovered(
@@ -158,8 +186,8 @@ class WorkerBatcherRequestCapacityTest {
             RequestRoute previous = item(config, endpoint, 1L);
             RequestRoute incoming = org.mockito.Mockito.spy(item(config, endpoint, 2L, 90));
             doAnswer(invocation -> {
-                assertEquals(2L, WorkerBatcherTestSupport.state(runtime).observedRequestCount(),
-                        "failure must happen after ACTIVE publication");
+                assertEquals(1L, WorkerBatcherTestSupport.state(runtime).observedRequestCount(),
+                        "eligibility failure must happen before queue publication");
                 throw failure;
             }).when(incoming).requiresRouteReservation();
             assertTrue(runtime.offer(previous));
@@ -178,7 +206,7 @@ class WorkerBatcherRequestCapacityTest {
 
     @Test
     @Timeout(10)
-    void retirementAfterActivePublicationRollsBackBeforeRouteReservation() {
+    void retirementRejectsQueuePublicationBeforeOccupyingCapacity() {
         FlexlbConfig config = preemptionConfig();
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(WorkerStatus.createDiscovered(
@@ -187,8 +215,8 @@ class WorkerBatcherRequestCapacityTest {
         WorkerBatcher runtime = WorkerBatcherTestSupport.create("retiring-publication", endpoint, config,
                 EndpointTestSupport.routeStrategy(requests), requests.events());
         doAnswer(invocation -> {
-            assertEquals(1L, WorkerBatcherTestSupport.state(runtime).observedRequestCount(),
-                    "retirement must be checked after ACTIVE publication");
+            assertEquals(0L, WorkerBatcherTestSupport.state(runtime).observedRequestCount(),
+                    "retirement rejects queue publication before occupying a request seat");
             return true;
         }).when(endpoint).isGenerationRetiringOrRetired();
         runtime.start();
@@ -197,8 +225,7 @@ class WorkerBatcherRequestCapacityTest {
             assertFalse(runtime.offer(item));
             assertEquals(0L, WorkerBatcherTestSupport.state(runtime).observedRequestCount());
             assertTrue(WorkerBatcherTestSupport.capture(runtime).items().isEmpty());
-            assertThrows(IllegalStateException.class,
-                    () -> WorkerBatcherTestSupport.state(runtime).prepareRoute(item, 10L));
+            assertFalse(endpoint.releaseRequest(item));
         } finally {
             assertNull(runtime.stopAndAwait());
         }
@@ -231,14 +258,17 @@ class WorkerBatcherRequestCapacityTest {
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         try (Fixture fixture = fixture(config)) {
             RequestRoute committed = item(config, fixture.endpoint, 1L);
-            try (var reservation = EndpointTestSupport.reserveUnqueued(fixture.endpoint, committed, 100L);
-                 var commit = fixture.endpoint.tryBeginRouteCommitAdmission();
-                 var handoff = commit.commit(List.of(committed), List.of(reservation))) {
-                assertFalse(fixture.endpoint.canPreemptQueuedRequest(90));
-                assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 2L, 90)));
-                assertEquals(1L, fixture.endpoint.observedRequestCount());
-                assertTrue(WorkerBatcherTestSupport.capture(EndpointTestSupport.batcher(fixture.endpoint)).items().isEmpty());
-                verify(fixture.runtime.events(), times(0)).onQueuedItemPreempted(any(), any());
+            {
+                var reservation = EndpointTestSupport.reserveUnqueued(fixture.endpoint, committed, 100L);
+                try (var preparationReservation = EndpointTestSupport.preparation(reservation);
+                     var commit = fixture.endpoint.tryBeginRouteCommitAdmission();
+                     var handoff = commit.commit(List.of(committed), List.of(reservation))) {
+                    assertFalse(fixture.endpoint.canPreemptQueuedRequest(90));
+                    assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 2L, 90)));
+                    assertEquals(1L, fixture.endpoint.observedRequestCount());
+                    assertTrue(WorkerBatcherTestSupport.capture(EndpointTestSupport.batcher(fixture.endpoint)).items().isEmpty());
+                    verify(fixture.runtime.events(), times(0)).onQueuedItemPreempted(any(), any());
+                }
             }
         }
     }
@@ -385,12 +415,12 @@ class WorkerBatcherRequestCapacityTest {
                 }
                 assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL,
                         fixture.endpoint.reserveBatch(items.get(2), 102L, 2).status());
-                reservations.removeFirst().close();
+                fixture.endpoint.rollbackReservation(reservations.removeFirst());
                 var replacement = fixture.endpoint.reserveBatch(items.get(2), 102L, 2);
                 assertEquals(PrefillState.CapacityStatus.ACQUIRED, replacement.status());
                 reservations.add(replacement.reservation());
             } finally {
-                reservations.forEach(PrefillState.BatchReservation::close);
+                reservations.forEach(fixture.endpoint::rollbackReservation);
             }
         }
     }

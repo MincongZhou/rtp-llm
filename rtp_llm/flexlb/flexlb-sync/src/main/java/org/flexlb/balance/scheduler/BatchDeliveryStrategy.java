@@ -128,6 +128,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         List<RequestRoute> submitted = List.of();
         DispatchGate gate = null;
         Throwable handoffFailure = null;
+        boolean senderAccepted = false;
         long deliveredPredictionMs = batch.predictedMs;
         try {
             for (var member : batch.members) {
@@ -169,7 +170,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 }
                 sender.sendBatch(submitted, batch.batchId, deliveredPredictionMs,
                         decisionReason, gate);
-                batch.phase = BatchTransaction.Phase.INFLIGHT;
+                senderAccepted = true;
             }
         } catch (Throwable failure) {
             handoffFailure = failure;
@@ -177,13 +178,14 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             Throwable cleanup = Failures.run(null, batch::closeAdmission);
             cleanup = Failures.run(cleanup, batch::closeSubmission);
             handoffFailure = Failures.append(handoffFailure, cleanup);
+            batch.phase = BatchTransaction.Phase.CLOSED;
             if (gate != null) {
                 handoffFailure = Failures.run(handoffFailure, gate::open);
             }
         }
 
         if (handoffFailure != null) {
-            if (batch.phase == BatchTransaction.Phase.INFLIGHT) {
+            if (senderAccepted) {
                 throw Failures.propagate(handoffFailure, "batch delivery failed");
             } else {
                 Throwable completionFailure = null;
@@ -194,7 +196,6 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                         completionFailure = Failures.append(completionFailure, failure);
                     }
                 }
-                batch.phase = BatchTransaction.Phase.TERMINAL;
                 if (completionFailure != null) {
                     throw Failures.propagate(Failures.append(
                             handoffFailure, completionFailure), "batch delivery failed");
@@ -202,7 +203,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             }
         }
 
-        if (batch.phase == BatchTransaction.Phase.INFLIGHT) {
+        if (senderAccepted) {
             telemetry.reportDelivery(
                     batch.batchId,
                     decisionReason,
@@ -212,15 +213,14 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
-    /** One owner and one explicit state machine for the complete batch flow. */
+    /** Owns preparation until the executor transfers or closes its temporary resources. */
     static final class BatchTransaction implements Transaction, PrefillAdmissionResources.Preparation {
         private enum Phase {
             PREPARING,
             PREPARED,
             COMMITTED,
             SUBMITTED,
-            INFLIGHT,
-            TERMINAL
+            CLOSED
         }
 
         private final BatchDeliveryStrategy owner;
@@ -340,9 +340,6 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 failUnsentDelivery(failure);
                 throw Failures.propagate(failure, "batch delivery failed");
             }
-            if (phase == Phase.SUBMITTED) {
-                phase = Phase.TERMINAL;
-            }
         }
 
         private void failUnsentDelivery(Throwable failure) {
@@ -370,7 +367,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 }
             } finally {
                 cleanup = Failures.run(cleanup, this::closeAdmission);
-                phase = Phase.TERMINAL;
+                phase = Phase.CLOSED;
             }
             return cleanup;
         }
@@ -380,7 +377,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             if (phase != Phase.PREPARING && phase != Phase.PREPARED) {
                 return;
             }
-            phase = Phase.TERMINAL;
+            phase = Phase.CLOSED;
             Throwable failure = null;
             try {
                 for (var member : members) {

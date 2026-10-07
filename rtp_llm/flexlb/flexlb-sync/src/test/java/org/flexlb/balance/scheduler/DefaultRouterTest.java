@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -144,7 +145,7 @@ class DefaultRouterTest {
         SelectionFixture prefill = selection(RoleType.PREFILL, 7L, "p", 8001, "g1");
         SelectionFixture decode = selection(RoleType.DECODE, 7L, "d", 8002, "g1");
         PrefillState.RouteReservation registration = mock(PrefillState.RouteReservation.class);
-        DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 7L, 2L);
+        DecodeResources.ReservationHandle reservation = new DecodeResources.ReservationHandle(1L, 7L, 2L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(RequestRequirements.capture(context), "g1"))
@@ -168,7 +169,7 @@ class DefaultRouterTest {
             assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
             verify(permit, never()).dispatch();
             verify(permit, org.mockito.Mockito.times(2)).release();
-            verify(registration).close();
+            verify((PrefillEndpoint) prefill.endpoint).rollbackReservation(registration);
             verify(prefill.pin).close();
             verify(decode.pin).close();
             verify(requests, never()).publishRoute(any(), any(), anyLong());
@@ -178,10 +179,10 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess());
         assertEquals(List.of(prefill.status, decode.status),
                 response.getServerStatus());
-        verify(registration).close();
+        verify((PrefillEndpoint) prefill.endpoint).rollbackReservation(registration);
         verify(permit).dispatch();
         verify((DecodeEndpoint) decode.endpoint, never())
-                .release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                .release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         verify(prefill.pin).close();
         verify(decode.pin).close();
         var order = org.mockito.Mockito.inOrder(decode.pin, prefill.pin, requests);
@@ -197,7 +198,7 @@ class DefaultRouterTest {
         BalanceContext context = directContext(8L);
         SelectionFixture prefill = selection(RoleType.PREFILL, 8L, "p", 8001, "g1");
         SelectionFixture decode = selection(RoleType.DECODE, 8L, "d", 8002, "g1");
-        DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 8L, 2L);
+        DecodeResources.ReservationHandle reservation = new DecodeResources.ReservationHandle(1L, 8L, 2L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(RequestRequirements.capture(context), "g1"))
@@ -212,7 +213,7 @@ class DefaultRouterTest {
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 scheduler(router, context).submit(context).join().getCode());
         verify(prefillSelector).select(context, RoleType.PREFILL, null);
-        verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         verify(prefill.pin).close();
         verify(decode.pin).close();
     }
@@ -240,7 +241,7 @@ class DefaultRouterTest {
         verify(requests).publishRoute(eq(lastDelivery), precedingWork.capture(), eq(0L));
         assertEquals(unknown ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(0L),
                 precedingWork.getValue().totalRemainingWorkMs());
-        verify(registration).close();
+        verify(endpoint).rollbackReservation(registration);
     }
 
     @Test
@@ -253,7 +254,7 @@ class DefaultRouterTest {
         try {
             SelectionFixture prefill = selection(RoleType.PREFILL, 9L, "p", 8001, "g1");
             SelectionFixture decode = selection(RoleType.DECODE, 9L, "d", 8002, "g1");
-            var reservation = new DecodeEndpoint.ReservationHandle(1L, 9L, 2L);
+            var reservation = new DecodeResources.ReservationHandle(1L, 9L, 2L);
             when(prefillSelector.select(context, RoleType.PREFILL, null)).thenReturn(PlacementResult.success(prefill.selection));
             when(decodeSelector.select(RequestRequirements.capture(context), "g1")).thenReturn(PlacementResult.success(decode.selection));
             stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
@@ -272,8 +273,8 @@ class DefaultRouterTest {
             RequestProtocolTestSupport.expireInactiveRequest(requests, requestContext, System.currentTimeMillis() + context.getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
             assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).getRequestState(9L, 0L).state());
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).liveRequestCount());
-            verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
-            verify((PrefillEndpoint) prefill.endpoint).releaseCommittedItem(any(RequestRoute.class));
+            verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeResources.ReleaseReason.EXPIRED);
+            verify((PrefillEndpoint) prefill.endpoint).releaseRequest(any(RequestRoute.class));
         } finally {
             RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(requests);
             requests.closeOutstandingAndTerminalize();
@@ -358,12 +359,12 @@ class DefaultRouterTest {
         var prefill = selection(RoleType.PREFILL, 701L, "10.0.0.1", 8080, "g1");
         var selectedDecode = selection(RoleType.DECODE, 701L, "10.0.0.2", 8080, "g1");
         var decode = (DecodeEndpoint) selectedDecode.endpoint();
-        var reservation = new DecodeEndpoint.ReservationHandle(1L, 701L, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, 701L, 1L);
         when(decode.reserve(any(), anyLong(), anyLong(), anyLong(), anyInt(), eq(frozen.capacity())))
                 .thenReturn(reservation);
         when(decode.acquireDispatchPermit(reservation, frozen.capacity())).thenReturn(
                 new DecodeEndpoint.EngineDispatchPermitAcquisition(
-                        DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL, null));
+                        DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL, null));
 
         // Changes after selection must not change this request's publication mode, demand or cost.
         SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_RESERVED);
@@ -404,7 +405,7 @@ class DefaultRouterTest {
             verify(decode).reserve(any(), eq(701L), eq(hardKv), eq(expectedKv), eq(73), eq(frozen.capacity()));
             verify(decode, never()).reserve(any(), anyLong(), anyLong(), anyLong(), anyInt(), isNull());
         }
-        verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        verify(decode).release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
     }
 
     @ParameterizedTest
@@ -414,14 +415,14 @@ class DefaultRouterTest {
         var prefill = selection(RoleType.PREFILL, 702L, "p", 8001, "g1");
         var selectedDecode = selection(RoleType.DECODE, 702L, "d", 8002, "g1");
         var decode = (DecodeEndpoint) selectedDecode.endpoint();
-        var reservation = new DecodeEndpoint.ReservationHandle(1L, 702L, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, 702L, 1L);
         var adoptionFailure = new IllegalStateException("adoption failed");
         var cleanupFailure = new IllegalStateException("cleanup failed");
         if (adoptionThrows) {
             when(decode.markQueued(selectedDecode.pin(), reservation)).thenThrow(adoptionFailure);
         }
         doThrow(cleanupFailure).when(decode)
-                .release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                .release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
 
         try (var route = ProvisionalRoute.prepare(context,
                 List.of(prefill.selection(), selectedDecode.selection()), new Response())) {
@@ -431,7 +432,7 @@ class DefaultRouterTest {
             assertEquals(adoptionThrows ? List.of(cleanupFailure) : List.of(),
                     List.of(actual.getSuppressed()));
         }
-        verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        verify(decode).release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         verify(prefill.pin()).close();
         verify(selectedDecode.pin()).close();
     }
@@ -442,7 +443,7 @@ class DefaultRouterTest {
         var prefill = selection(RoleType.PREFILL, 703L, "p", 8001, "g1");
         var decode = selection(RoleType.DECODE, 703L, "d", 8002, "g1");
         var endpoint = (DecodeEndpoint) decode.endpoint();
-        var reservation = new DecodeEndpoint.ReservationHandle(1L, 703L, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, 703L, 1L);
         var cleanupFailure = new IllegalStateException("pin cleanup failed after publication");
         var route = ProvisionalRoute.prepare(context,
                 List.of(prefill.selection(), decode.selection()), new Response());
@@ -464,7 +465,7 @@ class DefaultRouterTest {
         route.close();
         verify(prefill.pin()).close();
         verify(decode.pin()).close();
-        verify(endpoint, never()).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        verify(endpoint, never()).release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
     }
 
     private static PrefillState.WorkCapture stubPrefillCommit(PrefillEndpoint prefill) {
@@ -473,10 +474,6 @@ class DefaultRouterTest {
 
     private static PrefillState.WorkCapture stubRouteCommit(PrefillEndpoint endpoint,
             org.flexlb.balance.projection.WorkSnapshot precedingWork) {
-        org.mockito.Mockito.doAnswer(invocation -> {
-                ((PrefillState.Reservation) invocation.getArgument(0)).close();
-                return null;
-            }).when(endpoint).rollbackReservation(org.mockito.ArgumentMatchers.any());
         var commit = mock(PrefillEndpoint.RouteCommitAdmission.class);
         var handoff = mock(PrefillState.CommittedHandoff.class);
         var capture = mock(PrefillState.WorkCapture.class);
@@ -488,13 +485,13 @@ class DefaultRouterTest {
     }
 
     private static DecodeEndpoint.EngineDispatchPermit stubDecodePermit(
-            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+            DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
         var permit = mock(DecodeEndpoint.EngineDispatchPermit.class);
         when(endpoint.acquireDispatchPermit(eq(reservation), any()))
                 .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
-                        DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit));
+                        DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, permit));
         when(permit.dispatch())
-                .thenReturn(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED);
+                .thenReturn(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED);
         return permit;
     }
 
@@ -850,7 +847,7 @@ class DefaultRouterTest {
         WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
         WorkerEndpoint endpoint = switch (role) {
             case PREFILL, PDFUSION -> mock(PrefillEndpoint.class);
-            case DECODE -> mock(DecodeEndpoint.class);
+            case DECODE -> RequestProtocolTestSupport.decodeEndpoint();
             default -> mock(WorkerEndpoint.class);
         };
         ServerStatus status = new ServerStatus();

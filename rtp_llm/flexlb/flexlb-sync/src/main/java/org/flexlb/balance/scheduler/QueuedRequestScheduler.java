@@ -563,7 +563,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         ProvisionalRoute route = plan.result.value();
         if (adopt) { return route.adoptDecodeReservation(route.decodeEndpoint(), result.reservation()); }
         try {
-            route.decodeEndpoint().release(result.reservation(), org.flexlb.balance.endpoint.DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            route.decodeEndpoint().release(result.reservation(), org.flexlb.balance.endpoint.DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         } catch (RuntimeException | Error failure) {
             recordFailure(failure);
             throw failure;

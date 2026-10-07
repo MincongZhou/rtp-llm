@@ -15,7 +15,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED;
+import static org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -28,7 +28,7 @@ class DecodeEndpointTest {
 
     private WorkerStatus status;
     private DecodeEndpoint endpoint;
-    private final Map<Long, DecodeEndpoint.ReservationHandle> reservations =
+    private final Map<Long, DecodeResources.ReservationHandle> reservations =
             new HashMap<>();
 
     @BeforeEach
@@ -53,8 +53,8 @@ class DecodeEndpointTest {
 
         EndpointTestSupport.applyStatus(endpoint, response).run();
         boolean allocated = phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING;
-        var fact = allocated ? DecodeEndpoint.WorkerStatusFact.allocated(reservation)
-                : DecodeEndpoint.WorkerStatusFact.active(reservation);
+        var fact = allocated ? DecodeResources.WorkerStatusFact.allocated(reservation)
+                : DecodeResources.WorkerStatusFact.active(reservation);
         verify(sink).onDecodeStatus(endpoint, List.of(fact));
         assertEquals(allocated, endpoint.isAcceptedByEngine(reservation));
         assertEquals(allocated ? 0 : 1, endpoint.getInflightCount());
@@ -70,7 +70,7 @@ class DecodeEndpointTest {
         finished.setFinishedTaskInfo(Map.of("100", task(100L)));
         EndpointTestSupport.applyStatus(endpoint, finished).run();
         verify(sink).onDecodeStatus(endpoint,
-                List.of(DecodeEndpoint.WorkerStatusFact.terminal(reservation, 0L)));
+                List.of(DecodeResources.WorkerStatusFact.terminal(reservation, 0L)));
         assertFalse(endpoint.resourceSnapshot().requests().containsKey(100L));
         assertEquals(0, endpoint.getInflightCount());
     }
@@ -330,11 +330,11 @@ class DecodeEndpointTest {
         EndpointTestSupport.applyStatus(endpoint, response);
     }
 
-    private DecodeEndpoint.ReservationHandle reserve(
+    private DecodeResources.ReservationHandle reserve(
             long requestId, long hardKv, long expectedKv) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            DecodeEndpoint.ReservationHandle reservation =
+            DecodeResources.ReservationHandle reservation =
                     endpoint.reserveUnqueued(pin, requestId, hardKv, expectedKv, 0);
             reservations.put(requestId, reservation);
             return reservation;
@@ -342,10 +342,10 @@ class DecodeEndpointTest {
     }
 
     private void release(long requestId) {
-        DecodeEndpoint.ReservationHandle reservation =
+        DecodeResources.ReservationHandle reservation =
                 reservations.get(requestId);
         if (reservation != null) {
-            endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         }
     }
 
@@ -364,8 +364,8 @@ class DecodeEndpointTest {
 
     private DecodeEndpoint.EngineDispatchPermit acquirePermit(long requestId) {
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                endpoint.acquireDispatchPermit(reservations.get(requestId), new DecodeEndpoint.AdmissionCapacity(0, 100L));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                endpoint.acquireDispatchPermit(reservations.get(requestId), new DecodeResources.AdmissionCapacity(0, 100L));
+        assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
                 acquisition.status());
         assertNotNull(acquisition.permit());
         return acquisition.permit();

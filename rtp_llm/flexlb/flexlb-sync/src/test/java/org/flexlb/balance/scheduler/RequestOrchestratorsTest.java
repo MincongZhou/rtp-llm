@@ -174,7 +174,7 @@ class RequestOrchestratorsTest {
         RequestSchedulerReporter admissionReporter = mock(RequestSchedulerReporter.class);
         PrefillEndpoint failingPrefill = mock(PrefillEndpoint.class);
         PrefillEndpoint healthyPrefill = mock(PrefillEndpoint.class);
-        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
         Map<String, PrefillEndpoint> prefill = new LinkedHashMap<>();
         prefill.put("p1", failingPrefill);
         prefill.put("p2", healthyPrefill);
@@ -203,7 +203,7 @@ class RequestOrchestratorsTest {
         EndpointRegistry registry = mock(EndpointRegistry.class);
         BatchSchedulerReporter batches = mock(BatchSchedulerReporter.class);
         RequestSchedulerReporter admission = mock(RequestSchedulerReporter.class);
-        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
         when(registry.snapshotPrefillEndpoints()).thenThrow(new IllegalStateException("snapshot failed"));
         when(registry.snapshotDecodeEndpoints()).thenReturn(Map.of("d1", decode));
         doThrow(new IllegalStateException("batch metrics failed")).when(decode).reportBatchMetrics(batches);

@@ -291,6 +291,38 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
+    @Test
+    void failedAdmissionPublishesOneCapacityChangePerRemoval() {
+        FlexlbConfig config = singleConfig();
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
+        RuntimeException failure = new IllegalStateException("admission failed");
+        DeliveryStrategy delivery = new BoundaryDelivery() {
+            @Override
+            public Transaction prepare(List<RequestRoute> candidates,
+                                       PrefillTimePredictor.Evaluator evaluator,
+                                       OptionalLong prediction) {
+                return WorkerBatcherTestSupport.boundaryOnly(candidates.get(0), CapacityBoundary.failed(failure));
+            }
+        };
+        WorkerBatcher runtime = WorkerBatcherTestSupport.create("removal-notification", endpoint, config,
+                delivery, events);
+        RequestRoute request = item(config, endpoint, 916L, 50, System.currentTimeMillis());
+        request.ctx().bindScheduler(events);
+        var state = WorkerBatcherTestSupport.state(runtime);
+        state.ownershipLock().lock();
+        try { assertTrue(state.enqueueActiveLocked(request, 0L)); }
+        finally { state.ownershipLock().unlock(); }
+        try {
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(runtime, "runOneCycle");
+            verify(events).failDeliveryPreparation(request, failure);
+            verify(endpoint, times(1)).signalPlacementCapacityChanged();
+            assertEquals(0, state.queueDepth());
+        } finally {
+            assertNull(runtime.stopAndAwait());
+        }
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({ "true,false", "false,false", "true,true" })
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
@@ -317,7 +349,8 @@ class WorkerBatcherSchedulingTest {
             return new WorkSnapshot(0L, List.of(), List.of(), 0L);
         });
         if (beforeHandoff && !materializationFailure) {
-            when(transaction.blockedResult()).thenThrow(failure);
+            // The first read captures the boundary before ownership commit. Fail after commit.
+            when(transaction.blockedResult()).thenReturn(null).thenThrow(failure);
         } else {
             doThrow(failure).when(transaction).handoff(anyString(), anyInt(), any());
         }

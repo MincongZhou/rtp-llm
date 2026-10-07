@@ -21,7 +21,7 @@ public final class SchedulingTestConfig {
     }
 
     public static RequestRequirements decodeRequirements(int priority, long hardKv, long expectedKv,
-            org.flexlb.balance.endpoint.DecodeEndpoint.AdmissionCapacity capacity) {
+            org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity) {
         return new RequestRequirements(99L, priority, expectedKv, capacity,
                 RequestRequirements.DecodeMode.PREEMPT_AT_PLACEMENT,
                 newConfig().getRouter().getRoles().getDecode().getCostEstimator().compiledFormula(),

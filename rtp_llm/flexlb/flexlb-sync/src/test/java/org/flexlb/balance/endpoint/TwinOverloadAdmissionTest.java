@@ -114,20 +114,29 @@ class TwinOverloadAdmissionTest {
         PrefillState.ReservationResult<PrefillState.BatchReservation> acquired =
                 endpoint.reserveBatch(first, 70L, 1);
         assertEquals(PrefillState.CapacityStatus.ACQUIRED, acquired.status());
-        try (PrefillState.BatchReservation ignored = acquired.reservation()) {
-            assertEquals(2, endpoint.queuedRequestCount());
-            PrefillState.ReservationResult<PrefillState.BatchReservation> blocked =
-                    endpoint.reserveBatch(staged, 71L, 1);
-            try (PrefillState.BatchReservation unexpected = blocked.reservation()) {
-                assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, blocked.status(),
-                        "a locally reserved batch must occupy the only slot at final admission");
+        {
+            PrefillState.BatchReservation ignored = acquired.reservation();
+            try (var preparationIgnored = EndpointTestSupport.preparation(ignored)) {
+                assertEquals(2, endpoint.queuedRequestCount());
+                PrefillState.ReservationResult<PrefillState.BatchReservation> blocked =
+                        endpoint.reserveBatch(staged, 71L, 1);
+                {
+                    PrefillState.BatchReservation unexpected = blocked.reservation();
+                    try (var preparationUnexpected = EndpointTestSupport.preparation(unexpected)) {
+                        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, blocked.status(),
+                                "a locally reserved batch must occupy the only slot at final admission");
+                    }
+                }
             }
         }
         assertEquals(2, endpoint.queuedRequestCount());
         PrefillState.ReservationResult<PrefillState.BatchReservation> resumed =
                 endpoint.reserveBatch(staged, 71L, 1);
-        try (PrefillState.BatchReservation ignored = resumed.reservation()) {
-            assertEquals(PrefillState.CapacityStatus.ACQUIRED, resumed.status());
+        {
+            PrefillState.BatchReservation ignored = resumed.reservation();
+            try (var preparationIgnored = EndpointTestSupport.preparation(ignored)) {
+                assertEquals(PrefillState.CapacityStatus.ACQUIRED, resumed.status());
+            }
         }
     }
 
@@ -157,19 +166,19 @@ class TwinOverloadAdmissionTest {
         }
         for (long id = 1; id <= 8; id++) {
             DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                    endpoint.acquireDispatchPermit(endpoint.reservationHandle(id), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
-            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
-            assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                    endpoint.acquireDispatchPermit(endpoint.reservationHandle(id), new DecodeResources.AdmissionCapacity(8L, 90L));
+            assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+            assertEquals(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().dispatch());
         }
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
-                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L)).status());
+        assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
+                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeResources.AdmissionCapacity(8L, 90L)).status());
 
         applyStatus(endpoint, tasks(2L, 7, 10L, TaskPhase.RUNNING),
                 tasks(1L, 1, 10L, TaskPhase.RUNNING));
         DecodeEndpoint.EngineDispatchPermitAcquisition resumed =
-                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, resumed.status());
+                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeResources.AdmissionCapacity(8L, 90L));
+        assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, resumed.status());
         assertTrue(resumed.permit().release());
     }
 
@@ -205,9 +214,12 @@ class TwinOverloadAdmissionTest {
                 endpoint.reserveBatch(items.getFirst(), batchId, limit);
         assertEquals(PrefillState.CapacityStatus.ACQUIRED, acquisition.status());
         PrefillState state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
-        try (PrefillState.BatchReservation reservation = acquisition.reservation();
-             PrefillState.CommittedHandoff ignored = EndpointTestSupport.commitBatch(state, reservation, items, 300_000L)) {
-            // Releasing the handoff closes only the generation pin, not engine work.
+        {
+            PrefillState.BatchReservation reservation = acquisition.reservation();
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation);
+                 PrefillState.CommittedHandoff ignored = EndpointTestSupport.commitBatch(state, reservation, items, 300_000L)) {
+                // Releasing the handoff closes only the generation pin, not engine work.
+            }
         }
     }
 

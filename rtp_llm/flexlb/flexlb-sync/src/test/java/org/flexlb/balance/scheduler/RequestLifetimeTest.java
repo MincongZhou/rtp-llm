@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -327,8 +328,8 @@ class RequestLifetimeTest {
             var future = RequestProtocolTestSupport.register(registry, context);
             BalanceContext requestContext = registry.findRequestContext(202L);
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
-            DecodeEndpoint decode = mock(DecodeEndpoint.class);
-            var reservation = new DecodeEndpoint.ReservationHandle(1L, 202L, 1L);
+            DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
+            var reservation = new DecodeResources.ReservationHandle(1L, 202L, 1L);
             context.setFuture(future);
             RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), prefillServer(), null, prefill, decode, reservation, System.currentTimeMillis());
             RequestProtocolTestSupport.bind(registry, new RequestProtocolTestSupport.Registered(item, future));
@@ -355,7 +356,7 @@ class RequestLifetimeTest {
             if (evidenceSource == RoleType.PREFILL) {
                 projector.onPrefillStatus(prefill, RoleType.PREFILL, List.of(PrefillState.WorkerStatusFact.active(item)));
             } else {
-                projector.onDecodeStatus(decode, List.of(DecodeEndpoint.WorkerStatusFact.active(reservation)));
+                projector.onDecodeStatus(decode, List.of(DecodeResources.WorkerStatusFact.active(reservation)));
             }
             if (!ackBeforeEvidence) {
                 assertFalse(future.isDone(), "Engine activity cannot create an EnqueueBatch ACK");
@@ -614,8 +615,8 @@ class RequestLifetimeTest {
         BalanceContext context = RequestProtocolTestSupport.context(config, 101L);
         AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(ResponseCompletionExecutor.class), context, mock(ExpirationTimer.class));
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
-        DecodeEndpoint decode = separateDecode ? mock(DecodeEndpoint.class) : null;
-        DecodeEndpoint.ReservationHandle reservation = separateDecode ? new DecodeEndpoint.ReservationHandle(1L, 101L, 1L) : null;
+        DecodeEndpoint decode = separateDecode ? RequestProtocolTestSupport.decodeEndpoint() : null;
+        DecodeResources.ReservationHandle reservation = separateDecode ? new DecodeResources.ReservationHandle(1L, 101L, 1L) : null;
         RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), prefillServer(), null, prefill, decode, reservation, System.currentTimeMillis());
         AdmissionHandle mutation;
         synchronized (context) {

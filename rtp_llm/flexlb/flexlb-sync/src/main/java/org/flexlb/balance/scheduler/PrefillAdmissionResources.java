@@ -1,11 +1,12 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.util.Failures;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 
 import java.util.List;
@@ -19,7 +20,7 @@ import static org.flexlb.balance.delivery.CapacityBoundary.Attempt.rejected;
  *
  * <p>This class deliberately has no dispatcher selection logic. The active
  * transaction decides which Prefill reservation is prepared; this class owns the
- * optional per-request Decode permit and shared cleanup operations. The
+ * optional per-request Decode permit and their rollback. The
  * transaction owns its members and committed generation handoff.</p>
  */
 final class PrefillAdmissionResources {
@@ -157,7 +158,6 @@ final class PrefillAdmissionResources {
         }
     }
 
-
     /** Close only locally retained permits; committed capacity remains endpoint-owned. */
     static void closeCommitted(List<Member> members, PrefillState.CommittedHandoff handoff) {
         try {
@@ -175,44 +175,6 @@ final class PrefillAdmissionResources {
                 }
             }
         }
-    }
-
-    enum PrefillRelease { NONE, QUEUED, COMMITTED, QUEUED_AND_COMMITTED, FAILED }
-    record ReleasePlan(PrefillRelease prefill, DecodeEndpoint.ReleaseReason decode,
-                       org.flexlb.balance.delivery.DeliveryResult.Status failureSource) { }
-    record Settlement(boolean prefillSettled, boolean decodeSettled, Throwable failure) { }
-
-    static Settlement settle(RequestRoute exact, ReleasePlan plan, boolean prefillSettled, boolean decodeSettled) {
-        Throwable failure = null;
-        try {
-            if (!prefillSettled && exact.prefillEp() != null) {
-                switch (plan.prefill()) {
-                    case NONE -> { }
-                    case QUEUED -> exact.prefillEp().removeQueued(exact, "TERMINAL_RELEASE");
-                    case COMMITTED -> exact.prefillEp().releaseCommittedItem(exact);
-                    case QUEUED_AND_COMMITTED -> {
-                        Throwable queuedFailure = Failures.run(null,
-                                () -> exact.prefillEp().removeQueued(exact, "TERMINAL_RELEASE"));
-                        queuedFailure = Failures.run(queuedFailure, () -> exact.prefillEp().releaseCommittedItem(exact));
-                        Failures.rethrow(queuedFailure, "Prefill cleanup failed");
-                    }
-                    case FAILED -> exact.prefillEp().settleFailedRequest(exact);
-                }
-            }
-            prefillSettled = true;
-        } catch (Throwable problem) { failure = problem; }
-        try {
-            if (!decodeSettled) {
-                if (exact.decodeEp() == null || exact.decodeReservation() == null) { decodeSettled = true; }
-                else if (plan.decode() != null) {
-                    exact.decodeEp().release(exact.decodeReservation(), plan.decode());
-                    decodeSettled = true;
-                } else {
-                    decodeSettled = exact.decodeEp().settleFailedRequest(exact.decodeReservation(), plan.failureSource());
-                }
-            }
-        } catch (Throwable problem) { failure = Failures.append(failure, problem); }
-        return new Settlement(prefillSettled, decodeSettled, failure);
     }
 
     /** Decode is the exact event source for its request-scoped permit. */

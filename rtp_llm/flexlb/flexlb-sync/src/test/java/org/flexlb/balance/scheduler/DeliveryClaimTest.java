@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -24,6 +25,141 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class DeliveryClaimTest {
+    @Test void decodeProofAndTerminalEffectsShareOneQueuedCleanupPass() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.claim.tryStartSend());
+            f.claim.complete(DeliveryResult.delivered());
+            f.owner.runtime.continuations().awaitIdle();
+            var executor = spy(f.owner.runtime.continuations());
+            ReflectionTestUtils.setField(f.owner, "continuations", executor);
+            ReflectionTestUtils.setField(f.owner.runtime, "continuations", executor);
+
+            f.applyDecodeTerminal();
+            executor.awaitIdle();
+
+            // The real per-context queue runs the status effect, then exactly one cleanup effect.
+            verify(executor, times(2)).submit(eq(f.context), any(Runnable.class));
+            assertTrue(f.settlement().isDone());
+            assertFalse(f.owner.requests.isCurrent(f.context));
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            verify(f.prefill, times(1)).releaseRequest(f.claim.item);
+            verify(f.decode, never()).release(any(), any());
+        }
+    }
+
+    @Test void terminalBeforeSenderFinishesQueuesCleanupOnlyAfterProofAndShutdownDrainsIt() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.claim.tryStartSend());
+            var executor = spy(f.owner.runtime.continuations());
+            ReflectionTestUtils.setField(f.owner, "continuations", executor);
+            ReflectionTestUtils.setField(f.owner.runtime, "continuations", executor);
+
+            f.applyDecodeTerminal();
+            executor.awaitIdle();
+            verify(executor, times(1)).submit(eq(f.context), any(Runnable.class));
+            assertFalse(f.settlement().isDone());
+            assertTrue(f.owner.requests.isCurrent(f.context));
+            assertTrue(f.prefillOwned.get(), "the sender still pins Prefill ownership");
+            verify(f.prefill, never()).releaseRequest(any());
+
+            f.owner.runtime.stopAccepting();
+            f.claim.complete(DeliveryResult.delivered());
+            f.owner.runtime.shutdown();
+
+            verify(executor, times(2)).submit(eq(f.context), any(Runnable.class));
+            assertTrue(f.settlement().isDone());
+            assertFalse(f.owner.requests.isCurrent(f.context));
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            verify(f.prefill, times(1)).releaseRequest(f.claim.item);
+            verify(f.decode, never()).release(any(), any());
+        }
+    }
+
+    @Test void rejectedCleanupQueueClaimRemainsRetryableWithoutReleasingResources() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.claim.tryStartSend());
+            f.claim.complete(DeliveryResult.delivered());
+            f.owner.runtime.continuations().awaitIdle();
+            f.clearDecodeStateOwnership();
+            f.claim.observeDecodeSettlement(f.decode, DecodeResources.WorkerStatusFact.terminal(f.reservation, 0L));
+            Runnable terminal = f.context.acceptDecodeStatus(f.decode,
+                    DecodeResources.WorkerStatusFact.terminal(f.reservation, 0L), System.currentTimeMillis());
+            assertNotNull(terminal);
+            var executor = spy(f.owner.runtime.continuations());
+            ReflectionTestUtils.setField(f.owner, "continuations", executor);
+            ReflectionTestUtils.setField(f.owner.runtime, "continuations", executor);
+            var rejected = new IllegalStateException("queue acceptance rejected");
+            doAnswer(call -> {
+                assertFalse(Thread.holdsLock(f.context), "queue submission must run outside the request monitor");
+                f.owner.resumeCleanup(f.context);
+                f.owner.enqueueCleanup(f.context);
+                assertTrue(f.prefillOwned.get(), "a synchronous event cannot consume an unaccepted queue claim");
+                throw rejected;
+            }).doCallRealMethod().when(executor).submit(eq(f.context), any(Runnable.class));
+
+            assertSame(rejected, assertThrows(IllegalStateException.class, () -> f.owner.enqueueCleanup(f.context)));
+            assertTrue(f.prefillOwned.get());
+            assertTrue(f.owner.requests.isCurrent(f.context));
+            verify(f.prefill, never()).releaseRequest(any());
+
+            f.owner.enqueueCleanup(f.context);
+            executor.awaitIdle();
+            verify(executor, times(2)).submit(eq(f.context), any(Runnable.class));
+            assertFalse(f.prefillOwned.get(), "a rejected claim must not suppress the accepted retry");
+            assertTrue(f.owner.requests.isCurrent(f.context), "terminal effects still own the archive gate");
+            terminal.run();
+            executor.awaitIdle();
+            assertFalse(f.owner.requests.isCurrent(f.context));
+            verify(f.prefill, times(1)).releaseRequest(f.claim.item);
+            verify(f.decode, never()).release(any(), any());
+        }
+    }
+
+    @Test void runningCleanupStillAcceptsANotificationAndPreventsEarlyShutdown() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.claim.tryStartSend());
+            f.claim.complete(DeliveryResult.delivered());
+            f.owner.runtime.continuations().awaitIdle();
+            var executor = spy(f.owner.runtime.continuations());
+            ReflectionTestUtils.setField(f.owner, "continuations", executor);
+            ReflectionTestUtils.setField(f.owner.runtime, "continuations", executor);
+            var entered = new java.util.concurrent.CountDownLatch(1);
+            var release = new java.util.concurrent.CountDownLatch(1);
+            doAnswer(call -> {
+                assertFalse(Thread.holdsLock(f.context));
+                entered.countDown();
+                RequestProtocolTestSupport.await(release);
+                assertTrue(f.prefillOwned.compareAndSet(true, false));
+                return true;
+            }).when(f.prefill).releaseRequest(f.claim.item);
+            var shutdownFailure = new AtomicReference<Throwable>();
+            Thread shutdown = new Thread(() -> {
+                try { f.owner.runtime.shutdown(); }
+                catch (Throwable failure) { shutdownFailure.set(failure); }
+            });
+            try {
+                f.applyDecodeTerminal();
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                f.owner.enqueueCleanup(f.context);
+                verify(executor, times(3)).submit(eq(f.context), any(Runnable.class));
+                shutdown.start();
+                RequestProtocolTestSupport.awaitCondition(() -> shutdown.getState() == Thread.State.WAITING);
+                assertTrue(shutdown.isAlive());
+                assertTrue(f.owner.requests.isCurrent(f.context));
+            } finally {
+                release.countDown();
+                shutdown.join(2_000);
+            }
+            assertFalse(shutdown.isAlive());
+            assertNull(shutdownFailure.get());
+            assertFalse(f.owner.requests.isCurrent(f.context));
+            verify(f.prefill, times(1)).releaseRequest(f.claim.item);
+            verify(f.decode, never()).release(any(), any());
+        }
+    }
+
     @Test void cancellationBeforeSendProducesNoRemoteCancel() throws Exception {
         try (var f = new Fixture()) {
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
@@ -62,12 +198,12 @@ class DeliveryClaimTest {
             f.owner.onResponseUndeliverable(f.context);
             f.cancel.complete(EngineCancelChannel.CancelAck.REQUEST_FENCED);
             assertFalse(f.settlement().isDone());
-            f.claim.observeDecodeSettlement(mock(DecodeEndpoint.class), DecodeEndpoint.WorkerStatusFact.terminal(f.reservation, 0L));
+            f.claim.observeDecodeSettlement(RequestProtocolTestSupport.decodeEndpoint(), DecodeResources.WorkerStatusFact.terminal(f.reservation, 0L));
             assertFalse(f.settlement().isDone(), "another endpoint is not proof");
-            f.claim.observeDecodeSettlement(f.decode, DecodeEndpoint.WorkerStatusFact.terminal(
-                    new DecodeEndpoint.ReservationHandle(1L, 41L, 99L), 0L));
+            f.claim.observeDecodeSettlement(f.decode, DecodeResources.WorkerStatusFact.terminal(
+                    new DecodeResources.ReservationHandle(1L, 41L, 99L), 0L));
             assertFalse(f.settlement().isDone(), "another reservation is not proof");
-            f.claim.observeDecodeSettlement(f.decode, DecodeEndpoint.WorkerStatusFact.terminal(f.reservation, 0L));
+            f.applyDecodeTerminal();
             f.settlement().get(2, TimeUnit.SECONDS);
         }
     }
@@ -113,7 +249,7 @@ class DeliveryClaimTest {
                     () -> assertFalse(f.settlement().isDone(), "cleanup execution failure is not resource settlement"),
                     () -> assertTrue(f.owner.requests.isCurrent(f.context)),
                     () -> assertNull(f.claim.provenReleaseReason()),
-                    () -> verify(f.prefill, never()).releaseCommittedItem(any()),
+                    () -> verify(f.prefill, never()).releaseRequest(any()),
                     () -> verify(f.decode, never()).release(any(), any()));
         }
     }
@@ -137,14 +273,14 @@ class DeliveryClaimTest {
             var replacementFuture = RequestProtocolTestSupport.register(f.owner, replacement);
             try {
                 f.claim.acceptCleanupAck(EngineCancelChannel.CancelAck.REQUEST_CLEANED);
-                f.owner.onDecodeStatus(f.decode, List.of(DecodeEndpoint.WorkerStatusFact.terminal(f.reservation, 0L)));
+                f.applyDecodeTerminal();
                 f.owner.onPrefillGenerationRetired(f.prefill, List.of(f.claim.item));
                 f.owner.runtime.continuations().awaitIdle();
 
                 assertSame(replacement, f.owner.requests.findActive(41L));
                 assertFalse(replacementFuture.isDone(), "old cleanup facts cannot finish a reused request identity");
-                verify(f.prefill, times(1)).releaseCommittedItem(f.claim.item);
-                verify(f.decode, times(1)).release(f.reservation, DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP);
+                verify(f.prefill, times(1)).releaseRequest(f.claim.item);
+                f.assertDecodeOwnershipReleasedOnce();
             } finally {
                 replacementFuture.completeExceptionally(new IllegalStateException("test cleanup"));
             }
@@ -160,8 +296,7 @@ class DeliveryClaimTest {
 
             timeout.run();
             f.owner.onPrefillGenerationRetired(f.prefill, List.of(f.claim.item));
-            when(f.decode.isRetired()).thenReturn(true);
-            f.owner.onDecodeGenerationRetired(f.decode, List.of(f.reservation));
+            f.retireDecode();
             f.owner.runtime.continuations().awaitIdle();
 
             assertTrue(f.claim.cleanupEvidence().remoteSettled(), "both exact generations have retired");
@@ -178,16 +313,16 @@ class DeliveryClaimTest {
 
             timeout.run();
             f.cancel.complete(EngineCancelChannel.CancelAck.REQUEST_FENCED);
-            f.owner.onDecodeStatus(mock(DecodeEndpoint.class),
-                    List.of(DecodeEndpoint.WorkerStatusFact.terminal(f.reservation, 0L)));
-            f.owner.onDecodeStatus(f.decode, List.of(DecodeEndpoint.WorkerStatusFact.terminal(
-                    new DecodeEndpoint.ReservationHandle(1L, 41L, 99L), 0L)));
+            f.owner.onDecodeStatus(RequestProtocolTestSupport.decodeEndpoint(),
+                    List.of(DecodeResources.WorkerStatusFact.terminal(f.reservation, 0L)));
+            f.owner.onDecodeStatus(f.decode, List.of(DecodeResources.WorkerStatusFact.terminal(
+                    new DecodeResources.ReservationHandle(1L, 41L, 99L), 0L)));
             f.owner.runtime.continuations().awaitIdle();
             assertFalse(f.settlement().isDone(), "Prefill fencing and foreign Decode facts do not settle the request");
             assertTrue(f.owner.requests.isCurrent(f.context));
             verify(f.decode, never()).release(any(), any());
 
-            f.owner.onDecodeStatus(f.decode, List.of(DecodeEndpoint.WorkerStatusFact.terminal(f.reservation, 0L)));
+            f.applyDecodeTerminal();
             f.assertArchivedAfterCleanup();
         }
     }
@@ -203,7 +338,7 @@ class DeliveryClaimTest {
             f.owner.runtime.continuations().awaitIdle();
             assertFalse(f.settlement().isDone(), "remote cleanup cannot settle an active sender");
             assertTrue(f.owner.requests.isCurrent(f.context));
-            verify(f.prefill, never()).releaseCommittedItem(any());
+            verify(f.prefill, never()).releaseRequest(any());
             verify(f.decode, never()).release(any(), any());
 
             f.claim.complete(DeliveryResult.delivered());
@@ -227,7 +362,7 @@ class DeliveryClaimTest {
             assertFalse(f.settlement().isDone());
             assertTrue(f.owner.requests.isCurrent(f.context));
             assertNull(f.claim.provenReleaseReason());
-            verify(f.prefill, never()).releaseCommittedItem(any());
+            verify(f.prefill, never()).releaseRequest(any());
             verify(f.decode, never()).release(any(), any());
 
             f.claim.acceptCleanupAck(EngineCancelChannel.CancelAck.REQUEST_CLEANED);
@@ -243,13 +378,12 @@ class DeliveryClaimTest {
             assertTrue(f.claim.tryStartSend());
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             if (senderFirst) { f.claim.complete(DeliveryResult.uncertain(new IllegalStateException("reply lost"))); }
-            Runnable decodeProof = () -> f.owner.onDecodeStatus(f.decode,
-                    List.of(DecodeEndpoint.WorkerStatusFact.terminal(f.reservation, 0L)));
+            Runnable decodeProof = f::applyDecodeTerminal;
             if (decodeFirst) { decodeProof.run(); }
             else { f.cancel.complete(EngineCancelChannel.CancelAck.REQUEST_FENCED); }
             f.owner.runtime.continuations().awaitIdle();
             assertFalse(f.settlement().isDone(), "one side of the cleanup proof cannot settle delivery");
-            verify(f.prefill, never()).releaseCommittedItem(any());
+            verify(f.prefill, never()).releaseRequest(any());
 
             if (decodeFirst) { f.cancel.complete(EngineCancelChannel.CancelAck.REQUEST_FENCED); }
             else { decodeProof.run(); }
@@ -262,8 +396,8 @@ class DeliveryClaimTest {
             f.claim.acceptCleanupAck(EngineCancelChannel.CancelAck.REQUEST_CLEANED);
             decodeProof.run();
             f.owner.runtime.continuations().awaitIdle();
-            verify(f.prefill, times(1)).releaseCommittedItem(f.claim.item);
-            verify(f.decode, times(1)).release(f.reservation, DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP);
+            verify(f.prefill, times(1)).releaseRequest(f.claim.item);
+            f.assertDecodeOwnershipReleasedOnce();
         }
     }
 
@@ -298,25 +432,24 @@ class DeliveryClaimTest {
                         default -> throw new AssertionError(outcome);
                     });
                     case 'P' -> f.cancel.complete(EngineCancelChannel.CancelAck.REQUEST_FENCED);
-                    case 'D' -> f.owner.onDecodeStatus(f.decode,
-                            List.of(DecodeEndpoint.WorkerStatusFact.terminal(f.reservation, 0L)));
+                    case 'D' -> f.applyDecodeTerminal();
                     default -> throw new AssertionError(order);
                 }
                 f.owner.runtime.continuations().awaitIdle();
                 if (index < order.length() - 1) {
                     assertFalse(f.settlement().isDone(), "partial evidence: " + order.substring(0, index + 1));
                     assertTrue(f.owner.requests.isCurrent(f.context));
-                    verify(f.prefill, never()).releaseCommittedItem(any());
+                    verify(f.prefill, never()).releaseRequest(any());
                 }
             }
             f.assertArchivedAfterCleanup();
             assertFalse(f.claim.tryStartSend());
             assertThrows(IllegalStateException.class, () -> f.claim.complete(DeliveryResult.delivered()));
             f.claim.acceptCleanupAck(EngineCancelChannel.CancelAck.REQUEST_CLEANED);
-            f.owner.onDecodeStatus(f.decode, List.of(DecodeEndpoint.WorkerStatusFact.terminal(f.reservation, 0L)));
+            f.applyDecodeTerminal();
             f.owner.runtime.continuations().awaitIdle();
-            verify(f.prefill, times(1)).releaseCommittedItem(f.claim.item);
-            verify(f.decode, times(1)).release(f.reservation, DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP);
+            verify(f.prefill, times(1)).releaseRequest(f.claim.item);
+            f.assertDecodeOwnershipReleasedOnce();
         }
     }
 
@@ -335,23 +468,24 @@ class DeliveryClaimTest {
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.claim.complete(DeliveryResult.uncertain(new IllegalStateException("reply lost")));
             f.cancel.complete(EngineCancelChannel.CancelAck.REQUEST_FENCED);
-            DecodeEndpoint source = mismatch.equals("foreignEndpoint") ? mock(DecodeEndpoint.class) : f.decode;
+            DecodeEndpoint source = mismatch.equals("foreignEndpoint") ? RequestProtocolTestSupport.decodeEndpoint() : f.decode;
             var reservation = switch (mismatch) {
-                case "foreignToken" -> new DecodeEndpoint.ReservationHandle(1L, 41L, 2L);
-                case "foreignGeneration" -> new DecodeEndpoint.ReservationHandle(2L, 41L, 1L);
-                case "foreignRequest" -> new DecodeEndpoint.ReservationHandle(1L, 42L, 1L);
+                case "foreignToken" -> new DecodeResources.ReservationHandle(1L, 41L, 2L);
+                case "foreignGeneration" -> new DecodeResources.ReservationHandle(2L, 41L, 1L);
+                case "foreignRequest" -> new DecodeResources.ReservationHandle(1L, 42L, 1L);
                 default -> f.reservation;
             };
             var fact = mismatch.equals("notTerminal")
-                    ? DecodeEndpoint.WorkerStatusFact.active(reservation)
-                    : DecodeEndpoint.WorkerStatusFact.terminal(reservation, 0L);
+                    ? DecodeResources.WorkerStatusFact.active(reservation)
+                    : DecodeResources.WorkerStatusFact.terminal(reservation, 0L);
             f.claim.observeDecodeSettlement(source, fact);
             f.owner.runtime.continuations().awaitIdle();
             assertFalse(f.settlement().isDone());
             assertNull(f.claim.provenReleaseReason());
-            verify(f.prefill, never()).releaseCommittedItem(any());
+            assertTrue(f.decodeOwned.get(), "foreign facts cannot release the exact Decode owner");
+            verify(f.prefill, never()).releaseRequest(any());
             verify(f.decode, never()).release(any(), any());
-            f.owner.onDecodeStatus(f.decode, List.of(DecodeEndpoint.WorkerStatusFact.terminal(f.reservation, 0L)));
+            f.applyDecodeTerminal();
             f.assertArchivedAfterCleanup();
         }
     }
@@ -379,7 +513,7 @@ class DeliveryClaimTest {
                 f.owner.runtime.continuations().awaitIdle();
                 if (attempt < successfulAttempt) {
                     assertFalse(f.settlement().isDone());
-                    verify(f.prefill, never()).releaseCommittedItem(any());
+                    verify(f.prefill, never()).releaseRequest(any());
                     timer.runRetry(Math.min(400L, 25L << (attempt - 1)));
                 }
             }
@@ -487,7 +621,7 @@ class DeliveryClaimTest {
             assertTrue(timer.retries.isEmpty(), "retry budget must end without scheduling a ninth attempt");
             assertTrue(f.owner.requests.isCurrent(f.context));
             assertNull(f.claim.provenReleaseReason());
-            verify(f.prefill, never()).releaseCommittedItem(any());
+            verify(f.prefill, never()).releaseRequest(any());
             verify(f.decode, never()).release(any(), any());
         }
     }
@@ -537,8 +671,11 @@ class DeliveryClaimTest {
         final AbstractRequestScheduler owner;
         final BalanceContext context;
         final PrefillEndpoint prefill = mock(PrefillEndpoint.class);
-        final DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        final DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 41L, 1L);
+        final java.util.concurrent.atomic.AtomicBoolean prefillOwned = new java.util.concurrent.atomic.AtomicBoolean(true);
+        final java.util.concurrent.atomic.AtomicBoolean decodeOwned = new java.util.concurrent.atomic.AtomicBoolean(true);
+        final java.util.concurrent.atomic.AtomicBoolean decodeClearedByState = new java.util.concurrent.atomic.AtomicBoolean();
+        final DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
+        final DecodeResources.ReservationHandle reservation = new DecodeResources.ReservationHandle(1L, 41L, 1L);
         final BalanceContext.DeliveryClaim claim;
         Fixture() {
             var config = SchedulingTestConfig.batchConfig();
@@ -553,12 +690,46 @@ class DeliveryClaimTest {
             response.setSuccess(true);
             var item = RequestRoute.create(SchedulingTestConfig.freezeInputs(context), response, null, null,
                     prefill, decode, reservation, System.currentTimeMillis());
+            when(prefill.releaseRequest(any())).thenAnswer(call -> {
+                assertFalse(Thread.holdsLock(context), "resource cleanup must run outside the request monitor");
+                assertSame(item, call.getArgument(0), "only this exact Prefill owner may be released");
+                assertTrue(prefillOwned.compareAndSet(true, false), "Prefill ownership may be released only once");
+                return true;
+            });
+            when(decode.release(any(), any())).thenAnswer(call -> {
+                assertFalse(Thread.holdsLock(context), "Decode cleanup must run outside the request monitor");
+                assertEquals(reservation, call.getArgument(0), "only this exact Decode owner may be released");
+                assertTrue(decodeOwned.compareAndSet(true, false), "Decode ownership may be released only once");
+                return DecodeResources.ReservationReleaseResult.RELEASED;
+            });
             RequestProtocolTestSupport.bindRoute(owner, new RequestProtocolTestSupport.Registered(item, future));
             claim = RequestProtocolTestSupport.claimBatch(owner, item, 51L, () -> true);
             assertNotNull(claim);
         }
         CompletableFuture<BalanceContext.DeliverySettlement> settlement() { return claim.settlement().toCompletableFuture(); }
         void awaitArchive() throws InterruptedException { RequestProtocolTestSupport.awaitCondition(() -> !owner.requests.isCurrent(context)); }
+
+        // DecodeState removes exact ownership before Endpoint publishes a terminal or retirement fact.
+        private void clearDecodeStateOwnership() {
+            if (decodeOwned.getAndSet(false)) { decodeClearedByState.set(true); }
+        }
+
+        void applyDecodeTerminal() {
+            clearDecodeStateOwnership();
+            owner.onDecodeStatus(decode, List.of(DecodeResources.WorkerStatusFact.terminal(reservation, 0L)));
+        }
+
+        void retireDecode() {
+            clearDecodeStateOwnership();
+            when(decode.isRetired()).thenReturn(true);
+            owner.onDecodeGenerationRetired(decode, List.of(reservation));
+        }
+
+        void assertDecodeOwnershipReleasedOnce() {
+            assertFalse(decodeOwned.get(), "archival requires physical Decode ownership to be released");
+            verify(decode, times(decodeClearedByState.get() ? 0 : 1))
+                    .release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
+        }
 
         ControlledCleanup controlCleanup() {
             var controlled = new ControlledCleanup();
@@ -589,13 +760,14 @@ class DeliveryClaimTest {
             var result = settlement().get(2, TimeUnit.SECONDS);
             assertSame(claim.item, result.route());
             assertEquals(CancelReason.CLIENT_CANCELLED, result.abandonmentReason());
-            assertTrue(result.prefillSettled());
-            assertTrue(result.decodeSettled());
+            assertTrue(result.prefillReleaseProven());
+            assertTrue(result.decodeReleaseProven());
             awaitArchive();
             owner.runtime.continuations().awaitIdle();
             assertFalse(context.getFuture().join().isSuccess());
-            verify(prefill, times(1)).releaseCommittedItem(claim.item);
-            verify(decode, times(1)).release(reservation, DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP);
+            assertFalse(prefillOwned.get(), "archival requires Prefill ownership to be released");
+            verify(prefill, times(1)).releaseRequest(claim.item);
+            assertDecodeOwnershipReleasedOnce();
         }
         public void close() {
             SchedulerTestSupport.runtime(owner).stopAccepting();

@@ -1,8 +1,8 @@
 package org.flexlb.balance.eviction;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
-import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
 import org.flexlb.balance.scheduler.CancelReason;
@@ -34,7 +34,7 @@ import java.util.function.BooleanSupplier;
 public final class DecodePreemptionCoordinator implements AutoCloseable {
 
     public record PreemptionResult(
-            DecodeEndpoint.ReservationHandle reservation, boolean controlFailure, String detail) {
+            DecodeResources.ReservationHandle reservation, boolean controlFailure, String detail) {
         public boolean committed() { return reservation != null; }
 
         public PreemptionResult {
@@ -119,43 +119,28 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
     CompletableFuture<PreemptionResult> preempt(
             PreemptionCommand command) {
         long token = nextToken();
-        List<CancelTarget> targets =
+        List<DecodeResources.ReservationHandle> victimReservations =
                 new ArrayList<>(command.victims().size());
-        List<DecodeEndpoint.ReservationHandle> victimReservations =
-                new ArrayList<>(command.victims().size());
-        long endpointGenerationId =
-                command.endpoint().getStatus().getGenerationId();
-        for (DecodeRequestView victim : command.victims()) {
-            var owner = requests.ownerOf(victim.requestId());
-            Optional<CancelTarget> target = owner == null ? Optional.empty() : owner.findCancelTarget(
-                    victim.requestId(), victim.reservationToken());
-            if (target.isEmpty()) {
-                return CompletableFuture.completedFuture(new PreemptionResult(
-                        null, true,
-                        "cancel_owner_missing:" + victim.requestId()));
-            }
-            targets.add(target.get());
-            victimReservations.add(new DecodeEndpoint.ReservationHandle(
-                    endpointGenerationId,
-                    victim.requestId(),
-                    victim.reservationToken()));
-        }
-
+        long endpointGenerationId = command.endpoint().getStatus().getGenerationId();
         AttemptCapability capability = new AttemptCapability(command, token);
         try {
-            for (int index = 0; index < command.victims().size(); index++) {
-                DecodeRequestView victim = command.victims().get(index);
+            for (DecodeRequestView victim : command.victims()) {
                 var owner = requests.ownerOf(victim.requestId());
-                Optional<PreemptionRegistration> claimAttempt = owner == null ? Optional.empty() : owner.tryClaim(
-                        victim.requestId(), victim.reservationToken(),
-                        token, command.detail());
+                if (owner == null) {
+                    return CompletableFuture.completedFuture(capability.abort(true,
+                            "cancel_owner_missing:" + victim.requestId()));
+                }
+                var reservation = new DecodeResources.ReservationHandle(endpointGenerationId,
+                        victim.requestId(), victim.reservationToken());
+                Optional<PreemptionRegistration> claimAttempt = owner.tryClaim(reservation, token, command.detail());
                 if (claimAttempt.isEmpty()) {
                     return CompletableFuture.completedFuture(capability.abort(
                             false, "victim_inflight_gone"));
                 }
                 PreemptionRegistration claim = claimAttempt.get();
-                ClaimedVictim owned = new ClaimedVictim(victimReservations.get(index), targets.get(index), claim);
+                ClaimedVictim owned = new ClaimedVictim(reservation, claim);
                 capability.claims.add(owned);
+                victimReservations.add(reservation);
                 if (claim.requestId() != victim.requestId()
                         || claim.attemptToken() != token) {
                     return CompletableFuture.completedFuture(capability.abort(
@@ -164,7 +149,7 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
                 }
             }
 
-            DecodeEndpoint.PreemptionBeginResult begin =
+            DecodeResources.PreemptionBeginResult begin =
                     command.endpoint().beginPreemption(
                             token,
                             victimReservations,
@@ -173,9 +158,9 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
                             command.request().expectedKvTokens(),
                             command.request().priority(),
                             command.request().capacity());
-            if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
+            if (begin != DecodeResources.PreemptionBeginResult.SUCCESS) {
                 return CompletableFuture.completedFuture(capability.abort(
-                        begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
+                        begin == DecodeResources.PreemptionBeginResult.ENDPOINT_RETIRED,
                         "begin_" + begin.name().toLowerCase()));
             }
             capability.endpointBegun = true;
@@ -298,7 +283,7 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
         // is required for this stronger proof.
         boolean endpointSettled = command.endpoint().updatePreemption(
                 capability.token,
-                DecodeEndpoint.PreemptionUpdate.fenced(owned.reservation));
+                DecodeResources.PreemptionUpdate.fenced(owned.reservation));
         if (endpointSettled && owned.claim.scheduler().completePreemption(owned.claim, command.detail())) {
             capability.recordTerminal(owned);
         }
@@ -309,7 +294,7 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
             long timeoutMs) {
         try {
             CompletableFuture<EngineCancelChannel.CancelAck> stage =
-                    cancelChannel.cancel(victim.target, victim.requestId(), CancelReason.PRIORITY_PREEMPTED, timeoutMs);
+                    cancelChannel.cancel(victim.claim.cancelTarget(), victim.requestId(), CancelReason.PRIORITY_PREEMPTED, timeoutMs);
             if (stage == null) {
                 return CompletableFuture.completedFuture(
                         EngineCancelChannel.CancelAck.FAILED);
@@ -344,8 +329,7 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
 
     /** Exact opaque request claim paired with its immutable endpoint victim. */
     private static final class ClaimedVictim {
-        private final DecodeEndpoint.ReservationHandle reservation;
-        private final CancelTarget target;
+        private final DecodeResources.ReservationHandle reservation;
         private final PreemptionRegistration claim;
         private CompletableFuture<Boolean> terminalCompletion;
         private CompletableFuture<EngineCancelChannel.CancelAck> acknowledgement;
@@ -353,11 +337,9 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
                 ClaimDisposition.RELEASABLE;
 
         private ClaimedVictim(
-                DecodeEndpoint.ReservationHandle reservation,
-                CancelTarget target,
+                DecodeResources.ReservationHandle reservation,
                 PreemptionRegistration claim) {
             this.reservation = reservation;
-            this.target = target;
             this.claim = claim;
         }
 
@@ -397,7 +379,7 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
             }
             // Install the conservative resource hold before RPC invocation. No ACK changes this fact.
             if (!command.endpoint().updatePreemption(token,
-                    DecodeEndpoint.PreemptionUpdate.handedOff(owned.reservation))) { return false; }
+                    DecodeResources.PreemptionUpdate.handedOff(owned.reservation))) { return false; }
             owned.disposition = ClaimDisposition.OUTBOUND;
             return true;
         }
@@ -441,7 +423,7 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
         }
 
         private PreemptionResult finish(boolean hasNotFound) {
-            DecodeEndpoint.ReservationHandle incoming = allVictimsTerminal()
+            DecodeResources.ReservationHandle incoming = allVictimsTerminal()
                     && command.admissionOpen().getAsBoolean()
                     ? command.endpoint().commitPreemption(token) : null;
             if (incoming != null) {

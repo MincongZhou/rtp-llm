@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.planner.GroupPlanner;
@@ -101,7 +101,6 @@ public final class WorkerBatcher {
 
     /** Exact predicate captured by one scheduling cycle. */
     private record BatcherCycleResult(
-            boolean placementCapacityChanged,
             RequestRoute request,
             CapacityBoundary unavailable,
             long queueVersion,
@@ -109,13 +108,13 @@ public final class WorkerBatcher {
             long wakeAtMs,
             String waitReason) {
 
-        private static final BatcherCycleResult NO_ACTION = simple(false);
-        private static final BatcherCycleResult CAPACITY_CHANGED = simple(true);
+        private static final BatcherCycleResult NO_ACTION =
+                new BatcherCycleResult(null, null, 0L, 0L, 0L, null);
 
         private static BatcherCycleResult capacityBlocked(
                 RequestRoute item,
                 CapacityBoundary unavailable) {
-            return new BatcherCycleResult(false,
+            return new BatcherCycleResult(
                     Objects.requireNonNull(item, "item"),
                     Objects.requireNonNull(unavailable, "unavailable"),
                     0L, 0L, 0L, unavailable.projectionSemantics() == null
@@ -128,14 +127,9 @@ public final class WorkerBatcher {
                 long schedulingInputVersion,
                 long wakeAtMs,
                 String waitReason) {
-            return new BatcherCycleResult(false,
+            return new BatcherCycleResult(
                     Objects.requireNonNull(head, "head"), null,
                     queueVersion, schedulingInputVersion, wakeAtMs, waitReason);
-        }
-
-        private static BatcherCycleResult simple(boolean capacityChanged) {
-            return new BatcherCycleResult(
-                    capacityChanged, null, null, 0L, 0L, 0L, null);
         }
 
         private boolean capacityBlocked() {
@@ -265,10 +259,10 @@ public final class WorkerBatcher {
         List<RequestRoute> victims = List.of();
         queueLock.lock();
         try {
-            if (stopped) {
+            if (stopped || item.requiresRouteReservation() && prefillEndpoint.isGenerationRetiringOrRetired()) {
                 return false;
             }
-            accepted = prefillState.enqueueForDeliveryLocked(item, settings.maxOutstandingRequests());
+            accepted = prefillState.enqueueActiveLocked(item, settings.maxOutstandingRequests());
             if (accepted) { stateChanged.signal(); }
             if (!accepted && !stopped
                     && settings.preemptQueued()) {
@@ -625,10 +619,13 @@ public final class WorkerBatcher {
     private BatcherCycleResult commitPreparedSelection(DeliveryStrategy.Transaction transaction,
                                                        String decisionReason) {
         List<RequestRoute> items = transaction.items();
+        CapacityBoundary blockedResult = transaction.blockedResult();
+        RequestRoute failedMember = blockedResult != null && blockedResult.status() == CapacityBoundary.Status.FAILED
+                ? transaction.blockedItem() : null;
+        boolean removedBoundary;
         try {
             PrefillState.WorkCapture precedingWork;
             int remainingQueueDepth;
-            boolean removedBoundary;
             queueLock.lock();
             try {
                 long nowMs = now();
@@ -637,7 +634,7 @@ public final class WorkerBatcher {
                 }
                 precedingWork = transaction.commitLocked();
                 PrefillState.SelectionRemainder remainder = prefillState.finishPreparedSelectionLocked(
-                        transaction.blockedItem(), transaction.blockedResult(), nowMs);
+                        failedMember, nowMs);
                 removedBoundary = remainder.removedBoundary();
                 remainingQueueDepth = remainder.queueDepth();
             } finally {
@@ -651,35 +648,38 @@ public final class WorkerBatcher {
             Objects.requireNonNull(reason);
             // handoff always resolves or aborts the transaction, including its failure path.
             handoff(transaction, reason, remainingQueueDepth, precedingWork.materialize());
-            return BatcherCycleResult.CAPACITY_CHANGED;
         } catch (Throwable commitFailure) {
             Throwable failure = Failures.run(commitFailure, () -> transaction.abort(commitFailure));
             throw Failures.propagate(failure, "delivery selection failed after ownership commit");
         }
+        if (!removedBoundary) { prefillEndpoint.signalPlacementCapacityChanged(); }
+        return BatcherCycleResult.NO_ACTION;
     }
 
     private BatcherCycleResult commitBoundary(
             RequestRoute blockedItem,
             CapacityBoundary blockedResult) {
-        PrefillState.QueueBoundary boundary;
+        if (blockedItem == null || blockedResult == null) { return BatcherCycleResult.NO_ACTION; }
+        boolean capacityBlocked = blockedResult.unavailable();
+        boolean failed = blockedResult.status() == CapacityBoundary.Status.FAILED;
+        boolean removed = false;
         queueLock.lock();
         try {
-            if (stopped) {
-                return BatcherCycleResult.NO_ACTION;
+            if (stopped) { return BatcherCycleResult.NO_ACTION; }
+            long nowMs = now();
+            if (capacityBlocked) {
+                if (!prefillState.queueWaitCurrentLocked(blockedItem, 0L, 0L, true, nowMs)) {
+                    return BatcherCycleResult.NO_ACTION;
+                }
+            } else if (failed) {
+                removed = prefillState.removeQueuedIfUnexpiredLocked(blockedItem, nowMs);
             }
-            boundary = prefillState.resolveEmptySelectionLocked(
-                    blockedItem, blockedResult, now());
         } finally {
             queueLock.unlock();
         }
-        return switch (boundary) {
-            case BLOCKED -> BatcherCycleResult.capacityBlocked(blockedItem, blockedResult);
-            case UNCHANGED -> BatcherCycleResult.NO_ACTION;
-            case REMOVED -> {
-                notifyTerminalAdmissionFailure(blockedItem, blockedResult);
-                yield BatcherCycleResult.CAPACITY_CHANGED;
-            }
-        };
+        if (capacityBlocked) { return BatcherCycleResult.capacityBlocked(blockedItem, blockedResult); }
+        if (removed) { notifyTerminalAdmissionFailure(blockedItem, blockedResult); }
+        return BatcherCycleResult.NO_ACTION;
     }
 
     private void notifyTerminalAdmissionFailure(RequestRoute item, CapacityBoundary boundary) {
@@ -737,7 +737,7 @@ public final class WorkerBatcher {
         }
         if (head.requestExpired(nowMs)) {
             dropHead(head);
-            return BatcherCycleResult.CAPACITY_CHANGED;
+            return BatcherCycleResult.NO_ACTION;
         }
         GroupPlanner.Constraints constraints = schedulingConstraints(maxRequests, predictionBudgetMs, windowMs);
         if (Math.max(0L, head.seqLen()) > constraints.batchKvCapacity()) {
@@ -748,7 +748,7 @@ public final class WorkerBatcher {
             RequestRoute member = snapshot.items().get(index);
             if (member.requestExpired(nowMs)) {
                 dropHead(member);
-                return BatcherCycleResult.CAPACITY_CHANGED;
+                return BatcherCycleResult.NO_ACTION;
             }
         }
         try {
@@ -835,12 +835,6 @@ public final class WorkerBatcher {
         BatcherCycleResult result = processQueue();
         if (result.waitReason() != null) {
             recordQueueWait(result.request(), result.waitReason());
-        }
-        if (result.placementCapacityChanged()) {
-            // Only a committed removal creates a new queue seat. Advisory
-            // waits and delivery-capacity misses must not feed placement back
-            // into itself.
-            prefillEndpoint.signalPlacementCapacityChanged();
         }
         if (result.request() != null) {
             awaitWork(result);

@@ -1,5 +1,6 @@
 package org.flexlb.httpserver;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -277,7 +278,7 @@ public class HttpLoadBalanceServer {
             List<Map<String, Object>> decodeList = new ArrayList<>();
             for (Map.Entry<String, DecodeEndpoint> entry
                     : endpointRegistry.snapshotDecodeEndpoints().entrySet()) {
-                DecodeEndpoint.ResourceSnapshot view =
+                DecodeResources.ResourceSnapshot view =
                         entry.getValue().resourceSnapshot();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());

@@ -1,7 +1,8 @@
 package org.flexlb.balance.eviction;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
@@ -43,7 +44,7 @@ class DecodePreemptionCoordinatorTest {
 
     private static RequestRequirements incoming(long maxRequests) {
         return new RequestRequirements(20L, 70, 64L,
-                new DecodeEndpoint.AdmissionCapacity(maxRequests, 100L),
+                new DecodeResources.AdmissionCapacity(maxRequests, 100L),
                 DecodeMode.PREEMPT_AT_PLACEMENT, mock(DecodeCostFormula.class), 64L, null, List.of(), 0L, true, 0);
     }
 
@@ -57,9 +58,9 @@ class DecodePreemptionCoordinatorTest {
         CompletableFuture<VictimTerminal> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
-        when(requests.tryClaim(anyLong(), anyLong(), anyLong(), any()))
+        when(requests.tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
                 .thenAnswer(invocation -> Optional.of(
-                        invocation.<Long>getArgument(0) == 11L ? first : second));
+                        invocation.<DecodeResources.ReservationHandle>getArgument(0).requestId() == 11L ? first : second));
 
         EngineCancelChannel cancelChannel = mock(EngineCancelChannel.class);
         when(cancelChannel.cancel(any(), anyLong(), org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED), anyLong())).thenReturn(
@@ -79,7 +80,7 @@ class DecodePreemptionCoordinatorTest {
         secondTerminal.complete(new VictimTerminal(12L));
 
         assertTrue(result.get(1, TimeUnit.SECONDS).committed());
-        assertEquals(new DecodeEndpoint.ReservationHandle(9L, 20L, 100L), result.join().reservation());
+        assertEquals(new DecodeResources.ReservationHandle(9L, 20L, 100L), result.join().reservation());
         verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq(11L), org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED), anyLong());
         verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq(12L), org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED), anyLong());
         verify(endpoint).commitPreemption(1L);
@@ -93,7 +94,7 @@ class DecodePreemptionCoordinatorTest {
         Fixture fixture = fixture();
         CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
         PreemptionRegistration victimClaim = claim(fixture.requests(), 11L, terminal);
-        when(fixture.requests().tryClaim(anyLong(), anyLong(), anyLong(), any()))
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
                 .thenReturn(Optional.of(victimClaim));
         EngineCancelChannel channel = mock(EngineCancelChannel.class);
         CompletableFuture<EngineCancelChannel.CancelAck> ack = new CompletableFuture<>();
@@ -132,9 +133,9 @@ class DecodePreemptionCoordinatorTest {
         CompletableFuture<VictimTerminal> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
-        when(fixture.requests().tryClaim(anyLong(), anyLong(), anyLong(), any()))
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
                 .thenAnswer(invocation -> Optional.of(
-                        invocation.<Long>getArgument(0) == 11L ? first : second));
+                        invocation.<DecodeResources.ReservationHandle>getArgument(0).requestId() == 11L ? first : second));
         EngineCancelChannel channel = mock(EngineCancelChannel.class);
         when(channel.cancel(any(), anyLong(), org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED), anyLong())).thenAnswer(invocation ->
                 CompletableFuture.completedFuture(invocation.<Long>getArgument(1) == 11L
@@ -178,9 +179,9 @@ class DecodePreemptionCoordinatorTest {
         CompletableFuture<VictimTerminal> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
-        when(fixture.requests().tryClaim(anyLong(), anyLong(), anyLong(), any()))
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
                 .thenAnswer(invocation -> Optional.of(
-                        invocation.<Long>getArgument(0) == 11L ? first : second));
+                        invocation.<DecodeResources.ReservationHandle>getArgument(0).requestId() == 11L ? first : second));
         when(fixture.requests().completePreemption(eq(second), any())).thenReturn(true);
         CompletableFuture<EngineCancelChannel.CancelAck> firstAck = new CompletableFuture<>();
         CompletableFuture<EngineCancelChannel.CancelAck> secondAck = new CompletableFuture<>();
@@ -205,8 +206,8 @@ class DecodePreemptionCoordinatorTest {
             case REQUEST_FENCED -> verify(fixture.requests()).updatePreemption(second, PreemptionCancelPhase.CANCEL_REQUESTED);
             case REQUEST_CLEANED -> {
                 verify(fixture.endpoint()).updatePreemption(1L,
-                        DecodeEndpoint.PreemptionUpdate.fenced(
-                                new DecodeEndpoint.ReservationHandle(9L, 12L, 102L)));
+                        DecodeResources.PreemptionUpdate.fenced(
+                                new DecodeResources.ReservationHandle(9L, 12L, 102L)));
                 verify(fixture.requests()).completePreemption(second, "test");
             }
             default -> throw new AssertionError("unexpected test reply");
@@ -228,7 +229,7 @@ class DecodePreemptionCoordinatorTest {
         Fixture fixture = fixture();
         CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
         PreemptionRegistration claim = claim(fixture.requests(), 11L, terminal);
-        when(fixture.requests().tryClaim(anyLong(), anyLong(), anyLong(), any()))
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
                 .thenReturn(Optional.of(claim));
         when(fixture.requests().completePreemption(eq(claim), any())).thenReturn(true);
         EngineCancelChannel channel = mock(EngineCancelChannel.class);
@@ -243,12 +244,74 @@ class DecodePreemptionCoordinatorTest {
             assertFalse(outcome.isDone(), "Prefill fence alone does not prove Decode resource release");
             verify(fixture.requests(), never()).completePreemption(eq(claim), any());
             verify(fixture.endpoint(), never()).updatePreemption(1L,
-                    DecodeEndpoint.PreemptionUpdate.fenced(new DecodeEndpoint.ReservationHandle(9L, 11L, 101L)));
+                    DecodeResources.PreemptionUpdate.fenced(new DecodeResources.ReservationHandle(9L, 11L, 101L)));
             verify(fixture.endpoint(), never()).commitPreemption(anyLong());
             terminal.complete(new VictimTerminal(11L));
         }
         assertTrue(outcome.get(1L, TimeUnit.SECONDS).committed());
         verify(fixture.endpoint()).commitPreemption(1L);
+    }
+
+    @Test
+    void laterVictimClaimFailureReleasesEarlierClaimBeforeAnyCancel() throws Exception {
+        Fixture fixture = fixture();
+        PreemptionRegistration first = claim(fixture.requests(), 11L, new CompletableFuture<>());
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
+                .thenReturn(Optional.of(first), Optional.empty());
+        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        try (var coordinator = new DecodePreemptionCoordinator(channel,
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(fixture.requests()))) {
+            var result = coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
+                    fixture.endpoint(), incoming(2L), List.of(victim(11L, 101L), victim(12L, 102L)),
+                    1000L, 1000L, () -> true, "test")).get(1, TimeUnit.SECONDS);
+            assertFalse(result.committed());
+            verify(fixture.requests()).releasePreemption(first);
+            verify(fixture.endpoint(), never()).beginPreemption(anyLong(), anyList(), anyLong(),
+                    anyLong(), anyLong(), anyInt(), any());
+            org.mockito.Mockito.verifyNoInteractions(channel);
+        }
+    }
+
+    @Test
+    void invalidCancelTargetReleasesEarlierClaimAndReportsControlFailureWithoutRpc() throws Exception {
+        Fixture fixture = fixture();
+        PreemptionRegistration first = claim(fixture.requests(), 11L, new CompletableFuture<>());
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
+                .thenReturn(Optional.of(first))
+                .thenThrow(new IllegalStateException("Priority victim has no routable Cancel target"));
+        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        try (var coordinator = new DecodePreemptionCoordinator(channel,
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(fixture.requests()))) {
+            var result = coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
+                    fixture.endpoint(), incoming(2L), List.of(victim(11L, 101L), victim(12L, 102L)),
+                    1000L, 1000L, () -> true, "test")).get(1, TimeUnit.SECONDS);
+            assertFalse(result.committed());
+            assertTrue(result.controlFailure());
+            verify(fixture.requests()).releasePreemption(first);
+            verify(fixture.endpoint(), never()).beginPreemption(anyLong(), anyList(), anyLong(),
+                    anyLong(), anyLong(), anyInt(), any());
+            org.mockito.Mockito.verifyNoInteractions(channel);
+        }
+    }
+
+    @Test
+    void staleEndpointGenerationCannotCancelANewerRouteWithTheSameRequestAndToken() throws Exception {
+        Fixture fixture = fixture();
+        var stale = new DecodeResources.ReservationHandle(9L, 11L, 101L);
+        when(fixture.requests().tryClaim(eq(stale), anyLong(), any())).thenReturn(Optional.empty());
+        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        try (var coordinator = new DecodePreemptionCoordinator(channel,
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(fixture.requests()))) {
+            var result = coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
+                    fixture.endpoint(), incoming(1L), List.of(victim(11L, 101L)),
+                    1000L, 1000L, () -> true, "old endpoint")).get(1, TimeUnit.SECONDS);
+            assertFalse(result.committed());
+            assertFalse(result.controlFailure());
+            verify(fixture.requests()).tryClaim(eq(stale), anyLong(), eq("old endpoint"));
+            verify(fixture.endpoint(), never()).beginPreemption(anyLong(), anyList(), anyLong(),
+                    anyLong(), anyLong(), anyInt(), any());
+            org.mockito.Mockito.verifyNoInteractions(channel);
+        }
     }
 
     private static Fixture fixture() {
@@ -265,13 +328,11 @@ class DecodePreemptionCoordinatorTest {
                 anyLong(),
                 anyLong(),
                 anyInt(),
-                any(DecodeEndpoint.AdmissionCapacity.class)))
-                .thenReturn(DecodeEndpoint.PreemptionBeginResult.SUCCESS);
-        when(endpoint.updatePreemption(anyLong(), any(DecodeEndpoint.PreemptionUpdate.class))).thenReturn(true);
+                any(DecodeResources.AdmissionCapacity.class)))
+                .thenReturn(DecodeResources.PreemptionBeginResult.SUCCESS);
+        when(endpoint.updatePreemption(anyLong(), any(DecodeResources.PreemptionUpdate.class))).thenReturn(true);
         when(endpoint.commitPreemption(anyLong()))
-                .thenReturn(new DecodeEndpoint.ReservationHandle(9L, 20L, 100L));
-        when(requests.findCancelTarget(anyLong(), anyLong())).thenReturn(
-                Optional.of(new CancelTarget("10.0.0.1", 9090)));
+                .thenReturn(new DecodeResources.ReservationHandle(9L, 20L, 100L));
         return new Fixture(requests, endpoint);
     }
 
@@ -281,6 +342,7 @@ class DecodePreemptionCoordinatorTest {
             AbstractRequestScheduler owner, long requestId,
             CompletableFuture<VictimTerminal> terminal) {
         PreemptionRegistration claim = mock(PreemptionRegistration.class);
+        when(claim.cancelTarget()).thenReturn(new CancelTarget("10.0.0.1", 9090));
         when(claim.requestId()).thenReturn(requestId);
         when(claim.scheduler()).thenReturn(owner);
         when(claim.attemptToken()).thenReturn(1L);

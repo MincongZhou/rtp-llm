@@ -1,8 +1,9 @@
 package org.flexlb.balance.eviction;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.eviction.DecodePreemptionCoordinator.PreemptionResult;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.RequestRoute;
@@ -85,12 +86,12 @@ public class EvictionManager {
         if (proposal.requiresEngineCancel()) {
             return startEngineCancelPreemption(ctx, preemption, proposal, decodeEndpoint, request);
         }
-        List<DecodeEndpoint.ReservationHandle> victims = new ArrayList<>(proposal.victims().size());
+        List<DecodeResources.ReservationHandle> victims = new ArrayList<>(proposal.victims().size());
         for (DecodeRequestView victim : proposal.victims()) {
-            victims.add(new DecodeEndpoint.ReservationHandle(
+            victims.add(new DecodeResources.ReservationHandle(
                     decodeEndpoint.getStatus().getGenerationId(), victim.requestId(), victim.reservationToken()));
         }
-        DecodeEndpoint.ReservationHandle incoming = replaceQueuedDecodeReservations(
+        DecodeResources.ReservationHandle incoming = replaceQueuedDecodeReservations(
                 decodeEndpoint, victims, request.requestId(), request.hardKvTokens(),
                 request.expectedKvTokens(), request.priority(), request.capacity());
         if (incoming == null) {
@@ -122,7 +123,7 @@ public class EvictionManager {
             RequestRequirements request,
             PreemptionConfig preemption,
             DecodeEndpoint selectedEndpoint) {
-        DecodeEndpoint.ResourceSnapshot selected = selectedEndpoint.resourceSnapshot();
+        DecodeResources.ResourceSnapshot selected = selectedEndpoint.resourceSnapshot();
         if (selectedEndpoint.isRetired()) {
             return null;
         }
@@ -265,11 +266,11 @@ public class EvictionManager {
         }
     }
 
-    public DecodeEndpoint.ReservationHandle replaceQueuedDecodeReservations(DecodeEndpoint endpoint, List<DecodeEndpoint.ReservationHandle> victims, long incomingRequestId, long hardKv, long expectedKv, int priority, DecodeEndpoint.AdmissionCapacity capacity) {
+    public DecodeResources.ReservationHandle replaceQueuedDecodeReservations(DecodeEndpoint endpoint, List<DecodeResources.ReservationHandle> victims, long incomingRequestId, long hardKv, long expectedKv, int priority, DecodeResources.AdmissionCapacity capacity) {
         List<AdmissionHandle> claimed = new ArrayList<>(victims.size());
-        DecodeEndpoint.ReservationHandle incoming = null;
+        DecodeResources.ReservationHandle incoming = null;
         try {
-            for (DecodeEndpoint.ReservationHandle victim : victims) {
+            for (DecodeResources.ReservationHandle victim : victims) {
                 var owner = requests.ownerOf(victim.requestId());
                 AdmissionHandle withdrawal = owner == null ? null : owner.claimQueuedRoute(endpoint, victim, priority);
                 if (withdrawal == null) {
@@ -287,7 +288,7 @@ public class EvictionManager {
             }
             if (failure != null) {
                 if (incoming != null) {
-                    endpoint.release(incoming, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                    endpoint.release(incoming, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
                 }
                 Failures.rethrow(failure, "request cleanup failed");
             }

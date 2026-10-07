@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.opentelemetry.context.Context;
@@ -11,6 +12,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
+import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ExpirationTimer.DecisionDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
@@ -438,13 +440,6 @@ public class BalanceContext {
         }
     }
 
-    RequestRoute activeRouteForReservation(long reservationToken) {
-        synchronized (this) {
-            DecodeEndpoint.ReservationHandle reservation = this.route == null ? null : this.route.decodeReservation();
-            return this.ownsActiveGenerationLocked() && reservation != null && reservation.reservationToken() == reservationToken ? this.route : null;
-        }
-    }
-
     boolean isOpen() {
         synchronized (this) {
             return this.stage.isActive() && this.cancellationReason == null && !this.future.isDone() && this.finalOutcome == null;
@@ -529,7 +524,7 @@ public class BalanceContext {
         return this.ownsResourceTrackingLocked() && this.route == expected && expected.prefillEp() == source;
     }
 
-    boolean ownsDecodeFactLocked(DecodeEndpoint source, DecodeEndpoint.ReservationHandle reservation) {
+    boolean ownsDecodeFactLocked(DecodeEndpoint source, DecodeResources.ReservationHandle reservation) {
         this.requireContextLock("Decode fact ownership lookup");
         return this.ownsResourceTrackingLocked() && this.route != null && this.route.decodeEp() == source && reservation.equals(this.route.decodeReservation());
     }
@@ -588,7 +583,7 @@ public class BalanceContext {
         return reason == CancelReason.DEADLINE_EXCEEDED ? StrategyErrorType.BATCH_SLO_EXPIRED : StrategyErrorType.REQUEST_CANCELLED;
     }
 
-    /** A cancelled Future still needs resource finalization; other completed Futures do not. */
+    /** Local termination is available before execution; a selected response is already owned. */
     boolean canFinalizeBeforeExecutionLocked() {
         this.requireContextLock("local terminal eligibility");
         if (!ownsActiveGenerationLocked() || admission != null || preemption != null) {
@@ -625,7 +620,7 @@ public class BalanceContext {
 
     OptionalLong inactivityDeadlineAtMs() {
         synchronized (this) {
-            return this.ownsResourceTrackingLocked() && this.inactivityDeadline == null && (this.cleanup == null || !this.cleanup.expired) && this.inactivityTimeoutMs > 0L ? OptionalLong.of(this.inactivityExpiresAtMsLocked()) : OptionalLong.empty();
+            return this.ownsResourceTrackingLocked() && this.inactivityDeadline == null && (this.cleanup == null || !this.cleanup.expired && this.cleanup.phase != CleanupProgress.Phase.FINISHED) && this.inactivityTimeoutMs > 0L ? OptionalLong.of(this.inactivityExpiresAtMsLocked()) : OptionalLong.empty();
         }
     }
 
@@ -790,13 +785,19 @@ public class BalanceContext {
         }
     }
 
-    PreemptionRegistration tryInstallPreemption(long reservationToken, long attemptToken, String detail) {
+    PreemptionRegistration tryInstallPreemption(DecodeResources.ReservationHandle exact, long attemptToken, String detail) {
         synchronized (this) {
-            DecodeEndpoint.ReservationHandle reservation = this.route == null ? null : this.route.decodeReservation();
-            if (!this.ownsActiveGenerationLocked() || admission != null || preemption != null || this.cancellationReason != null || reservation == null || reservation.reservationToken() != reservationToken || (this.deliveryClaimKind() == DeliveryClaimKind.ROUTE_DECISION && !this.deliveryAcknowledged)) {
+            DecodeResources.ReservationHandle reservation = this.route == null ? null : this.route.decodeReservation();
+            if (!this.ownsActiveGenerationLocked() || admission != null || preemption != null || this.cancellationReason != null || reservation == null || !Objects.equals(reservation, exact) || (this.deliveryClaimKind() == DeliveryClaimKind.ROUTE_DECISION && !this.deliveryAcknowledged)) {
                 return null;
             }
-            preemption = new PreemptionRegistration(this, attemptToken, detail);
+            var prefill = route.prefill();
+            CancelTarget cancelTarget = prefill == null ? null
+                    : new CancelTarget(prefill.getServerIp(), prefill.getGrpcPort());
+            if (cancelTarget == null || !cancelTarget.isRoutable()) {
+                throw new IllegalStateException("Priority victim has no routable Cancel target request_id=" + getRequestId());
+            }
+            preemption = new PreemptionRegistration(this, attemptToken, detail, cancelTarget);
             this.assertInvariantLocked();
             return preemption;
         }
@@ -961,7 +962,7 @@ public class BalanceContext {
 
     /** Exact route delivery identity; completion is consumed under the request monitor. */
     public record DeliverySettlement(RequestRoute route, DeliveryClaim.SendOutcome sendOutcome,
-                                     CancelReason abandonmentReason, boolean prefillSettled, boolean decodeSettled) { }
+                                     CancelReason abandonmentReason, boolean prefillReleaseProven, boolean decodeReleaseProven) { }
 
     /**
      * 一次已领取的投递及其结算责任，内部事实由 owner 的 monitor 保护。
@@ -979,10 +980,9 @@ public class BalanceContext {
         private SendOutcome sendOutcome = SendOutcome.NOT_STARTED;
         private boolean senderFinished;
         private CancelReason abandonmentReason;
-        private boolean prefillSettled;
-        private boolean decodeSettled;
+        private boolean prefillReleaseProven;
+        private boolean decodeReleaseProven;
         private boolean executionFinished;
-        private boolean cleanupContinuationAttached;
 
         private DeliveryClaim(RequestRoute item, DeliveryClaimKind kind,
                               BiConsumer<DeliveryClaim, DeliveryResult> completion,
@@ -992,7 +992,7 @@ public class BalanceContext {
             this.kind = kind;
             this.completion = completion;
             this.cleanupStarter = Objects.requireNonNull(cleanupStarter);
-            this.decodeSettled = item.decodeEp() == null || item.decodeReservation() == null;
+            this.decodeReleaseProven = item.decodeEp() == null || item.decodeReservation() == null;
         }
 
         /** The final request check immediately before adding this member to the actual RPC. */
@@ -1042,7 +1042,7 @@ public class BalanceContext {
         public void abandon(CancelReason reason) {
             boolean start;
             synchronized (owner) {
-                if (abandonmentReason != null) { return; }
+                if (abandonmentReason != null || canReleaseLocked()) { return; }
                 abandonmentReason = Objects.requireNonNull(reason);
                 if (kind == DeliveryClaimKind.ROUTE_DECISION) { senderFinished = true; }
                 start = kind == DeliveryClaimKind.BATCH_ENQUEUE && !settled.isDone();
@@ -1057,27 +1057,27 @@ public class BalanceContext {
             synchronized (owner) {
                 return new CleanupEvidence(abandonmentReason,
                         sendOutcome != SendOutcome.NOT_STARTED && sendOutcome != SendOutcome.NOT_SENT,
-                        prefillSettled && decodeSettled);
+                        prefillReleaseProven && decodeReleaseProven);
             }
         }
 
         void acceptCleanupAck(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck ack) {
             synchronized (owner) {
                 if (ack == org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED) {
-                    prefillSettled = true;
-                    decodeSettled = true;
+                    prefillReleaseProven = true;
+                    decodeReleaseProven = true;
                 } else if (ack == org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_FENCED) {
-                    prefillSettled = true;
+                    prefillReleaseProven = true;
                 }
             }
             publishSettlement();
         }
 
-        void observeDecodeSettlement(DecodeEndpoint source, DecodeEndpoint.WorkerStatusFact fact) {
+        void observeDecodeSettlement(DecodeEndpoint source, DecodeResources.WorkerStatusFact fact) {
             synchronized (owner) {
                 if (source != item.decodeEp() || !Objects.equals(fact.reservation(), item.decodeReservation())
-                        || fact.kind() != DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL) { return; }
-                decodeSettled = true;
+                        || fact.kind() != DecodeResources.WorkerStatusFact.Kind.TERMINAL) { return; }
+                decodeReleaseProven = true;
                 executionFinished = true;
             }
             publishSettlement();
@@ -1087,6 +1087,8 @@ public class BalanceContext {
             synchronized (owner) {
                 if (exact != item) { return; }
                 executionFinished = true;
+                // A terminal Route decision revokes address publication; Batch still awaits its sender.
+                if (kind == DeliveryClaimKind.ROUTE_DECISION) { senderFinished = true; }
             }
             publishSettlement();
         }
@@ -1094,43 +1096,47 @@ public class BalanceContext {
         void observeRetirement(org.flexlb.balance.endpoint.WorkerEndpoint source) {
             synchronized (owner) {
                 if (source instanceof DecodeEndpoint decode && !decode.isRetired()) { return; }
-                if (source == item.prefillEp()) { prefillSettled = true; }
-                if (source == item.decodeEp()) { decodeSettled = true; executionFinished = true; }
+                if (source == item.prefillEp()) { prefillReleaseProven = true; }
+                if (source == item.decodeEp()) { decodeReleaseProven = true; executionFinished = true; }
             }
             publishSettlement();
         }
 
-        /** 锁内生成结算快照，锁外完成 Future，避免在 owner 锁内运行下游回调。 */
-        private void publishSettlement() {
-            DeliverySettlement result;
-            synchronized (owner) {
-                boolean done = senderFinished && (kind == DeliveryClaimKind.ROUTE_DECISION || sendOutcome == SendOutcome.NOT_SENT
-                        || (abandonmentReason == null ? executionFinished : prefillSettled && decodeSettled));
-                result = done ? new DeliverySettlement(item, sendOutcome, abandonmentReason, prefillSettled, decodeSettled) : null;
-            }
-            if (result != null) { settled.complete(result); }
+        private boolean canReleaseLocked() {
+            owner.requireContextLock("delivery release evidence");
+            return senderFinished && (kind == DeliveryClaimKind.ROUTE_DECISION || sendOutcome == SendOutcome.NOT_SENT
+                    || (abandonmentReason == null ? executionFinished : prefillReleaseProven && decodeReleaseProven));
         }
 
-        DecodeEndpoint.ReleaseReason provenReleaseReason() {
+        /** Queue resource cleanup before publishing the evidence awaited by shutdown. */
+        private void publishSettlement() {
+            DeliverySettlement result;
+            boolean cleanupPending;
+            synchronized (owner) {
+                result = !settled.isDone() && canReleaseLocked()
+                        ? new DeliverySettlement(item, sendOutcome, abandonmentReason, prefillReleaseProven, decodeReleaseProven) : null;
+                cleanupPending = owner.cleanup != null;
+            }
+            if (result != null) {
+                try {
+                    if (cleanupPending && kind == DeliveryClaimKind.BATCH_ENQUEUE) { owner.scheduler().enqueueCleanup(owner); }
+                } finally { settled.complete(result); }
+            }
+        }
+
+        DecodeResources.ReleaseReason provenReleaseReason() {
             synchronized (owner) {
                 if (sendOutcome == SendOutcome.NOT_SENT && senderFinished) {
-                    return DecodeEndpoint.ReleaseReason.NOT_SENT;
+                    return DecodeResources.ReleaseReason.NOT_SENT;
                 }
-                if (cleanupComplete() && abandonmentReason != null && prefillSettled && decodeSettled) {
-                    return DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP;
+                if (canReleaseLocked() && abandonmentReason != null && prefillReleaseProven && decodeReleaseProven) {
+                    return DecodeResources.ReleaseReason.REMOTE_CLEANUP;
                 }
                 return null;
             }
         }
 
         public java.util.concurrent.CompletionStage<DeliverySettlement> settlement() { return settled.minimalCompletionStage(); }
-        boolean attachCleanupContinuation() {
-            synchronized (owner) {
-                if (cleanupContinuationAttached) { return false; }
-                cleanupContinuationAttached = true;
-                return true;
-            }
-        }
         boolean cleanupRequired() { synchronized (owner) { return abandonmentReason != null; } }
         boolean cleanupComplete() { return settled.isDone(); }
         public SendOutcome sendOutcome() { synchronized (owner) { return sendOutcome; } }
@@ -1296,17 +1302,14 @@ public class BalanceContext {
     }
 
     /**
-     * 投递失败后 Prefill/Decode 的结算进度，由 context 锁保护。
+     * 本请求唯一的 Prefill/Decode 结算进度，由 context 锁保护。
      * RUN_AGAIN 表示当前锁外清理期间又来了事件，当前轮完成后必须再执行一轮。
      * expired 是清理阶段的超时事实，不等于两端资源已释放。
      */
     private static final class CleanupProgress {
 
         // PENDING blocks close before the first pass or while a requested follow-up has not started.
-        enum Phase {
-
-            PENDING, RUNNING, RUN_AGAIN, WAITING
-        }
+        enum Phase { PENDING, QUEUED, RUNNING, RUN_AGAIN, WAITING, FINISHED }
 
         final DeliveryResult.Status source;
 
@@ -1320,11 +1323,12 @@ public class BalanceContext {
          * Sticky decision: later Worker activity cannot revoke an already requested expiry.
          */
         boolean expired;
+        boolean terminalEffectsFinished;
 
         CleanupProgress(RequestRoute item, DeliveryResult.Status source) {
             this.source = source;
-            prefillSettled = item.prefillEp() == null;
-            decodeSettled = item.decodeEp() == null || item.decodeReservation() == null;
+            prefillSettled = item == null || item.prefillEp() == null;
+            decodeSettled = item == null || item.decodeEp() == null || item.decodeReservation() == null;
         }
 
         boolean ready() {
@@ -1353,12 +1357,22 @@ public class BalanceContext {
             if (claimedPreemption != null) {
                 claimedPreemption.tryFinish();
             }
-            ExpirationTimer.DetachedDeadlines terminalResources = this.detachDeadlines();
-            TerminalAction action = new TerminalAction(this, this.route, this.deliveryClaimKind(), this.cleanup != null, claimedPreemption, terminalResources, event, publishable ? response : null, permit);
+            ExpirationTimer.DetachedDeadlines terminalResources = new ExpirationTimer.DetachedDeadlines(
+                    requestDeadline, detachDecisionDeadlineLocked(), null);
+            requestDeadline = null;
+            TerminalAction action = new TerminalAction(this, this.route, claimedPreemption, terminalResources, event, publishable ? response : null, permit);
             terminalAction = action;
             // The selected outcome is visible while unlocked endpoint cleanup runs.
             this.beginFinalizationLocked(transition);
-            this.cleanup = null;
+            if (cleanup == null) { cleanup = new CleanupProgress(route, null); }
+            if (event != null && (event.decodeTerminalAlreadyApplied() || event.endpointAlreadyRetired())) {
+                cleanup.decodeSettled = true;
+            }
+            if (prefillCompletedAtMs > 0L || event != null && event.kind() == DeferredTerminal.Kind.WORKER
+                    && event.workerSource() == WorkerTerminalSource.PREFILL_ENDPOINT) {
+                cleanup.prefillSettled = true;
+            }
+            cleanup.expired |= event != null && event.kind() == DeferredTerminal.Kind.INACTIVITY_EXPIRED;
             transferred = true;
             this.assertInvariantLocked();
             return action;
@@ -1599,6 +1613,7 @@ public class BalanceContext {
         }
         RequestState terminal = snapshot();
         route = null;
+        cleanup = null;
         advanceStageLocked(RequestStage.FINISHED);
         assertInvariantLocked();
         return terminal;
@@ -1627,27 +1642,70 @@ public class BalanceContext {
     }
 
     /** Frozen facts for one unlocked endpoint cleanup pass; progress is its opaque identity. */
-    record CleanupPass(CleanupProgress progress, boolean prefillSettled, boolean decodeSettled, boolean expired,
+    record CleanupPass(CleanupProgress progress, RequestRoute route, boolean prefillSettled, boolean decodeSettled,
+                       DecodeResources.ReleaseReason releaseReason, DeliveryResult.Status source,
                        RequestDeadline requestDeadline, DecisionDeadline decisionDeadline) { }
 
-    CleanupPass beginCleanup(RequestRoute exact) {
+    /** An unstarted pass owns QUEUED; running notifications leave their phase unchanged. */
+    record CleanupQueue(CleanupProgress progress, boolean queued) { }
+
+    CleanupQueue tryQueueCleanupLocked() {
+        requireContextLock("cleanup queue claim");
+        if (cleanup == null || admission != null || cleanup.phase == CleanupProgress.Phase.FINISHED
+                || cleanup.phase == CleanupProgress.Phase.QUEUED
+                || delivery != null && !delivery.canReleaseLocked()) { return null; }
+        boolean queued = cleanup.phase == CleanupProgress.Phase.PENDING || cleanup.phase == CleanupProgress.Phase.WAITING;
+        if (queued) { cleanup.phase = CleanupProgress.Phase.QUEUED; }
+        return new CleanupQueue(cleanup, queued);
+    }
+
+    /** Only the accepted task or its rejected submission can surrender its queue claim. */
+    void releaseCleanupQueueLocked(CleanupQueue exact) {
+        requireContextLock("cleanup queue release");
+        if (exact.queued() && cleanup == exact.progress() && cleanup.phase == CleanupProgress.Phase.QUEUED) {
+            cleanup.phase = CleanupProgress.Phase.PENDING;
+        }
+    }
+
+    CleanupPass beginCleanup() {
         requireContextLock("cleanup pass");
-        CleanupProgress progress = route == exact ? cleanup : null;
-        if (progress != null && admission != null) { return null; }
-        if (progress != null && (progress.phase == CleanupProgress.Phase.RUNNING || progress.phase == CleanupProgress.Phase.RUN_AGAIN)) {
+        CleanupProgress progress = cleanup;
+        if (progress == null || admission != null || progress.phase == CleanupProgress.Phase.FINISHED
+                || progress.phase == CleanupProgress.Phase.QUEUED
+                || delivery != null && !delivery.canReleaseLocked()) { return null; }
+        if (progress.phase == CleanupProgress.Phase.RUNNING || progress.phase == CleanupProgress.Phase.RUN_AGAIN) {
             progress.phase = CleanupProgress.Phase.RUN_AGAIN;
             return null;
         }
-        RequestDeadline request = null;
-        DecisionDeadline decision = null;
-        if (progress != null) {
-            progress.phase = CleanupProgress.Phase.RUNNING;
-            request = requestDeadline;
-            requestDeadline = null;
-            decision = detachDecisionDeadlineLocked();
+        progress.phase = CleanupProgress.Phase.RUNNING;
+        RequestDeadline request = requestDeadline;
+        requestDeadline = null;
+        DecisionDeadline decision = detachDecisionDeadlineLocked();
+        DecodeResources.ReleaseReason proof = delivery == null ? null : delivery.provenReleaseReason();
+        if (proof == null) {
+            proof = progress.expired ? DecodeResources.ReleaseReason.EXPIRED
+                    : progress.source == null ? DecodeResources.ReleaseReason.COUNTERPART_FINISHED : null;
         }
-        return new CleanupPass(progress, progress != null && progress.prefillSettled,
-                progress != null && progress.decodeSettled, progress != null && progress.expired, request, decision);
+        return new CleanupPass(progress, route, progress.prefillSettled, progress.decodeSettled,
+                proof, progress.source, request, decision);
+    }
+
+    void finishTerminalEffectsLocked(TerminalAction action) {
+        requireContextLock("terminal effects");
+        if (terminalAction != action || cleanup == null) { throw new IllegalStateException("stale terminal effects"); }
+        cleanup.terminalEffectsFinished = true;
+    }
+
+    boolean claimArchiveLocked(TerminalAction action) {
+        requireContextLock("archive claim");
+        if (terminalAction != action || cleanup == null || !cleanup.terminalEffectsFinished || !cleanup.ready()) { return false; }
+        cleanup.phase = CleanupProgress.Phase.FINISHED;
+        return true;
+    }
+
+    TerminalAction completedCleanupActionLocked() {
+        requireContextLock("cleanup action");
+        return terminalAction != null && claimArchiveLocked(terminalAction) ? terminalAction : null;
     }
 
     enum CleanupNext { STALE, TRY_FINISH, REPEAT }
@@ -1659,8 +1717,8 @@ public class BalanceContext {
         progress.phase = progress.phase == CleanupProgress.Phase.RUN_AGAIN ? CleanupProgress.Phase.PENDING : CleanupProgress.Phase.WAITING;
         progress.prefillSettled |= prefillDone;
         progress.decodeSettled |= decodeDone;
-        if (preemption != null && decodeDone && (pass.expired() || progress.source == DeliveryResult.Status.NOT_SENT
-                || delivery != null && delivery.kind == DeliveryClaimKind.BATCH_ENQUEUE && delivery.cleanupRequired() && delivery.cleanupComplete())) {
+        if (preemption != null && decodeDone && (progress.expired || progress.source == DeliveryResult.Status.NOT_SENT
+                || delivery != null && delivery.kind == DeliveryClaimKind.BATCH_ENQUEUE && delivery.cleanupRequired() && delivery.canReleaseLocked())) {
             preemption.tryFinish();
         }
         return progress.phase == CleanupProgress.Phase.PENDING ? CleanupNext.REPEAT : CleanupNext.TRY_FINISH;
@@ -1852,9 +1910,10 @@ public class BalanceContext {
             PreemptionRegistration claim = this.preemption();
             if (fact.kind() != PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED
                     || claim == null || claim.isFinished()) {
-                return scheduler.finalizationEffects(this.tryFinishCleanupLocked(), null);
+                return () -> scheduler.resumeCleanup(this);
             }
         }
+        DecodeEndpoint capacityRelease = null;
         Runnable transition = switch(fact.kind()) {
             case ACTIVE ->
                 {
@@ -1866,20 +1925,24 @@ public class BalanceContext {
                     PreemptionRegistration claim = this.preemption();
                     if (claim != null && claim.isNotFound()) {
                         DecodeEndpoint decode = fact.item().decodeEp();
-                        if (decode == null || decode.updatePreemption(claim.attemptToken(),
-                                DecodeEndpoint.PreemptionUpdate.active(fact.item().decodeReservation()))) {
+                        if (decode == null || decode.reconcilePreemptionResources(claim.attemptToken(),
+                                DecodeResources.PreemptionUpdate.active(fact.item().decodeReservation()))) {
                             this.detachPreemptionOwnerLocked(claim);
+                            capacityRelease = decode;
+                            yield cleaning ? () -> scheduler.resumeCleanup(this) : null;
                         }
                     }
                     yield null;
                 }
             case COMPLETED ->
                 {
-                    if (!decodeAccepted && prefillCompletedAtMs == 0L) {
+                    if (prefillCompletedAtMs == 0L) {
                         boolean separateDecode = role != RoleType.PDFUSION && route.decodeEp() != null;
                         prefillCompletedAtMs = nowMs;
-                        setDecisionDeadlineLocked(separateDecode && deliveryPredictionConsumed
-                                ? OptionalLong.of(deadlineAfter(nowMs, DECODE_HANDOFF_GRACE_MS)) : OptionalLong.empty());
+                        if (!decodeAccepted) {
+                            setDecisionDeadlineLocked(separateDecode && deliveryPredictionConsumed
+                                    ? OptionalLong.of(deadlineAfter(nowMs, DECODE_HANDOFF_GRACE_MS)) : OptionalLong.empty());
+                        }
                     }
 
                     yield role == RoleType.PDFUSION ? this.processRequestEndLocked(fact.item(), DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, true, fact.errorCode())) : null;
@@ -1890,20 +1953,26 @@ public class BalanceContext {
                 PreemptionRegistration claim = this.preemption();
                 DecodeEndpoint decode = fact.item().decodeEp();
                 if (claim == null || !claim.canAcceptPriorityTerminal() || decode == null || fact.item().decodeReservation() == null
-                        || !decode.updatePreemption(claim.attemptToken(),
-                                DecodeEndpoint.PreemptionUpdate.canceled(fact.item().decodeReservation()))
-                        // Capacity listeners may reenter the scheduler during the Decode update.
-                        || !this.ownsResourceTrackingLocked() || this.preemption() != claim || !claim.tryFinish()) {
+                        || !decode.reconcilePreemptionResources(claim.attemptToken(),
+                                DecodeResources.PreemptionUpdate.canceled(fact.item().decodeReservation()))) {
                     yield null;
                 }
+                capacityRelease = decode;
+                claim.tryFinish();
                 yield this.finishPreemptedRequestLocked(claim, "priority victim canceled by worker", true);
             }
         };
         if (!cleaning) { this.reconcileDecisionEvidenceLocked(); }
-        return transition;
+        if (capacityRelease == null) { return transition; }
+        DecodeEndpoint source = capacityRelease;
+        return () -> {
+            Throwable failure = Failures.run(null, source::publishCapacityRelease);
+            failure = Failures.run(failure, transition);
+            Failures.rethrow(failure, "Prefill fact continuation failed");
+        };
     }
 
-    Runnable acceptDecodeStatus(DecodeEndpoint source, DecodeEndpoint.WorkerStatusFact fact, long nowMs) {
+    Runnable acceptDecodeStatus(DecodeEndpoint source, DecodeResources.WorkerStatusFact fact, long nowMs) {
         Runnable work = null;
         DecisionDeadline obsolete = null;
         boolean capacityChanged = false;
@@ -1912,7 +1981,7 @@ public class BalanceContext {
                 return null;
             }
             this.observeWorker(nowMs);
-            if (fact.kind() == DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL) {
+            if (fact.kind() == DecodeResources.WorkerStatusFact.Kind.TERMINAL) {
                 if (!this.hasCleanup()) {
                     setDecisionDeadlineLocked(OptionalLong.empty());
                     decodeAccepted = true;
@@ -1927,8 +1996,8 @@ public class BalanceContext {
                 if (fact.allocationObserved() && claim != null && claim.isNotFound()) {
                     DeferredTerminal terminal = claim.pendingTerminal();
                     capacityChanged = source.reconcilePreemptionResources(claim.attemptToken(), terminal == null
-                            ? DecodeEndpoint.PreemptionUpdate.active(fact.reservation())
-                            : DecodeEndpoint.PreemptionUpdate.finished(fact.reservation()));
+                            ? DecodeResources.PreemptionUpdate.active(fact.reservation())
+                            : DecodeResources.PreemptionUpdate.finished(fact.reservation()));
                     if (capacityChanged) {
                         if (this.hasCleanup()) {
                             if (terminal != null) {
@@ -1943,8 +2012,10 @@ public class BalanceContext {
                             this.detachPreemptionOwnerLocked(claim);
                             if (terminal != null) {
                                 claim.tryFinish();
-                                work = scheduler.finalizationEffects(this.decideRequestEndLocked(terminal,
-                                        () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)), claim);
+                                TerminalAction action = this.decideRequestEndLocked(terminal,
+                                        () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL));
+                                if (action != null) { this.recordCleanupSettlement(false, true, false); }
+                                work = scheduler.finalizationEffects(action, claim);
                             } else if (claim.hasPendingDeliveryConfirmation()) {
                                 work = this.acknowledgeDeliveryLocked(claim);
                             }
@@ -2028,14 +2099,15 @@ public class BalanceContext {
             this.retainAdmissionPrefillRetirementLocked(pending);
             return null;
         }
-        if (this.cancellationReason() != null && this.deliveryClaimKind() == DeliveryClaimKind.NONE) {
-            TerminalAction cancelled = this.tryTerminateCancellationLocked(() -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL));
-            if (cancelled != null) {
-                return cancelled;
-            }
+        TerminalAction action = this.cancellationReason() != null && this.deliveryClaimKind() == DeliveryClaimKind.NONE
+                ? this.tryTerminateCancellationLocked(() -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)) : null;
+        if (action == null) {
+            action = this.claimFinalizationLocked(null, TerminalOutcome.fail(pending.detail()),
+                    buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, pending.detail()), true,
+                    () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL));
         }
-        return this.claimFinalizationLocked(null, TerminalOutcome.fail(pending.detail()),
-                buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, pending.detail()), true, () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL));
+        if (action != null) { this.recordCleanupSettlement(true, false, false); }
+        return action;
     }
 
     Runnable decideInactivityLocked(long nowMs, PreemptionRegistration signal) {
@@ -2070,7 +2142,7 @@ public class BalanceContext {
             } else {
                 this.recordCleanupSettlement(true, false, false);
             }
-            return scheduler.finalizationEffects(this.tryFinishCleanupLocked(), null);
+            return () -> scheduler.resumeCleanup(this);
         }
         if (this.admission() != null) {
             this.retainAdmissionTerminalLocked(event);
@@ -2097,6 +2169,7 @@ public class BalanceContext {
     }
 
     Runnable processPendingEventsUnderPreemptionLocked(PreemptionRegistration exact, boolean transportUnknown, PreemptionRegistration signal) {
+        this.requireContextLock("pending preemption facts");
         DeferredTerminal terminal = exact.pendingTerminal();
         boolean terminalWins = terminal != null && (!transportUnknown || terminal.authoritativeWorker());
         if (!terminalWins && (transportUnknown || !exact.hasPendingDeliveryConfirmation())) {
@@ -2105,29 +2178,41 @@ public class BalanceContext {
         RequestRoute active = this.activeRoute();
         DecodeEndpoint decode = active == null ? null : active.decodeEp();
         // Decode terminal facts already committed its ledger; all other evidence must reconcile it first.
-        if (decode != null && !(terminalWins && terminal.decodeTerminalAlreadyApplied())
-                && !decode.updatePreemption(exact.attemptToken(), terminalWins
-                        ? DecodeEndpoint.PreemptionUpdate.finished(active.decodeReservation())
-                        : DecodeEndpoint.PreemptionUpdate.active(active.decodeReservation()))) {
+        boolean capacityChanged = decode != null && !(terminalWins && terminal.decodeTerminalAlreadyApplied());
+        if (capacityChanged && !decode.reconcilePreemptionResources(exact.attemptToken(), terminalWins
+                        ? DecodeResources.PreemptionUpdate.finished(active.decodeReservation())
+                        : DecodeResources.PreemptionUpdate.active(active.decodeReservation()))) {
             return null;
         }
         if (terminalWins) { exact.tryFinish(); }
         this.detachPreemptionOwnerLocked(exact);
-        return terminalWins
-                ? scheduler.finalizationEffects(this.decideRequestEndLocked(terminal, () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)), signal)
+        TerminalAction action = terminalWins ? this.decideRequestEndLocked(terminal,
+                () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)) : null;
+        if (action != null && capacityChanged) { this.recordCleanupSettlement(false, true, false); }
+        Runnable work = terminalWins
+                ? scheduler.finalizationEffects(action, signal)
                 : this.acknowledgeDeliveryLocked(signal);
+        if (!capacityChanged) { return work; }
+        return () -> {
+            Throwable failure = Failures.run(null, decode::publishCapacityRelease);
+            failure = Failures.run(failure, work);
+            Failures.rethrow(failure, "preemption continuation failed");
+        };
     }
 
     Runnable finishPreemptedRequestLocked(PreemptionRegistration exact,
                                                   String detail, boolean prefillSettled) {
         if (this.hasCleanup()) {
             this.recordCleanupSettlement(prefillSettled, true, false);
-            return scheduler.finalizationEffects(this.tryFinishCleanupLocked(), null);
+            return () -> scheduler.resumeCleanup(this);
         }
         DeferredTerminal terminal = DeferredTerminal.priority(detail);
         this.retainPreemptionTerminalLocked(exact, terminal);
         this.detachPreemptionOwnerLocked(exact);
-        return scheduler.finalizationEffects(this.decideRequestEndLocked(terminal, () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)), exact);
+        TerminalAction action = this.decideRequestEndLocked(terminal,
+                () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL));
+        if (action != null) { this.recordCleanupSettlement(prefillSettled, true, false); }
+        return scheduler.finalizationEffects(action, exact);
     }
 
     Runnable acknowledgeDeliveryLocked(PreemptionRegistration signal) {
@@ -2229,6 +2314,6 @@ record DeferredTerminal(Kind kind, StrategyErrorType errorType, String detail, W
  * 一次终态执行任务：领取时存入 context.terminalAction 防止重复领取，随后交给 Scheduler。
  * 包含精确路由、定时器和可选发布许可；不是可重新计算或任意重试的普通结果对象。
  */
-record TerminalAction(BalanceContext requestContext, RequestRoute item, DeliveryClaimKind deliveryKind, boolean endpointsSettled, PreemptionRegistration preemption, ExpirationTimer.DetachedDeadlines terminalResources, DeferredTerminal event, Response response, BalanceContext.PublicationPermit publication) {
+record TerminalAction(BalanceContext requestContext, RequestRoute item, PreemptionRegistration preemption, ExpirationTimer.DetachedDeadlines terminalResources, DeferredTerminal event, Response response, BalanceContext.PublicationPermit publication) {
 
 }

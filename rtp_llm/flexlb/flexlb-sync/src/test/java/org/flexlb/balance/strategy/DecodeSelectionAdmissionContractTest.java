@@ -1,6 +1,7 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -55,7 +56,7 @@ class DecodeSelectionAdmissionContractTest {
                     fixture.assertSelectionHasNoReservation(requestId, queuedUsage, freeUsage);
                     WorkerEndpoint.GenerationPin pin = selected.generationPin();
                     DecodeEndpoint endpoint = (DecodeEndpoint) pin.endpoint();
-                    DecodeEndpoint.ReservationHandle reservation = endpoint.reserve(
+                    DecodeResources.ReservationHandle reservation = endpoint.reserve(
                             pin,
                             request.requestId(),
                             request.hardKvTokens(),
@@ -71,7 +72,7 @@ class DecodeSelectionAdmissionContractTest {
                         assertEquals(PROMPT_TOKENS, reserved.kvTokens());
                         assertEquals(EXPECTED_TOKENS, reserved.expectedKvTokens());
                     } finally {
-                        endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                        endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
                     }
                 }
                 assertEquals(queuedUsage, fixture.queued.routingView().placementUsage());
@@ -124,7 +125,7 @@ class DecodeSelectionAdmissionContractTest {
         private final DecodeSelector strategy;
         private final DecodeEndpoint queued;
         private final DecodeEndpoint free;
-        private final DecodeEndpoint.AdmissionCapacity limits;
+        private final DecodeResources.AdmissionCapacity limits;
 
         private Fixture(Policy policy, CapacityDimension dimension) {
             config.getRouter().getRoles().getDecode().getCostEstimator().setExpression("0");
@@ -144,7 +145,7 @@ class DecodeSelectionAdmissionContractTest {
             var availability = config.getRouter().getRoles().getDecode().getAvailability();
             availability.setMaxEngineRequests(maxRequests == 0L ? null : maxRequests);
             availability.setMaxKvUsagePercent(90L);
-            limits = new DecodeEndpoint.AdmissionCapacity(maxRequests, 90L);
+            limits = new DecodeResources.AdmissionCapacity(maxRequests, 90L);
             ConfigService configs = mock(ConfigService.class);
             when(configs.loadBalanceConfig()).thenReturn(config);
             endpoints = StrategyTestSupport.endpointRegistry(configs);
@@ -185,7 +186,7 @@ class DecodeSelectionAdmissionContractTest {
         }
 
         private void assertSelectionHasNoReservation(long requestId,
-                DecodeEndpoint.CapacityUsage queuedUsage, DecodeEndpoint.CapacityUsage freeUsage) {
+                DecodeResources.CapacityUsage queuedUsage, DecodeResources.CapacityUsage freeUsage) {
             assertEquals(queuedUsage, queued.routingView().placementUsage());
             assertEquals(freeUsage, free.routingView().placementUsage());
             assertFalse(queued.resourceSnapshot().isQueued(requestId));

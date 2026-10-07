@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import org.flexlb.balance.PlacementResult;
@@ -145,12 +146,12 @@ class TransientCapacityQueueContractTest {
             FlexlbConfig config,
             long requestId) throws Exception {
         try (Fixture fixture = new Fixture(null, config)) {
-            DecodeEndpoint.ReservationHandle settled;
+            DecodeResources.ReservationHandle settled;
             try (WorkerEndpoint.GenerationPin pin =
                          fixture.decodeEndpoint.tryPinGeneration()) {
                 settled = fixture.decodeEndpoint.reserve(pin, requestId, 128L, 136L, 50, null);
             }
-            assertTrue(fixture.decodeEndpoint.release(settled, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
+            assertTrue(fixture.decodeEndpoint.release(settled, DecodeResources.ReleaseReason.COUNTERPART_FINISHED).released());
             assertEquals(0, fixture.totalDecodeReservations());
 
             fixture.runtime.applyStatus(
@@ -803,7 +804,7 @@ class TransientCapacityQueueContractTest {
             assertEquals(2, delivered.size());
             for (RequestRoute item : delivered) {
                 assertTrue(item != null);
-                assertTrue(fixture.prefillEndpoint.releaseCommittedItem(item));
+                assertTrue(fixture.prefillEndpoint.releaseRequest(item));
             }
 
             fixture.runtime.applyStatus(

@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -95,27 +96,27 @@ class DecodeSelectorTest {
         EndpointRegistry registry = decodeRegistry();
         try {
             DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
-            DecodeEndpoint.AdmissionSummary empty = endpoint.admissionSummary();
+            DecodeResources.AdmissionSummary empty = endpoint.admissionSummary();
             Assertions.assertSame(empty, endpoint.admissionSummary());
             try (var pin = endpoint.tryPinGeneration()) {
                 var reservation = endpoint.reserve(pin, 42L, 128L, 256L, 70, null);
                 var queued = endpoint.admissionSummary();
                 Assertions.assertNotSame(empty, queued);
                 Assertions.assertSame(queued, endpoint.admissionSummary());
-                Assertions.assertEquals(new DecodeEndpoint.CapacityRelease(1L, 128L, 256L),
+                Assertions.assertEquals(new DecodeResources.CapacityRelease(1L, 128L, 256L),
                         queued.placementOccupancy(70));
-                Assertions.assertEquals(DecodeEndpoint.CapacityRelease.NONE, queued.engineOccupancy(70));
+                Assertions.assertEquals(DecodeResources.CapacityRelease.NONE, queued.engineOccupancy(70));
 
-                var acquired = endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.AdmissionCapacity(10L, 100L));
-                Assertions.assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+                var acquired = endpoint.acquireDispatchPermit(reservation, new DecodeResources.AdmissionCapacity(10L, 100L));
+                Assertions.assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
                 var dispatching = endpoint.admissionSummary();
                 Assertions.assertNotSame(queued, dispatching);
                 Assertions.assertEquals(queued.placementOccupancy(70), dispatching.engineOccupancy(70));
-                Assertions.assertEquals(DecodeEndpoint.CapacityRelease.NONE, queued.engineOccupancy(70),
+                Assertions.assertEquals(DecodeResources.CapacityRelease.NONE, queued.engineOccupancy(70),
                         "a published summary must remain immutable after ownership changes");
                 Assertions.assertTrue(acquired.permit().release());
-                endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-                Assertions.assertEquals(DecodeEndpoint.CapacityRelease.NONE, endpoint.admissionSummary().placementOccupancy(70));
+                endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+                Assertions.assertEquals(DecodeResources.CapacityRelease.NONE, endpoint.admissionSummary().placementOccupancy(70));
             }
         } finally {
             registry.close();
@@ -143,13 +144,13 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.2", 10_000, 9_000);
         EndpointRegistry registry = decodeRegistry();
         EndpointRegistry actual = registry;
-        Map<String, DecodeEndpoint.DecodeRoutingView> views = new HashMap<>();
-        for (DecodeEndpoint.DecodeRoutingView view
+        Map<String, DecodeResources.DecodeRoutingView> views = new HashMap<>();
+        for (DecodeResources.DecodeRoutingView view
                 : actual.decodeRoutingSnapshot(null)) {
             views.put(view.address(), view);
         }
-        DecodeEndpoint.DecodeRoutingView stale = views.get("127.0.0.1:8080");
-        DecodeEndpoint.DecodeRoutingView replacement =
+        DecodeResources.DecodeRoutingView stale = views.get("127.0.0.1:8080");
+        DecodeResources.DecodeRoutingView replacement =
                 views.get("127.0.0.2:8080");
         WorkerEndpoint.GenerationPin replacementPin =
                 Mockito.mock(WorkerEndpoint.GenerationPin.class);
@@ -511,7 +512,7 @@ class DecodeSelectorTest {
         reserveQueued(endpoint, 2L, 400, 700, 50);
 
         Assertions.assertTrue(endpoint.routingView().realKvUsed()
-                > new DecodeEndpoint.AdmissionCapacity(0L, 90L).kvBudget(endpoint.routingView().totalKv()));
+                > new DecodeResources.AdmissionCapacity(0L, 90L).kvBudget(endpoint.routingView().totalKv()));
         Assertions.assertEquals(0L, endpoint.routingView().engineFacingKvUsed());
 
         DecodeSelector strategy = new DecodeSelector(

@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -144,9 +145,7 @@ public final class DeliveryStrategyTestSupport {
         private final PrefillEndpoint prefill = Mockito.mock(PrefillEndpoint.class);
         private final PrefillEndpoint.RouteCommitAdmission routeCommit =
                 Mockito.mock(PrefillEndpoint.RouteCommitAdmission.class);
-        private final DecodeEndpoint decode = Mockito.mock(DecodeEndpoint.class);
-        private final Map<RequestRoute, PrefillState.RouteReservation>
-                routeReservations = new IdentityHashMap<>();
+        private final DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
         private final Map<RequestRoute, DecodeEndpoint.EngineDispatchPermit>
                 permits = new IdentityHashMap<>();
         private final Map<Long, RequestRoute> itemsByRequestId =
@@ -163,34 +162,29 @@ public final class DeliveryStrategyTestSupport {
                     .thenReturn(unavailable);
             Mockito.when(prefill.tryBeginRouteCommitAdmission())
                     .thenReturn(routeCommit);
-            Mockito.when(routeCommit.commitLocked(
-                            Mockito.anyList(), Mockito.anyList()))
+            Mockito.when(routeCommit.commitQueuedLocked(
+                            Mockito.anyList(), Mockito.any(long[].class)))
                     .thenAnswer(invocation -> committedHandoffs(1).getFirst());
             Mockito.when(prefill.reserveBatch(
                             Mockito.any(), Mockito.anyLong(), Mockito.anyInt()))
                     .thenAnswer(invocation -> reserveBatch());
             Mockito.when(decode.acquireDispatchPermit(Mockito.any(), Mockito.any()))
                     .thenAnswer(invocation -> acquirePermit(
-                            ((DecodeEndpoint.ReservationHandle) invocation.getArgument(0)).requestId()));
+                            ((DecodeResources.ReservationHandle) invocation.getArgument(0)).requestId()));
         }
 
         void bind(RequestRoute... items) {
             for (RequestRoute item : items) {
                 long requestId = item.requestId();
                 itemsByRequestId.put(requestId, item);
-                DecodeEndpoint.ReservationHandle reservation = Mockito.mock(
-                        DecodeEndpoint.ReservationHandle.class);
+                DecodeResources.ReservationHandle reservation = Mockito.mock(
+                        DecodeResources.ReservationHandle.class);
                 Mockito.when(reservation.requestId()).thenReturn(requestId);
-                PrefillState.RouteReservation routeReservation = Mockito.mock(
-                        PrefillState.RouteReservation.class);
-                routeReservations.put(item, routeReservation);
                 Mockito.when(item.prefillEp()).thenReturn(prefill);
                 Mockito.when(item.requiresRouteReservation()).thenReturn(true);
-                Mockito.when(prefill.prepareRoute(Mockito.same(item), Mockito.anyLong()))
-                        .thenReturn(routeReservation);
                 RequestRequirements binding = new RequestRequirements(
                         requestId, item.priority(), item.seqLen(),
-                        new DecodeEndpoint.AdmissionCapacity(0L, 100L),
+                        new DecodeResources.AdmissionCapacity(0L, 100L),
                         RequestRequirements.DecodeMode.WAIT_AT_PLACEMENT,
                         DecodeCostFormula.parse("kvcache_used_ratio"), item.seqLen(), null, List.of(), 0L, true, 0);
                 Mockito.when(item.requirements()).thenReturn(binding);
@@ -205,10 +199,6 @@ public final class DeliveryStrategyTestSupport {
 
         void precedingWork(WorkSnapshot prediction) {
             precedingWork = prediction;
-        }
-
-        PrefillState.RouteReservation routeReservation(RequestRoute item) {
-            return routeReservations.get(item);
         }
 
         PrefillEndpoint prefill() {
@@ -233,10 +223,6 @@ public final class DeliveryStrategyTestSupport {
 
         private PrefillState.ReservationResult<PrefillState.BatchReservation>
                 reserveBatch() {
-            org.mockito.Mockito.doAnswer(invocation -> {
-                ((PrefillState.Reservation) invocation.getArgument(0)).close();
-                return null;
-            }).when(prefill).rollbackReservation(org.mockito.ArgumentMatchers.any());
             batchReservation = Mockito.mock(PrefillState.BatchReservation.class);
             Mockito.when(batchReservation.commitLocked(
                             Mockito.anyList(), Mockito.anyLong()))
@@ -249,19 +235,19 @@ public final class DeliveryStrategyTestSupport {
                 long requestId) {
             if (permitAttempt++ == rejectPermitAt) {
                 return new DecodeEndpoint.EngineDispatchPermitAcquisition(
-                        DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
+                        DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
                         null);
             }
             RequestRoute item = itemsByRequestId.get(requestId);
             DecodeEndpoint.EngineDispatchPermit permit = Mockito.mock(
                     DecodeEndpoint.EngineDispatchPermit.class);
             Mockito.when(permit.dispatch()).thenReturn(
-                    DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED);
+                    DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED);
             if (item != null) {
                 permits.put(item, permit);
             }
             return new DecodeEndpoint.EngineDispatchPermitAcquisition(
-                    DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                    DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
                     permit);
         }
 

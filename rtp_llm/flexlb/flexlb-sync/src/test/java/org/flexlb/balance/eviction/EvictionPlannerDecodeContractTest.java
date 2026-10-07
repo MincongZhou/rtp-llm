@@ -1,10 +1,11 @@
 package org.flexlb.balance.eviction;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.dao.master.WorkerStatus;
 import static org.flexlb.balance.scheduler.SchedulingTestConfig.decodeRequirements;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.enums.DecodeTaskPhase;
@@ -87,21 +88,21 @@ class EvictionPlannerDecodeContractTest {
             long realKvAvailable, long realKvTotal,
             int engineLoad, long concurrencyLimit,
             List<DecodeRequestView> accepted) {
-        var usage = new DecodeEndpoint.CapacityUsage(engineLoad, realKvTotal, realKvAvailable,
+        var usage = new DecodeResources.CapacityUsage(engineLoad, realKvTotal, realKvAvailable,
                 0L, Math.max(0L, realKvTotal - realKvAvailable));
         WorkerStatus status = WorkerStatus.createDiscovered(
                 org.flexlb.dao.route.RoleType.DECODE, "default", "decode-a", 8080, 8081, "test");
-        var routing = new DecodeEndpoint.DecodeRoutingView("decode-a", status.getGenerationId(),
+        var routing = new DecodeResources.DecodeRoutingView("decode-a", status.getGenerationId(),
                 status.topologySnapshot(), status.committedWorkerStatus(), 0L, engineLoad, engineLoad,
                 usage, usage, 0L, 0L);
         var requests = accepted.stream().collect(java.util.stream.Collectors.toMap(
                 DecodeRequestView::requestId, java.util.function.Function.identity()));
-        return new EndpointFixture(new DecodeEndpoint.AdmissionCapacity(concurrencyLimit, 100L),
-                new DecodeEndpoint.ResourceSnapshot(routing, requests, 0, 0));
+        return new EndpointFixture(new DecodeResources.AdmissionCapacity(concurrencyLimit, 100L),
+                new DecodeResources.ResourceSnapshot(routing, requests, 0, 0));
     }
 
-    private record EndpointFixture(DecodeEndpoint.AdmissionCapacity capacity,
-                                   DecodeEndpoint.ResourceSnapshot snapshot) { }
+    private record EndpointFixture(DecodeResources.AdmissionCapacity capacity,
+                                   DecodeResources.ResourceSnapshot snapshot) { }
 
     private static DecodeEvictionProposal plan(
             int priority, long hardKvTokens, EndpointFixture ep,
@@ -154,7 +155,7 @@ class EvictionPlannerDecodeContractTest {
         assertEquals(cost, proposal.priorityHarmProfile().totalCost());
         assertEquals(PriorityHarmProfile.builder().add(30, BigInteger.valueOf(cost)).build(),
                 proposal.priorityHarmProfile());
-        DecodeEndpoint.CapacityRelease release = DecodeEndpoint.CapacityRelease.NONE;
+        DecodeResources.CapacityRelease release = DecodeResources.CapacityRelease.NONE;
         for (DecodeRequestView victim : proposal.victims()) {
             release = release.plus(victim.placementRelease());
         }

@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -68,14 +69,14 @@ class PrefillCompletionProjectionTest {
                     RoleType.DECODE, "g1", "127.0.0.2", 8080, 8081, "test");
             DecodeEndpoint decode = new DecodeEndpoint(decodeWorker, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(projector));
             applyStatus(decode, decodeStatus(1L, Map.of()));
-            DecodeEndpoint.ReservationHandle reservation;
-            var capacity = new DecodeEndpoint.AdmissionCapacity(10L, 90L);
+            DecodeResources.ReservationHandle reservation;
+            var capacity = new DecodeResources.AdmissionCapacity(10L, 90L);
             try (var pin = decode.tryPinGeneration()) {
                 reservation = decode.reserve(pin, 101L, 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
                 var acquisition = decode.acquireDispatchPermit(reservation, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
-                assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+                assertEquals(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                         acquisition.permit().dispatch());
             }
             var context = RequestProtocolTestSupport.context(config, 101L);
@@ -138,14 +139,25 @@ class PrefillCompletionProjectionTest {
                 var waiting = decode.reserve(pin, 102L, 16L, 32L, 50, capacity);
                 assertNotNull(waiting);
                 var acquisition = decode.acquireDispatchPermit(waiting, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+                assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
                 assertTrue(acquisition.permit().release());
-                decode.release(waiting, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                decode.release(waiting, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             }
 
             applyStatus(prefill, status(4L, Map.of(), Map.of("101", task)));
             requests.runtime.continuations().awaitIdle();
             assertEquals(0L, prefill.observedRequestCount());
+
+            var decodeFinished = decodeStatus(3L, Map.of());
+            decodeFinished.setFinishedTaskInfo(Map.of("101", task));
+            decodeFinished.setLatestFinishedVersion(1L);
+            applyStatus(decode, decodeFinished);
+            requests.runtime.continuations().awaitIdle();
+            assertEquals(0L, decode.routingView().inflightExpectedKv());
+            assertEquals(0, decode.routingView().engineCapacityUsed());
+            org.junit.jupiter.api.Assertions.assertNull(requests.findRequestContext(101L),
+                    "the exact Decode terminal must finish the retained lifecycle before shutdown");
+            assertTrue(future.join().isSuccess(), "resource completion cannot replace the published response");
         } finally {
             runtime.shutdown();
         }

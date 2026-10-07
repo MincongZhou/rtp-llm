@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
@@ -55,7 +56,7 @@ class QueuedDecodeWithdrawalTest {
     private AbstractRequestScheduler registry;
     private QueuedRequestScheduler queue;
     private DecodeEndpoint decode;
-    private final DecodeEndpoint.AdmissionCapacity capacity = new DecodeEndpoint.AdmissionCapacity(1, 95);
+    private final DecodeResources.AdmissionCapacity capacity = new DecodeResources.AdmissionCapacity(1, 95);
 
     @BeforeEach
     void setUp() {
@@ -82,7 +83,7 @@ class QueuedDecodeWithdrawalTest {
         context.setSchedulingMetadata(SchedulingMetadata.explicit(30, System.currentTimeMillis() + 60_000L));
         var future = RequestProtocolTestSupport.register(registry, context);
         context.setFuture(future);
-        DecodeEndpoint.ReservationHandle reservation;
+        DecodeResources.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
             reservation = decode.reserve(pin, id, 16, 16, 30, capacity);
         }
@@ -136,7 +137,7 @@ class QueuedDecodeWithdrawalTest {
         decodeStatus.setRequestId(100);
         decodeStatus.setServerIp("127.0.0.1");
         decodeStatus.setHttpPort(8000);
-        var replacement = new java.util.concurrent.atomic.AtomicReference<DecodeEndpoint.ReservationHandle>();
+        var replacement = new java.util.concurrent.atomic.AtomicReference<DecodeResources.ReservationHandle>();
         doAnswer(call -> {
             replacement.set(decode.reservationHandle(100));
             assertNotNull(replacement.get());
@@ -202,8 +203,8 @@ class QueuedDecodeWithdrawalTest {
             assertNull(decode.reserve(pin, 1, 16, 16, 30, capacity),
                     "victim cannot reclaim capacity already assigned to the incoming request");
         }
-        decode.release(decode.reservationHandle(100), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-        DecodeEndpoint.ReservationHandle second;
+        decode.release(decode.reservationHandle(100), DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        DecodeResources.ReservationHandle second;
         try (var pin = decode.tryPinGeneration()) { second = decode.reserve(pin, 1, 16, 16, 30, capacity); }
         var next = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(item.ctx()), new Response(), item.prefill(), item.decode(),
                 item.prefillEp(), decode, second, item.enqueuedAtMs() + 1000);
@@ -214,7 +215,7 @@ class QueuedDecodeWithdrawalTest {
             assertNotNull(admission);
             assertTrue((registry.commitRoute(next, RequestProtocolTestSupport.publication(() -> true)) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
         }
-        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0));
+        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeResources.WorkerStatusFact.terminal(item.decodeReservation(), 0));
         assertSame(next, registry.findRequestContext(1).activeRoute());
         assertFalse(item.future().isDone(), "old reservation evidence must not terminate the new route");
     }
@@ -264,7 +265,7 @@ class QueuedDecodeWithdrawalTest {
     @Test
     void failedReplacementDoesNotRemoveOrRequeueVictim() {
         var item = queued(5);
-        var stale = new DecodeEndpoint.ReservationHandle(item.decodeReservation().endpointGenerationId(),
+        var stale = new DecodeResources.ReservationHandle(item.decodeReservation().endpointGenerationId(),
                 5, item.decodeReservation().reservationToken() + 1);
         assertNull(org.flexlb.balance.scheduler.SchedulerTestSupport.eviction(registry).replaceQueuedDecodeReservations(decode, List.of(stale), 100, 16, 16, 80, capacity));
         assertSame(item, registry.findRequestContext(5).activeRoute());
@@ -284,7 +285,7 @@ class QueuedDecodeWithdrawalTest {
     @Test
     void laterVictimConflictReleasesEarlierWithdrawalClaim() {
         var item = queued(7);
-        var missing = new DecodeEndpoint.ReservationHandle(
+        var missing = new DecodeResources.ReservationHandle(
                 item.decodeReservation().endpointGenerationId(), 999, 1);
         assertNull(org.flexlb.balance.scheduler.SchedulerTestSupport.eviction(registry).replaceQueuedDecodeReservations(decode,
                 List.of(item.decodeReservation(), missing), 100, 16, 16, 80, capacity));
@@ -309,12 +310,12 @@ class QueuedDecodeWithdrawalTest {
     @Test
     void failedWithdrawalDoesNotReleaseReusedRequestId() throws Exception {
         var item = queued(8);
-        var replacement = new java.util.concurrent.atomic.AtomicReference<DecodeEndpoint.ReservationHandle>();
+        var replacement = new java.util.concurrent.atomic.AtomicReference<DecodeResources.ReservationHandle>();
         var failure = new IllegalStateException("injected requeue failure after reservation replacement");
         doAnswer(call -> {
             var original = decode.reservationHandle(100);
             assertNotNull(original);
-            decode.release(original, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            decode.release(original, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             try (var pin = decode.tryPinGeneration()) {
                 replacement.set(decode.reserve(pin, 100, 16, 16, 80, capacity));
             }
@@ -327,7 +328,7 @@ class QueuedDecodeWithdrawalTest {
         assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
         assertEquals(replacement.get(), decode.reservationHandle(100));
         assertEquals(1, decode.routingView().totalLoad());
-        decode.release(replacement.get(), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        decode.release(replacement.get(), DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
     }
 
     @Test
@@ -362,12 +363,12 @@ class QueuedDecodeWithdrawalTest {
     @ValueSource(strings = {"foreignEndpoint", "foreignRequest", "foreignGeneration", "foreignToken", "equalPriority", "lowerPriority"})
     void withdrawalEligibilityRejectsEveryForeignIdentityWithoutTouchingResources(String mismatch) {
         RequestRoute item = queued(91L);
-        DecodeEndpoint source = mismatch.equals("foreignEndpoint") ? mock(DecodeEndpoint.class) : decode;
+        DecodeEndpoint source = mismatch.equals("foreignEndpoint") ? RequestProtocolTestSupport.decodeEndpoint() : decode;
         var reservation = item.decodeReservation();
         var attempted = switch (mismatch) {
-            case "foreignRequest" -> new DecodeEndpoint.ReservationHandle(reservation.endpointGenerationId(), 92L, reservation.reservationToken());
-            case "foreignGeneration" -> new DecodeEndpoint.ReservationHandle(reservation.endpointGenerationId() + 1, 91L, reservation.reservationToken());
-            case "foreignToken" -> new DecodeEndpoint.ReservationHandle(reservation.endpointGenerationId(), 91L, reservation.reservationToken() + 1);
+            case "foreignRequest" -> new DecodeResources.ReservationHandle(reservation.endpointGenerationId(), 92L, reservation.reservationToken());
+            case "foreignGeneration" -> new DecodeResources.ReservationHandle(reservation.endpointGenerationId() + 1, 91L, reservation.reservationToken());
+            case "foreignToken" -> new DecodeResources.ReservationHandle(reservation.endpointGenerationId(), 91L, reservation.reservationToken() + 1);
             default -> reservation;
         };
         int priority = mismatch.equals("equalPriority") ? 30 : mismatch.equals("lowerPriority") ? 29 : 80;

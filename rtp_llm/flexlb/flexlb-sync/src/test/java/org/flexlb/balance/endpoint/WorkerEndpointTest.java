@@ -70,7 +70,7 @@ class WorkerEndpointTest {
         registerBatch(1L, 500, first);
         registerBatch(2L, 300, second);
 
-        assertTrue(endpoint.releaseCommittedItem(first));
+        assertTrue(endpoint.releaseRequest(first));
         assertCommittedWorkNear(300);
     }
 
@@ -79,7 +79,7 @@ class WorkerEndpointTest {
         RequestRoute committed = item(100L, 1000);
         registerBatch(1L, 500, committed);
         RequestRoute unknown = item(999L, 1000);
-        assertTrue(!endpoint.releaseCommittedItem(unknown));
+        assertTrue(!endpoint.releaseRequest(unknown));
         assertCommittedWorkNear(500);
     }
 
@@ -87,8 +87,8 @@ class WorkerEndpointTest {
     void releaseBatch_neverGoesNegative() {
         RequestRoute item = item(100L, 1000);
         registerBatch(1L, 100, item);
-        assertTrue(endpoint.releaseCommittedItem(item));
-        assertTrue(!endpoint.releaseCommittedItem(item));
+        assertTrue(endpoint.releaseRequest(item));
+        assertTrue(!endpoint.releaseRequest(item));
         assertEquals(0, endpoint.getLoadMetric().orElseThrow());
     }
 
@@ -165,7 +165,7 @@ class WorkerEndpointTest {
         RequestRoute failed = item(101L, 2000);
         RequestRoute third = item(102L, 3000);
         registerBatch(5L, 9999, first, failed, third);
-        assertTrue(endpoint.releaseCommittedItem(failed));
+        assertTrue(endpoint.releaseRequest(failed));
 
         assertEquals(2, endpoint.observedRequestCount());
     }
@@ -174,7 +174,7 @@ class WorkerEndpointTest {
     void repackBatch_allFailed_removesBatch() {
         RequestRoute item = item(100L, 1000);
         registerBatch(5L, 500, item);
-        assertTrue(endpoint.releaseCommittedItem(item));
+        assertTrue(endpoint.releaseRequest(item));
 
         assertEquals(0, endpoint.ownershipStats().batchCount());
         assertEquals(0, endpoint.getLoadMetric().orElseThrow());

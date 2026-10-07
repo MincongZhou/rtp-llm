@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -23,7 +24,7 @@ public final class RequestRoute implements Prioritized, GroupPlanner.Input {
     public static RequestRoute create(
             BalanceContext context, Response response, ServerStatus prefill, ServerStatus decode,
             PrefillEndpoint prefillEndpoint, DecodeEndpoint decodeEndpoint,
-            DecodeEndpoint.ReservationHandle decodeReservation, long enqueuedAtMs) {
+            DecodeResources.ReservationHandle decodeReservation, long enqueuedAtMs) {
         Objects.requireNonNull(context, "context");
         RequestRequirements frozenDecode = Objects.requireNonNull(context.getRequirements(), "registered request inputs");
         if (decodeReservation != null && decodeReservation.requestId() != frozenDecode.requestId()) {
@@ -53,11 +54,11 @@ public final class RequestRoute implements Prioritized, GroupPlanner.Input {
     private final PrefillEndpoint prefillEp;
     private final ServerStatus decode;
     private final DecodeEndpoint decodeEp;
-    private final DecodeEndpoint.ReservationHandle decodeReservation;
+    private final DecodeResources.ReservationHandle decodeReservation;
     private final long hitCache;
     RequestRoute(BalanceContext ctx, Response routeResponse, ServerStatus prefill,
                      PrefillEndpoint prefillEp, ServerStatus decode,
-                     DecodeEndpoint decodeEp, DecodeEndpoint.ReservationHandle decodeReservation) {
+                     DecodeEndpoint decodeEp, DecodeResources.ReservationHandle decodeReservation) {
         this.ctx = ctx;
         this.routeResponse = routeResponse;
         this.prefill = prefill;
@@ -78,7 +79,7 @@ public final class RequestRoute implements Prioritized, GroupPlanner.Input {
     public ServerStatus decode() { return decode; }
     public PrefillEndpoint prefillEp() { return prefillEp; }
     public DecodeEndpoint decodeEp() { return decodeEp; }
-    public DecodeEndpoint.ReservationHandle decodeReservation() {
+    public DecodeResources.ReservationHandle decodeReservation() {
         return decodeReservation;
     }
 

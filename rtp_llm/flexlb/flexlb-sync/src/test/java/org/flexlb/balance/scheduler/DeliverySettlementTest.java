@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -73,17 +74,13 @@ class DeliverySettlementTest {
                 cancellations.computeIfAbsent(call.getArgument(1), ignored -> new java.util.concurrent.CompletableFuture<>()));
         ledger = new DeliverySettlementTestSupport();
         prefill = mock(PrefillEndpoint.class);
-        when(prefill.releaseCommittedItem(any())).thenAnswer(invocation -> {
+        when(prefill.releaseRequest(any())).thenAnswer(invocation -> {
             RequestRoute item = invocation.getArgument(0);
             BalanceContext requestContext = registry.findRequestContext(item.requestId());
             assertTrue(requestContext == null || !Thread.holdsLock(requestContext),
                     "endpoint accounting must run outside the context monitor");
-            return ledger.prefill.terminalizeCommittedItem(item);
+            return org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(ledger.prefill, item);
         });
-        doAnswer(invocation -> {
-            prefill.releaseCommittedItem(invocation.getArgument(0));
-            return null;
-        }).when(prefill).settleFailedRequest(any());
     }
 
     @AfterEach
@@ -106,8 +103,8 @@ class DeliverySettlementTest {
         cleaned(member);
         assertOccupancy(0, 0);
         assertFalse(registry.requests.isCurrent(member.requestContext()));
-        verify(member.item().decodeEp()).release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP);
-        verify(member.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.NOT_SENT));
+        verify(member.item().decodeEp()).release(member.item().decodeReservation(), DecodeResources.ReleaseReason.REMOTE_CLEANUP);
+        verify(member.item().decodeEp(), never()).release(any(), eq(DecodeResources.ReleaseReason.NOT_SENT));
     }
 
     @ParameterizedTest
@@ -115,7 +112,7 @@ class DeliverySettlementTest {
     void prefillFenceCannotReleaseARealDecodeReservation(boolean observed) throws Exception {
         var decode = spy(new DecodeEndpoint(WorkerStatus.createDiscovered(
                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), registry.requests));
-        DecodeEndpoint.ReservationHandle reservation;
+        DecodeResources.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) { reservation = decode.reserveUnqueued(pin, 2L, 1L, 1L, 50); }
         Member member = member(2L, 12L, decode, reservation);
         ledger.commit(12L, List.of(member.item()));
@@ -209,14 +206,14 @@ class DeliverySettlementTest {
     void failedLocalCleanupRetainsOwnershipAndRecordsFailureWithoutBusyRetry() throws Exception {
         Member member = member(60L, 60L);
         ledger.commit(60L, List.of(member.item()));
-        doThrow(new IllegalStateException("injected endpoint failure")).when(prefill).releaseCommittedItem(member.item());
+        doThrow(new IllegalStateException("injected endpoint failure")).when(prefill).releaseRequest(member.item());
         reject(member);
         cleaned(member);
         assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(1, 1);
         assertTrue(registry.requests.isCurrent(member.requestContext()));
         org.junit.jupiter.api.Assertions.assertNotNull(SchedulerTestSupport.failure(registry));
-        verify(prefill, after(150).times(1)).releaseCommittedItem(member.item());
+        verify(prefill, after(150).times(1)).releaseRequest(member.item());
     }
 
     @Test
@@ -248,7 +245,7 @@ class DeliverySettlementTest {
     void rejectionCannotFinishPreemptionBeforeCleanupProof(PreemptionCancelPhase phase) throws Exception {
         Member member = member(90L, 90L);
         ledger.commit(90L, List.of(member.item()));
-        PreemptionRegistration preemption = member.requestContext().tryInstallPreemption(90L, 91L, "priority victim");
+        PreemptionRegistration preemption = member.requestContext().tryInstallPreemption(member.item().decodeReservation(), 91L, "priority victim");
         assertTrue(registry.updatePreemption(preemption, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         if (phase != PreemptionCancelPhase.CANCEL_IN_FLIGHT) { assertTrue(registry.updatePreemption(preemption, phase)); }
         reject(member);
@@ -266,8 +263,8 @@ class DeliverySettlementTest {
         ledger.commit(99112L, List.of(member.item()));
         CountDownLatch cleanupEntered = new CountDownLatch(1);
         CountDownLatch releaseCleanup = new CountDownLatch(1);
-        doAnswer(call -> { cleanupEntered.countDown(); await(releaseCleanup); prefill.releaseCommittedItem(call.getArgument(0)); return null; })
-                .when(prefill).settleFailedRequest(member.item());
+        doAnswer(call -> { cleanupEntered.countDown(); await(releaseCleanup); return org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(ledger.prefill, call.getArgument(0)); })
+                .when(prefill).releaseRequest(member.item());
         var callback = Executors.newSingleThreadExecutor();
         try {
             callback.submit(() -> member.claim().complete(DeliveryResult.prefillRejected(new IllegalStateException("prepare rejected")))).get(1, TimeUnit.SECONDS);
@@ -289,7 +286,7 @@ class DeliverySettlementTest {
     void normalAckPrefillAndDecodePermutationsSettleRealLedgersExactlyOnce(String order) throws Exception {
         var decode = spy(new DecodeEndpoint(WorkerStatus.createDiscovered(
                 RoleType.DECODE, null, "127.0.0.1", 8180, 8181, null), registry.requests));
-        DecodeEndpoint.ReservationHandle reservation;
+        DecodeResources.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) { reservation = decode.reserveUnqueued(pin, 70L, 1L, 2L, 50); }
         Member member = member(70L, 70L, decode, reservation);
         ledger.commit(70L, List.of(member.item()));
@@ -329,14 +326,17 @@ class DeliverySettlementTest {
     }
 
     private Member member(long id, long batchId) {
-        return member(id, batchId, mock(DecodeEndpoint.class), new DecodeEndpoint.ReservationHandle(1L, id, id));
+        return member(id, batchId, RequestProtocolTestSupport.decodeEndpoint(), new DecodeResources.ReservationHandle(1L, id, id));
     }
 
-    private Member member(long id, long batchId, DecodeEndpoint decode, DecodeEndpoint.ReservationHandle reservation) {
+    private Member member(long id, long batchId, DecodeEndpoint decode, DecodeResources.ReservationHandle reservation) {
         var context = RequestProtocolTestSupport.context(config, id);
         var future = RequestProtocolTestSupport.register(registry, context);
         context.setFuture(future);
-        var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null,
+        var prefillServer = new org.flexlb.dao.loadbalance.ServerStatus();
+        prefillServer.setServerIp("127.0.0.1");
+        prefillServer.setGrpcPort(8090);
+        var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), prefillServer, null,
                 prefill, decode, reservation, System.currentTimeMillis());
         RequestProtocolTestSupport.bindRoute(registry, new RequestProtocolTestSupport.Registered(item, future));
         var claim = RequestProtocolTestSupport.claimBatch(registry, item, batchId, () -> true);
@@ -357,7 +357,7 @@ class DeliverySettlementTest {
     }
 
     private void decodeFinished(Member member) {
-        RequestProtocolTestSupport.observeDecode(registry, member.requestContext(), member.item().decodeEp(), DecodeEndpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 601L));
+        RequestProtocolTestSupport.observeDecode(registry, member.requestContext(), member.item().decodeEp(), DecodeResources.WorkerStatusFact.terminal(member.item().decodeReservation(), 601L));
     }
 
     private void assertOccupancy(int batches, int members) {

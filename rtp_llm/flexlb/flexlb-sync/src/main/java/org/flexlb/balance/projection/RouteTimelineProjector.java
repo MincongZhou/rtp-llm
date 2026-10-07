@@ -1,6 +1,7 @@
 package org.flexlb.balance.projection;
 
 import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.planner.GroupingPolicy;
 import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
@@ -134,6 +135,34 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
                     incomingPrefillMs,
                     RouteProjection.Candidate.InitialHeadDisposition.NONE,
                     "SERIAL_FROZEN_DIRECT");
+        }
+        // An empty queue has no membership to merge or decision group to build.
+        // Invalid SINGLE constraints still go through the grouping policy's validation.
+        if (queue.activeItems().isEmpty() && queue.constraints().predictedExecutionBudgetMs() <= 0L
+                && (queue.grouping() == GroupingPolicy.FIXED_WINDOW
+                    || queue.constraints().maxRequests() == 1 && queue.constraints().collectionWindowMs() == 0L
+                        && queue.constraints().predictedExecutionBudgetMs() == 0L)) {
+            var constraints = queue.constraints();
+            if (seqLen > constraints.batchKvCapacity()) {
+                return blocked(incomingPrefillMs, RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                        "PREFILL_KV_CAPACITY");
+            }
+            long readyAtMs = projectionAtMs;
+            if (constraints.maxRequests() > 1 && !GroupPlanner.windowElapsed(enqueuedAtMs, projectionAtMs,
+                    constraints.collectionWindowMs())) {
+                readyAtMs = GroupPlanner.collectionDeadlineMs(enqueuedAtMs, constraints.collectionWindowMs());
+                if (readyAtMs < 0L) { throw new IllegalArgumentException("collection deadline must be non-negative"); }
+                if (readyAtMs >= expiresAtMs) { return unavailable("INCOMING_EXPIRED_BEFORE_DISPATCH"); }
+            }
+            try {
+                long durationMs = deliveryProjection.singletonCompletionOffsetMs(seqLen, hitCache, predictions);
+                return candidate(RouteProjection.Candidate.State.MODELED,
+                        saturatedAdd(Math.max(committedMs, elapsedFromNow(projectionAtMs, readyAtMs)), durationMs),
+                        incomingPrefillMs, RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                        "EMPTY_ACTIVE_QUEUE_SINGLETON");
+            } catch (PredictionFailure predictionFailure) {
+                return unavailable(predictionFailure.detail("SERVICE_PREDICTION_FAILED"));
+            }
         }
         GroupPlanner.Item probe = new GroupPlanner.Item(
                 requestId, priority, Long.MAX_VALUE, enqueuedAtMs,

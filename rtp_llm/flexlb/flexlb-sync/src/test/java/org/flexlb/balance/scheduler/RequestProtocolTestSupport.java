@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -30,6 +31,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Shared lifecycle primitives for scheduler contract tests.
  */
 final class RequestProtocolTestSupport {
+    static DecodeEndpoint decodeEndpoint() {
+        DecodeEndpoint endpoint = org.mockito.Mockito.mock(DecodeEndpoint.class);
+        org.mockito.Mockito.lenient().when(endpoint.release(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(DecodeResources.ReservationReleaseResult.RELEASED);
+        return endpoint;
+    }
+
     interface AdmissionCompletion extends AutoCloseable { @Override void close(); }
 
     static AdmissionCompletion finishOnExit(AdmissionHandle handle) {
@@ -175,12 +183,12 @@ final class RequestProtocolTestSupport {
     }
 
     static void observeDecode(AbstractRequestScheduler scheduler, DecodeEndpoint source,
-            DecodeEndpoint.WorkerStatusFact fact) {
+            DecodeResources.WorkerStatusFact fact) {
         observeDecode(scheduler, scheduler.findRequestContext(fact.reservation().requestId()), source, fact);
     }
 
     static void observeDecode(AbstractRequestScheduler scheduler, BalanceContext context,
-            DecodeEndpoint source, DecodeEndpoint.WorkerStatusFact fact) {
+            DecodeEndpoint source, DecodeResources.WorkerStatusFact fact) {
         if (context != null) { run(context.acceptDecodeStatus(source, fact, System.currentTimeMillis())); }
     }
 

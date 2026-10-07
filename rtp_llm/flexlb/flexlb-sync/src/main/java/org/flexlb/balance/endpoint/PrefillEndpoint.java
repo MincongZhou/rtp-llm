@@ -49,29 +49,34 @@ public class PrefillEndpoint extends WorkerEndpoint {
             this.generationHandoff = generationHandoff;
         }
 
+        /** Commit exact DIRECT preparation while acquiring the resource ownership lock. */
         public PrefillState.CommittedHandoff commit(
                 List<RequestRoute> exactItems,
                 List<PrefillState.RouteReservation> exactReservations) {
             prefillState.ownershipLock().lock();
             try {
-                return commitLocked(exactItems, exactReservations);
+                EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
+                if (exact == null) {
+                    throw new IllegalStateException("route commit no longer owns its generation handoff");
+                }
+                PrefillState.CommittedHandoff committed =
+                        prefillState.commitRouteGroupLocked(exactItems, exactReservations, exact);
+                generationHandoff = null;
+                return committed;
             } finally {
                 prefillState.ownershipLock().unlock();
             }
         }
 
-        /** Caller holds the shared Prefill ownership lock through queue validation and commit. */
-        public PrefillState.CommittedHandoff commitLocked(
-                List<RequestRoute> exactItems,
-                List<PrefillState.RouteReservation> exactReservations) {
+        /** Commit queued identities and frozen predictions while the shared ownership lock is held. */
+        public PrefillState.CommittedHandoff commitQueuedLocked(
+                List<RequestRoute> exactItems, long[] predictions) {
             EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
             if (exact == null) {
-                throw new IllegalStateException(
-                        "route commit no longer owns its generation handoff");
+                throw new IllegalStateException("route commit no longer owns its generation handoff");
             }
             PrefillState.CommittedHandoff committed =
-                    prefillState.commitRouteGroupLocked(
-                            exactItems, exactReservations, exact);
+                    prefillState.commitQueuedRoutesLocked(exactItems, predictions, exact);
             generationHandoff = null;
             return committed;
         }
@@ -457,19 +462,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.reserveUnqueuedRoute(item, predictedMs, inflightRequestLimit);
     }
 
-    public PrefillState.RouteReservation prepareRoute(RequestRoute item, long predictedMs) {
-        return prefillState.prepareRoute(item, predictedMs);
-    }
-
-    /**
-     * Exact counterpart cleanup; stale item generations are a no-op.
-     */
-    public boolean releaseCommittedItem(RequestRoute exactItem) {
-        boolean released = prefillState.terminalizeCommittedItem(exactItem);
-        if (released) { notifyCapacityAvailable(); }
-        return released;
-    }
-
     /** Preparation rollback belongs to its workflow owner; wake only after cleanup and outside State's lock. */
     public void rollbackReservation(PrefillState.Reservation reservation) {
         if (reservation == null) { return; }
@@ -483,12 +475,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
     }
 
-    /**
-     * End the exact failed member, whether still queued or committed to a batch.
-     */
-    public void settleFailedRequest(RequestRoute exactItem) {
-        removeQueued(exactItem, "REQUEST_FAILED");
-        releaseCommittedItem(exactItem);
+    /** Release the exact queued, prepared or committed request, then publish capacity outside State's lock. */
+    public boolean releaseRequest(RequestRoute exactItem) {
+        PrefillState.RequestRelease released = prefillState.releaseRequest(exactItem);
+        if (released == PrefillState.RequestRelease.NONE) { return false; }
+        try {
+            if (released == PrefillState.RequestRelease.QUEUED) { signalSchedulingInputsChanged(); }
+        } finally { notifyCapacityAvailable(); }
+        return true;
     }
 
     /** One consistent snapshot of batch, individual and total local ownership. */

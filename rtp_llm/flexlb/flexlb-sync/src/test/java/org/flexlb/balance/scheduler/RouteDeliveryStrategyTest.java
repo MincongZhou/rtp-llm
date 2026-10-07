@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.planner.GroupPlanner;
@@ -59,12 +60,12 @@ class RouteDeliveryStrategyTest {
         var status = org.flexlb.dao.master.WorkerStatus.createDiscovered(
                 org.flexlb.dao.route.RoleType.DECODE, "test", "127.0.0.1", 8000, 8001, "test");
         var endpoint = new DecodeEndpoint(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(mock(AbstractRequestScheduler.class)));
-        var capacity = new DecodeEndpoint.AdmissionCapacity(1, 100);
+        var capacity = new DecodeResources.AdmissionCapacity(1, 100);
         var counts = List.of(new AtomicInteger(), new AtomicInteger());
         var listeners = List.<Runnable>of(counts.get(0)::incrementAndGet, counts.get(1)::incrementAndGet);
         var waiters = new java.util.ArrayList<org.flexlb.balance.delivery.CapacityBoundary.Availability>();
         try {
-            DecodeEndpoint.ReservationHandle occupying;
+            DecodeResources.ReservationHandle occupying;
             try (var pin = endpoint.tryPinGeneration()) {
                 occupying = endpoint.reserve(pin, 1L, 0L, 0L, 50, null);
             }
@@ -193,7 +194,7 @@ class RouteDeliveryStrategyTest {
         if ("THROW".equals(result)) {
             when(firstPermit.dispatch()).thenThrow(failure);
         } else if (!"NO_DECODE".equals(result)) {
-            when(firstPermit.dispatch()).thenReturn(DecodeEndpoint.EngineDispatchPermitTransferStatus.valueOf(result));
+            when(firstPermit.dispatch()).thenReturn(DecodeResources.EngineDispatchPermitTransferStatus.valueOf(result));
         }
         var firstMember = new PrefillAdmissionResources.Member(
                 first, "NO_DECODE".equals(result) ? null : firstPermit);
@@ -227,16 +228,16 @@ class RouteDeliveryStrategyTest {
         var status = org.mockito.Mockito.spy(org.flexlb.dao.master.WorkerStatus.createDiscovered(
                 org.flexlb.dao.route.RoleType.DECODE, "test", "127.0.0.1", 8000, 8001, "test"));
         var endpoint = new DecodeEndpoint(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(mock(AbstractRequestScheduler.class)));
-        var capacity = new DecodeEndpoint.AdmissionCapacity(2, 100);
+        var capacity = new DecodeResources.AdmissionCapacity(2, 100);
         AtomicInteger notifications = new AtomicInteger();
         endpoint.addEngineDispatchCapacityListener(notifications::incrementAndGet);
         try {
-            DecodeEndpoint.ReservationHandle reservation;
+            DecodeResources.ReservationHandle reservation;
             try (var pin = endpoint.tryPinGeneration()) {
                 reservation = endpoint.reserve(pin, 1L, 100L, 200L, 50, null);
             }
             var acquired = endpoint.acquireDispatchPermit(reservation, capacity);
-            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+            assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
             var member = new PrefillAdmissionResources.Member(mock(RequestRoute.class), acquired.permit());
             DecodeEndpoint.EngineDispatchPermit replacement = null;
             if ("TRANSFERRED".equals(outcome)) {
@@ -261,7 +262,7 @@ class RouteDeliveryStrategyTest {
                     assertEquals(0, endpoint.resourceSnapshot().activeDispatchPermits());
                     assertEquals(1, notifications.get());
                 } else {
-                    assertTrue(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK).released());
+                    assertTrue(endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).released());
                     try (var pin = endpoint.tryPinGeneration()) {
                         reservation = endpoint.reserve(pin, 1L, 100L, 200L, 50, null);
                     }
@@ -279,7 +280,7 @@ class RouteDeliveryStrategyTest {
             assertEquals(version, endpoint.placementVersion());
             assertEquals(notified, notifications.get());
             if (replacement != null) {
-                assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED, replacement.dispatch());
+                assertEquals(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED, replacement.dispatch());
             }
         } finally {
             endpoint.close();
@@ -391,13 +392,9 @@ class RouteDeliveryStrategyTest {
                 fixture.schedulerFixture.completions());
         assertEquals(List.of(List.of(first, second)),
                 fixture.telemetry.routes());
-        verify(first.prefillEp()).prepareRoute(first, 90L);
-        verify(second.prefillEp()).prepareRoute(second, 90L);
-        verify(fixture.capabilities.routeCommit()).commitLocked(
+        verify(fixture.capabilities.routeCommit()).commitQueuedLocked(
                 org.mockito.ArgumentMatchers.eq(List.of(first, second)),
-                org.mockito.ArgumentMatchers.eq(List.of(
-                        fixture.capabilities.routeReservation(first),
-                        fixture.capabilities.routeReservation(second))));
+                org.mockito.AdditionalMatchers.aryEq(new long[]{90L, 90L}));
         verify(fixture.capabilities.permit(first)).dispatch();
         verify(fixture.capabilities.permit(second)).dispatch();
         assertEquals(1, fixture.capabilities.handoffs().size());
@@ -515,7 +512,6 @@ class RouteDeliveryStrategyTest {
                 "lost-commit", 0, OptionalLong.empty());
 
         assertEquals("NOT_COMMITTED", result);
-        verify(fixture.capabilities.routeReservation(head), never()).close();
         verify(fixture.capabilities.permit(head)).release();
         verify(fixture.capabilities.permit(head), never())
                 .dispatch();
@@ -545,9 +541,6 @@ class RouteDeliveryStrategyTest {
         for (RequestRoute item : List.of(first, second)) {
             verify(fixture.capabilities.permit(item)).release();
             verify(fixture.capabilities.permit(item), never()).dispatch();
-        }
-        for (RequestRoute item : List.of(first, second)) {
-            verify(fixture.capabilities.routeReservation(item), never()).close();
         }
         assertEquals(cleanupFails ? List.of(cleanup) : List.of(), List.of(primary.getSuppressed()));
         assertTrue(fixture.schedulerFixture.committed().isEmpty());

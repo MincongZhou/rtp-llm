@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -293,8 +294,8 @@ class RequestCompletionPublicationRaceTest {
             BalanceContext requestContext = registry.findRequestContext(501L);
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
             when(prefill.getIp()).thenReturn("prefill");
-            DecodeEndpoint decode = mock(DecodeEndpoint.class);
-            var reservation = new DecodeEndpoint.ReservationHandle(1L, 501L, 1L);
+            DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
+            var reservation = new DecodeResources.ReservationHandle(1L, 501L, 1L);
             context.setFuture(future);
             RequestRoute item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null,
                     prefill, decode, reservation, requestContext.createdAtMs());
@@ -314,8 +315,8 @@ class RequestCompletionPublicationRaceTest {
                 assertFalse(Thread.holdsLock(requestContext));
                 cleanupEntered.countDown();
                 await(resumeCleanup);
-                return DecodeEndpoint.ReservationReleaseResult.RELEASED;
-            }).when(decode).release(reservation, DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP);
+                return DecodeResources.ReservationReleaseResult.RELEASED;
+            }).when(decode).release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
             when(registry.runtime.cancelChannel().cancel(any(), anyLong(), any(), anyLong()))
                     .thenReturn(CompletableFuture.completedFuture(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED));
             assertTrue(claim.tryStartSend());
@@ -368,8 +369,8 @@ class RequestCompletionPublicationRaceTest {
             assertNull(registry.findRequestContext(501L));
             assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(501L, 0L).state());
             assertEquals(1, completions.get());
-            verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.REMOTE_CLEANUP);
-            verify(prefill).releaseCommittedItem(item);
+            verify(decode).release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
+            verify(prefill).releaseRequest(item);
         } finally {
             resumeReporting.countDown();
             resumeCleanup.countDown();

@@ -78,6 +78,6 @@ class PreemptionRegistrationTest {
     private static PreemptionRegistration registration() {
         BalanceContext context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 7L);
         context.activate(new BalanceContext.RequestFuture((completion, response, failure, interrupt) -> false));
-        return new PreemptionRegistration(context, 11L, "test preemption");
+        return new PreemptionRegistration(context, 11L, "test preemption", new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 8090));
     }
 }

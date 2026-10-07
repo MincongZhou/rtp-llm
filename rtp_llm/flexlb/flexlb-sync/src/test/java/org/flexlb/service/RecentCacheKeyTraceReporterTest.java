@@ -1,5 +1,6 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.balance.scheduler.BalanceContext;
@@ -220,7 +221,7 @@ class RecentCacheKeyTraceReporterTest {
     private static RequestRequirements inputs(long requestId, List<Long> cacheKeys,
                                              long seqLen, long cacheKeyBlockSize) {
         return new RequestRequirements(requestId, 50, seqLen,
-                new DecodeEndpoint.AdmissionCapacity(0L, 100L),
+                new DecodeResources.AdmissionCapacity(0L, 100L),
                 RequestRequirements.DecodeMode.IMMEDIATE,
                 DecodeCostFormula.parse("running_size"), seqLen, null, cacheKeys, cacheKeyBlockSize, true, 0);
     }

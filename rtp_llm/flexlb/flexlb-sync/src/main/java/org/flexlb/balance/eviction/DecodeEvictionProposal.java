@@ -1,6 +1,6 @@
 package org.flexlb.balance.eviction;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 
 import java.util.Comparator;
 import java.util.List;

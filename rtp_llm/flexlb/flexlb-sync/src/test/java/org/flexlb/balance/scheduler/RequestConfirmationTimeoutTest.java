@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -72,14 +73,14 @@ class RequestConfirmationTimeoutTest {
             }
             decode = new DecodeEndpoint(worker(RoleType.DECODE, "127.0.0.2"), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(projector));
             applyStatus(decode, status(RoleType.DECODE));
-            var capacity = new DecodeEndpoint.AdmissionCapacity(1L, 90L);
-            DecodeEndpoint.ReservationHandle reservation;
+            var capacity = new DecodeResources.AdmissionCapacity(1L, 90L);
+            DecodeResources.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {
                 reservation = decode.reserve(pin, REQUEST_ID, 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
                 var acquired = decode.acquireDispatchPermit(reservation, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
-                assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+                assertEquals(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                         acquired.permit().dispatch());
             }
             var context = RequestProtocolTestSupport.context(config, REQUEST_ID);
@@ -154,12 +155,12 @@ class RequestConfirmationTimeoutTest {
                 var next = decode.reserve(pin, 102L, 16L, 32L, 50, capacity);
                 assertNotNull(next);
                 var acquired = decode.acquireDispatchPermit(next, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+                assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
                 assertTrue(acquired.permit().release());
-                decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             }
             RequestProtocolTestSupport.observePrefill(requests, prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
-            RequestProtocolTestSupport.observeDecode(requests, decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
+            RequestProtocolTestSupport.observeDecode(requests, decode, DecodeResources.WorkerStatusFact.active(reservation));
             assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).getRequestState(REQUEST_ID, 0L).state());
             SchedulerTestSupport.runtime(requests).continuations().awaitIdle();
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).liveRequestCount());

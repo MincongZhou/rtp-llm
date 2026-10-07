@@ -40,8 +40,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -239,9 +237,22 @@ class WorkerBatcherQueueTest {
             }).when(prefillEndpoint).signalRouteReady();
             when(prefillEndpoint.signalQueuedControl(queued)).thenAnswer(call -> runtime.signalControl(queued));
             AtomicReference<Thread> cleanupThread = new AtomicReference<>();
-            when(prefillEndpoint.removeQueued(eq(queued), anyString())).thenAnswer(call -> {
+            AtomicInteger releases = new AtomicInteger();
+            when(prefillEndpoint.releaseRequest(queued)).thenAnswer(call -> {
+                var state = WorkerBatcherTestSupport.state(runtime);
+                assertFalse(Thread.holdsLock(context), "request cleanup must run outside Context's monitor");
+                assertFalse(state.ownershipLock().isHeldByCurrentThread(),
+                        "request cleanup must enter the resource ledger outside the queue lock");
                 cleanupThread.set(Thread.currentThread());
-                return runtime.removeQueued(queued, call.getArgument(1));
+                boolean released = org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(state, queued);
+                if (released) {
+                    releases.incrementAndGet();
+                    assertFalse(state.ownershipLock().isHeldByCurrentThread(),
+                            "capacity and queue notifications must run after resource release unlocks");
+                    runtime.signalSchedulingInputsChanged();
+                    runtime.capacityAvailableSignal().run();
+                }
+                return released;
             });
             try (BalanceContext.AdmissionHandle admission = registry.claimAdmissionHandle(907L, future); var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertEquals(PlacementResult.Status.SUCCESS,
@@ -276,10 +287,21 @@ class WorkerBatcherQueueTest {
                 assertEquals(RequestState.Phase.CANCEL_REQUESTED, cancelled.state());
                 assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
             }
-            RequestProtocolTestSupport.awaitCondition(() -> WorkerBatcherTestSupport.state(runtime).queueDepth() == 0);
+            RequestProtocolTestSupport.awaitCondition(() ->
+                    SchedulerTestSupport.repository(registry).getRequestState(907L, 0L).state()
+                            == RequestState.Phase.CANCELLED
+                            && WorkerBatcherTestSupport.state(runtime).queueDepth() == 0);
             assertEquals(0, WorkerBatcherTestSupport.state(runtime).queueDepth());
+            assertEquals(0L, WorkerBatcherTestSupport.state(runtime).observedRequestCount());
+            assertEquals(1, releases.get(), "the exact waiting resource seat is released once");
+            assertFalse(org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(
+                    WorkerBatcherTestSupport.state(runtime), queued));
+            assertEquals(RequestState.Phase.CANCELLED,
+                    SchedulerTestSupport.repository(registry).getRequestState(907L, 0L).state());
             assertNotNull(cleanupThread.get());
             assertFalse(cleanupThread.get() == Thread.currentThread());
+            org.mockito.Mockito.verify(prefillEndpoint).releaseRequest(queued);
+            org.mockito.Mockito.verify(prefillEndpoint).signalPlacementCapacityChanged();
         } finally {
             if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
                 registry.closeOutstandingAndTerminalize();

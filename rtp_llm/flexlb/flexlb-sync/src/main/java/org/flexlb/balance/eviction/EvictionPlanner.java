@@ -1,9 +1,9 @@
 package org.flexlb.balance.eviction;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityDeficit;
-import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
-import org.flexlb.balance.endpoint.DecodeEndpoint.ResourceSnapshot;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityDeficit;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
 import org.flexlb.balance.scheduler.RequestRequirements;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;

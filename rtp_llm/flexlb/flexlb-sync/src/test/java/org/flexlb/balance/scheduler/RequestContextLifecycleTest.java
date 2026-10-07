@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -172,7 +173,7 @@ class RequestContextLifecycleTest {
         BalanceContext context = context(804L);
         assertThrows(NullPointerException.class, () -> org.flexlb.balance.scheduler.RequestRoute.create(context, null, null, null, null, null, null, 123L));
         assertThrows(IllegalArgumentException.class, () -> org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), null, null, null, null, null,
-                new DecodeEndpoint.ReservationHandle(1L, 805L, 1L), 123L));
+                new DecodeResources.ReservationHandle(1L, 805L, 1L), 123L));
         assertEquals(0L, context.getWorkerEnqueueSequence());
         assertEquals(0L, context.getFirstWorkerEnqueueTime());
     }
@@ -567,17 +568,19 @@ class RequestContextLifecycleTest {
             assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
         }
         AtomicReference<Thread> cleanupThread = new AtomicReference<>();
-        when(prefill.removeQueued(item, "TERMINAL_RELEASE")).thenAnswer(invocation -> {
+        when(prefill.releaseRequest(item)).thenAnswer(invocation -> {
+            assertFalse(Thread.holdsLock(context));
             cleanupThread.set(Thread.currentThread());
             return true;
         });
         BalanceContext requestContext = lifecycle.findRequestContext(708L);
-        RequestContinuationExecutor continuations = (RequestContinuationExecutor) org.springframework.test.util.ReflectionTestUtils.getField(lifecycle, "continuations");
         lifecycle.enqueueInactivityDeadline(requestContext, RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(requestContext, "inactivityDeadline"), Long.MAX_VALUE, () -> {
         });
         assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
+        lifecycle.runtime.continuations().awaitIdle();
         assertNotNull(cleanupThread.get());
         assertNotEquals(Thread.currentThread(), cleanupThread.get());
+        verify(prefill).releaseRequest(item);
         assertEquals(RequestState.Phase.TIMED_OUT, requestContext.snapshot().state());
     }
 
@@ -630,7 +633,8 @@ class RequestContextLifecycleTest {
         }
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        when(prefill.removeQueued(item, "TERMINAL_RELEASE")).thenAnswer(call -> {
+        when(prefill.releaseRequest(item)).thenAnswer(call -> {
+            assertFalse(Thread.holdsLock(context));
             entered.countDown();
             assertTrue(release.await(5, TimeUnit.SECONDS));
             return true;
@@ -645,6 +649,9 @@ class RequestContextLifecycleTest {
             release.countDown();
         }
         assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
+        lifecycle.runtime.continuations().awaitIdle();
+        verify(prefill).releaseRequest(item);
+        assertEquals(RequestState.Phase.TIMED_OUT, context.snapshot().state());
     }
 
     @Test
@@ -795,7 +802,7 @@ class RequestContextLifecycleTest {
         }
         lifecycle.cancel(602L, 0L, CancelReason.DEADLINE_EXCEEDED);
         assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(602L, 0L).state());
-        verify(registered.item().decodeEp()).release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+        verify(registered.item().decodeEp()).release(registered.item().decodeReservation(), DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
     }
 
     @Test
@@ -827,12 +834,12 @@ class RequestContextLifecycleTest {
 
     @Test
     void oldDeliveryAndPreemptionCapabilitiesCannotReachAReusedRequestId() throws Exception {
-        Registered registered = registerItem(703L);
+        Registered registered = registerItemWithCancelTarget(703L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         BalanceContext old = lifecycle.findRequestContext(703L);
         DeliveryClaim delivery = RequestProtocolTestSupport.claimBatchWithoutPrediction(lifecycle, registered.item(), 17L, () -> true);
         assertNotNull(delivery);
-        PreemptionRegistration preemption = lifecycle.tryClaim(703L, 1L, 19L, "victim").orElseThrow();
+        PreemptionRegistration preemption = lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 703L, 1L), 19L, "victim").orElseThrow();
         RequestProtocolTestSupport.expireInactiveRequest(lifecycle, old, RequestProtocolTestSupport.<Long>inspect(lifecycle, old, "inactivityExpiresAtMsLocked"));
         registered.future().join();
         assertTrue(lifecycle.requests.isCurrent(old), "sender still owns prepared delivery");
@@ -859,13 +866,13 @@ class RequestContextLifecycleTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void decodeAllocationReconcilesOnlyNotFoundProtocol(boolean acceptedCancel) {
-        Registered registered = registerItem(706L);
+        Registered registered = registerItemWithCancelTarget(706L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         var delivery = RequestProtocolTestSupport.claimBatch(lifecycle, registered.item(), 17L, () -> true);
         assertNotNull(delivery);
         delivery.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
         lifecycle.runtime.continuations().awaitIdle();
-        var claim = lifecycle.tryClaim(706L, 1L, 20L, "victim").orElseThrow();
+        var claim = lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 706L, 1L), 20L, "victim").orElseThrow();
         assertTrue(lifecycle.updatePreemption(claim, org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         assertTrue(lifecycle.updatePreemption(claim, acceptedCancel
                 ? org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_REQUESTED
@@ -876,26 +883,26 @@ class RequestContextLifecycleTest {
             assertFalse(Thread.holdsLock(registered.item().ctx()));
             return null;
         }).when(source).publishCapacityRelease();
-        lifecycle.onDecodeStatus(source, List.of(DecodeEndpoint.WorkerStatusFact.allocated(registered.item().decodeReservation())));
+        lifecycle.onDecodeStatus(source, List.of(DecodeResources.WorkerStatusFact.allocated(registered.item().decodeReservation())));
         lifecycle.runtime.continuations().awaitIdle();
         assertSame(acceptedCancel ? claim : null, registered.item().ctx().preemption());
         if (acceptedCancel) {
             verify(source, org.mockito.Mockito.never()).reconcilePreemptionResources(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any());
         } else {
-            verify(source).reconcilePreemptionResources(20L, DecodeEndpoint.PreemptionUpdate.active(registered.item().decodeReservation()));
+            verify(source).reconcilePreemptionResources(20L, DecodeResources.PreemptionUpdate.active(registered.item().decodeReservation()));
             verify(source).publishCapacityRelease();
         }
     }
 
     @Test
     void decodeAllocationSettlesCleanupAfterRetainedTerminalAndNotFound() {
-        Registered registered = registerItem(707L);
+        Registered registered = registerItemWithCancelTarget(707L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         var delivery = RequestProtocolTestSupport.claimBatch(lifecycle, registered.item(), 17L, () -> true);
         delivery.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
         lifecycle.runtime.continuations().awaitIdle();
         var context = registered.item().ctx();
-        var claim = lifecycle.tryClaim(707L, 1L, 21L, "victim").orElseThrow();
+        var claim = lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 707L, 1L), 21L, "victim").orElseThrow();
         assertTrue(lifecycle.updatePreemption(claim, org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         delivery.observeWorkerCompletion(registered.item());
         BalanceContext.SelectedResponse response;
@@ -904,7 +911,7 @@ class RequestContextLifecycleTest {
             response = context.selectDeliveryFailureLocked(registered.item(), org.flexlb.balance.delivery.DeliveryResult.Status.UNCERTAIN,
                     "delivery abandoned while cancellation was pending",
                     () -> lifecycle.requirePublicationPermitLocked(context, BalanceContext.PublicationKind.TERMINAL));
-            var pass = context.beginCleanup(registered.item());
+            var pass = context.beginCleanup();
             context.finishCleanup(pass, true, false);
         }
         if (response != null) {
@@ -915,15 +922,53 @@ class RequestContextLifecycleTest {
         var source = registered.item().decodeEp();
         when(source.reconcilePreemptionResources(org.mockito.ArgumentMatchers.eq(21L), org.mockito.ArgumentMatchers.any())).thenReturn(true);
 
-        lifecycle.onDecodeStatus(source, List.of(DecodeEndpoint.WorkerStatusFact.allocated(registered.item().decodeReservation())));
+        lifecycle.onDecodeStatus(source, List.of(DecodeResources.WorkerStatusFact.allocated(registered.item().decodeReservation())));
         lifecycle.runtime.continuations().awaitIdle();
 
-        verify(source).reconcilePreemptionResources(21L, DecodeEndpoint.PreemptionUpdate.finished(registered.item().decodeReservation()));
+        verify(source).reconcilePreemptionResources(21L, DecodeResources.PreemptionUpdate.finished(registered.item().decodeReservation()));
         assertTrue(claim.isFinished());
         assertEquals(RequestStage.FINISHED, context.stage());
         assertTrue(claim.terminalObservation().toCompletableFuture().isDone());
         assertNull(lifecycle.findRequestContext(707L));
         assertNull(context.preemption());
+    }
+
+    @Test
+    void decodeAllocationCarriesSettledResourcesIntoTheFirstTerminalCleanup() {
+        Registered registered = registerItemWithCancelTarget(711L);
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        var delivery = RequestProtocolTestSupport.claimBatch(lifecycle, registered.item(), 17L, () -> true);
+        delivery.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
+        lifecycle.runtime.continuations().awaitIdle();
+        var context = registered.item().ctx();
+        var claim = lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 711L, 1L), 22L, "victim").orElseThrow();
+        assertTrue(lifecycle.updatePreemption(claim, org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+        assertTrue(lifecycle.updatePreemption(claim, org.flexlb.balance.preemption.PreemptionCancelPhase.NOT_FOUND_STALE));
+        synchronized (context) {
+            assertFalse(context.hasCleanup());
+            context.retainPreemptionTerminalLocked(claim,
+                    DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, true, 0L));
+        }
+        var source = registered.item().decodeEp();
+        when(source.reconcilePreemptionResources(22L,
+                DecodeResources.PreemptionUpdate.finished(registered.item().decodeReservation()))).thenReturn(true);
+        org.mockito.Mockito.doAnswer(call -> {
+            assertFalse(Thread.holdsLock(context), "capacity notification must follow the resource CAS outside the request lock");
+            return null;
+        }).when(source).publishCapacityRelease();
+
+        lifecycle.onDecodeStatus(source, List.of(DecodeResources.WorkerStatusFact.allocated(registered.item().decodeReservation())));
+        lifecycle.runtime.continuations().awaitIdle();
+
+        verify(source).reconcilePreemptionResources(22L,
+                DecodeResources.PreemptionUpdate.finished(registered.item().decodeReservation()));
+        verify(source).publishCapacityRelease();
+        verify(source, org.mockito.Mockito.never()).release(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        assertTrue(claim.isFinished());
+        assertTrue(claim.terminalObservation().toCompletableFuture().isDone());
+        assertEquals(RequestStage.FINISHED, context.stage());
+        assertEquals(RequestState.Phase.COMPLETED, context.snapshot().state());
+        assertNull(lifecycle.findRequestContext(711L));
     }
 
     @Test
@@ -970,19 +1015,66 @@ class RequestContextLifecycleTest {
 
         assertEquals(RequestState.Phase.ACKNOWLEDGED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(705L, 23L).state());
         org.mockito.Mockito.verify(registered.item().decodeEp(), org.mockito.Mockito.never())
-                .release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.NOT_SENT);
+                .release(registered.item().decodeReservation(), DecodeResources.ReleaseReason.NOT_SENT);
     }
 
     private BalanceContext context(long requestId) {
         return RequestProtocolTestSupport.context(config, requestId);
     }
 
+    @Test
+    void preemptionClaimCapturesTheExactCancelTargetAndRejectsStaleReservation() {
+        Registered registered = registerItemWithCancelTarget(709L);
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        assertTrue(lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 709L, 2L), 23L, "stale").isEmpty());
+        PreemptionRegistration claim = lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 709L, 1L), 24L, "victim").orElseThrow();
+        assertEquals(new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 8090), claim.cancelTarget());
+        registered.item().prefill().setServerIp("changed-after-claim");
+        assertEquals("127.0.0.1", claim.cancelTarget().prefillIp());
+        registered.item().prefill().setGrpcPort(0);
+        assertTrue(lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 709L, 1L), 26L, "already claimed").isEmpty());
+        lifecycle.releasePreemption(claim);
+    }
+
+    @Test
+    void exactPreemptionRouteWithoutCancelTargetIsAControlFailureAndDoesNotInstallClaim() {
+        Registered registered = registerItem(710L);
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        assertThrows(IllegalStateException.class, () -> lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 710L, 1L), 25L, "victim"));
+        assertNull(registered.item().ctx().preemption());
+    }
+
+    @Test
+    void preemptionClaimRejectsAnotherDecodeGenerationWithTheSameRequestAndToken() {
+        Registered registered = registerItemWithCancelTarget(711L);
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        var current = registered.item().decodeReservation();
+        var stale = new DecodeResources.ReservationHandle(current.endpointGenerationId() + 1L,
+                current.requestId(), current.reservationToken());
+        assertTrue(lifecycle.tryClaim(stale, 27L, "old endpoint").isEmpty());
+        assertNull(registered.item().ctx().preemption());
+        PreemptionRegistration valid = lifecycle.tryClaim(current, 28L, "current endpoint").orElseThrow();
+        assertEquals(new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 8090), valid.cancelTarget());
+        lifecycle.releasePreemption(valid);
+    }
+
+    private Registered registerItemWithCancelTarget(long requestId) {
+        Registered registered = registerItem(requestId);
+        var prefill = new org.flexlb.dao.loadbalance.ServerStatus();
+        prefill.setServerIp("127.0.0.1");
+        prefill.setGrpcPort(8090);
+        RequestRoute original = registered.item();
+        return new Registered(RequestRoute.create(original.ctx(), original.routeResponse(), prefill,
+                original.decode(), original.prefillEp(), original.decodeEp(), original.decodeReservation(),
+                original.enqueuedAtMs()), registered.future());
+    }
+
     private Registered registerItem(long requestId) {
         BalanceContext context = context(requestId);
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context);
-        DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        DecodeEndpoint.ReservationHandle reservation =
-                new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
+        DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
+        DecodeResources.ReservationHandle reservation =
+                new DecodeResources.ReservationHandle(1L, requestId, 1L);
         context.setFuture(future);
         return new Registered(
                 org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context),

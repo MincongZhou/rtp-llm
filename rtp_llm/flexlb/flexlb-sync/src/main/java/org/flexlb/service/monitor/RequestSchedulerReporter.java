@@ -1,7 +1,7 @@
 package org.flexlb.service.monitor;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.endpoint.DecodeEndpoint.ResourceSnapshot;
+import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;

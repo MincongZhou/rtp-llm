@@ -1,5 +1,6 @@
 package org.flexlb.balance.eviction;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
@@ -100,9 +101,9 @@ class EvictionManagerTryAdmitTest {
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
 
         var endpoint = mock(DecodeEndpoint.class);
-        var routing = mock(DecodeEndpoint.DecodeRoutingView.class);
-        var view = mock(DecodeEndpoint.ResourceSnapshot.class);
-        var victim = new DecodeEndpoint.DecodeRequestView(901L, 30, 128L, 128L,
+        var routing = mock(DecodeResources.DecodeRoutingView.class);
+        var view = mock(DecodeResources.ResourceSnapshot.class);
+        var victim = new DecodeResources.DecodeRequestView(901L, 30, 128L, 128L,
                 DecodeTaskPhase.ACCEPTED_NOT_RUNNING, true, 11L, false);
         when(endpoint.ipPort()).thenReturn("127.0.0.1:8080");
         when(endpoint.resourceSnapshot()).thenReturn(view);
@@ -110,7 +111,7 @@ class EvictionManagerTryAdmitTest {
         when(routing.address()).thenReturn("127.0.0.1:8080");
         when(view.requests()).thenReturn(Map.of(victim.requestId(), victim));
         when(routing.placementUsage()).thenReturn(
-                new DecodeEndpoint.CapacityUsage(1L, 20_000L, 10_000L, 0L, 10_000L));
+                new DecodeResources.CapacityUsage(1L, 20_000L, 10_000L, 0L, 10_000L));
 
         when(cancelChannel.isSupported(endpoint)).thenReturn(cancelSupported);
         var completion = new CompletableFuture<DecodePreemptionCoordinator.PreemptionResult>();
@@ -157,7 +158,7 @@ class EvictionManagerTryAdmitTest {
         assertSame(frozenRequest, command.getValue().request());
         assertEquals(List.of(victim), command.getValue().victims());
 
-        var exact = new DecodeEndpoint.ReservationHandle(7L, 902L, 31L);
+        var exact = new DecodeResources.ReservationHandle(7L, 902L, 31L);
         completion.complete(new DecodePreemptionCoordinator.PreemptionResult(exact, false, "committed"));
         assertSame(exact, outcome.join().reservation());
         assertNull(context.getResponse(), "reservation preparation does not publish a route response");

@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
+import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.VictimTerminal;
 
 import java.util.Objects;
@@ -18,6 +19,7 @@ public final class PreemptionRegistration {
     final BalanceContext owner;
     private final long attemptToken;
     private final String detail;
+    private final CancelTarget cancelTarget;
     private final CompletableFuture<VictimTerminal> terminal =
             new CompletableFuture<>();
 
@@ -30,13 +32,17 @@ public final class PreemptionRegistration {
     PreemptionRegistration(
             BalanceContext owner,
             long attemptToken,
-            String detail) {
+            String detail,
+            CancelTarget cancelTarget) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.attemptToken = attemptToken;
         this.detail = detail == null ? "priority preemption" : detail;
+        this.cancelTarget = Objects.requireNonNull(cancelTarget, "cancelTarget");
     }
 
     public AbstractRequestScheduler scheduler() { return owner.scheduler(); }
+
+    public CancelTarget cancelTarget() { return cancelTarget; }
 
     public long requestId() {
         return owner.getRequestId();

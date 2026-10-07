@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -38,11 +39,13 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -109,7 +112,7 @@ class DirectAdmissionContractTest {
             assertNotNull(reservation);
             assertThrows(IllegalStateException.class, () -> fixture.decode.release(
                     reservation,
-                    DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK));
+                    DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
 
             fixture.observe(fixture.prefill, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
             assertEquals(0L, fixture.prefill.observedRequestCount());
@@ -127,15 +130,15 @@ class DirectAdmissionContractTest {
     @Test
     void fullDecodeRejectsImmediatelyAndRollsBackTheProvisionalRoute() throws Exception {
         try (Fixture fixture = new Fixture()) {
-            DecodeEndpoint.ReservationHandle occupant;
+            DecodeResources.ReservationHandle occupant;
             try (var pin = fixture.decode.tryPinGeneration()) {
                 assertNotNull(pin);
                 occupant = fixture.decode.reserve(pin, 999L, 32L, 48L, 50, null);
             }
             assertNotNull(occupant);
-            var acquired = fixture.decode.acquireDispatchPermit(occupant, new DecodeEndpoint.AdmissionCapacity(1L, 90L));
-            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
-            assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+            var acquired = fixture.decode.acquireDispatchPermit(occupant, new DecodeResources.AdmissionCapacity(1L, 90L));
+            assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+            assertEquals(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquired.permit().dispatch());
 
             Response response = assertTimeoutPreemptively(Duration.ofSeconds(2),
@@ -158,12 +161,12 @@ class DirectAdmissionContractTest {
         try (Fixture fixture = new Fixture()) {
             AtomicBoolean raced = new AtomicBoolean();
             doAnswer(call -> {
-                DecodeEndpoint.ReservationHandle reservation = call.getArgument(0);
+                DecodeResources.ReservationHandle reservation = call.getArgument(0);
                 assertEquals(103L, reservation.requestId());
                 fixture.assertItemNotBound(103L);
                 fixture.observe(fixture.decode, Map.of("103", task(103L, TaskPhase.KV_ALLOCATED)), Map.of());
                 var acquired = (DecodeEndpoint.EngineDispatchPermitAcquisition) call.callRealMethod();
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED, acquired.status());
+                assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED, acquired.status());
                 assertNotNull(acquired.permit(), "accepted preparation must retain an exact handoff capability");
                 fixture.observe(fixture.decode, Map.of(), Map.of("103", task(103L, TaskPhase.RUNNING)));
                 fixture.assertItemNotBound(103L);
@@ -184,6 +187,63 @@ class DirectAdmissionContractTest {
     }
 
     @Test
+    void decodeTerminalAfterRouteClaimSettlesResourcesBeforeLateAddressPublication() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            AtomicBoolean raced = new AtomicBoolean();
+            AtomicReference<BalanceContext.DeliveryClaim> claimed = new AtomicReference<>();
+            doAnswer(call -> {
+                BalanceContext.DeliveryClaim claim = call.getArgument(0);
+                claimed.set(claim);
+                BalanceContext context = claim.item.ctx();
+                assertEquals(105L, context.getRequestId());
+                assertEquals(DeliveryClaimKind.ROUTE_DECISION, context.deliveryClaimKind());
+                assertEquals(BalanceContext.DeliveryClaim.SendOutcome.NOT_STARTED, claim.sendOutcome());
+                assertFalse(claim.settlement().toCompletableFuture().isDone());
+
+                fixture.observe(fixture.decode, Map.of(), Map.of("105", task(105L, TaskPhase.RUNNING)));
+
+                Response terminal = context.getFuture().get(2L, TimeUnit.SECONDS);
+                assertTrue(terminal.isSuccess());
+                assertEquals(BalanceContext.RequestStage.FINISHED, context.stage());
+                assertEquals(RequestState.Phase.COMPLETED, context.snapshot().state());
+                assertTrue(claim.settlement().toCompletableFuture().isDone());
+                assertEquals(BalanceContext.DeliveryClaim.SendOutcome.NOT_STARTED,
+                        claim.settlement().toCompletableFuture().get(2L, TimeUnit.SECONDS).sendOutcome(),
+                        "a worker terminal must not fabricate address publication");
+                fixture.assertNoPrefillOwnership();
+                assertNull(fixture.decode.reservationHandle(105L));
+                assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
+                assertEquals(0L, fixture.decode.routingView().inflightExpectedKv());
+                assertEquals(0, fixture.requests.requests.liveRequestCount());
+
+                call.callRealMethod();
+
+                assertSame(terminal, context.getFuture().join());
+                assertEquals(BalanceContext.RequestStage.FINISHED, context.stage());
+                assertEquals(BalanceContext.DeliveryClaim.SendOutcome.NOT_STARTED, claim.sendOutcome());
+                raced.set(true);
+                return null;
+            }).when(fixture.requests).publishRoute(any(), any(), org.mockito.ArgumentMatchers.anyLong());
+
+            try {
+                Response response = fixture.scheduler.submit(fixture.context(105L)).get(2L, TimeUnit.SECONDS);
+
+                assertTrue(raced.get());
+                assertTrue(response.isSuccess());
+                fixture.assertNoPrefillOwnership();
+                assertEquals(0, fixture.requests.requests.liveRequestCount());
+            } finally {
+                // A broken sender gate must fail this test without hanging runtime shutdown.
+                BalanceContext.DeliveryClaim claim = claimed.get();
+                if (claim != null && !claim.settlement().toCompletableFuture().isDone()) {
+                    claim.abandon(CancelReason.CLIENT_CANCELLED);
+                    fixture.requests.resumeCleanup(claim.item.ctx());
+                }
+            }
+        }
+    }
+
+    @Test
     void directCommitKeepsPrimaryFailureWhenPermitCleanupAlsoFails() throws Exception {
         try (Fixture fixture = new Fixture()) {
             var prefill = spy(fixture.prefill);
@@ -194,7 +254,7 @@ class DirectAdmissionContractTest {
             doAnswer(call -> {
                 call.callRealMethod();
                 throw cleanup;
-            }).when(fixture.decode).dispatch(any(), eq(DecodeEndpoint.DispatchOutcome.ABANDONED));
+            }).when(fixture.decode).dispatch(any(), eq(DecodeResources.DispatchOutcome.ABANDONED));
             try (var admission = ProvisionalRoute.prepare(context, List.of(
                     SelectedRole.prefill(prefill.tryPinGeneration(), Fixture.metadata(prefill, 104L),
                             30_000L, prefill.placementVersion()),
@@ -204,7 +264,7 @@ class DirectAdmissionContractTest {
                         () -> fixture.scheduler.commitDirectRoute(context, admission));
                 org.junit.jupiter.api.Assertions.assertSame(primary, thrown);
                 assertEquals(List.of(cleanup), List.of(thrown.getSuppressed()));
-                verify(fixture.decode).dispatch(any(), eq(DecodeEndpoint.DispatchOutcome.ABANDONED));
+                verify(fixture.decode).dispatch(any(), eq(DecodeResources.DispatchOutcome.ABANDONED));
                 assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
             }
             assertNull(fixture.decode.reservationHandle(104L));

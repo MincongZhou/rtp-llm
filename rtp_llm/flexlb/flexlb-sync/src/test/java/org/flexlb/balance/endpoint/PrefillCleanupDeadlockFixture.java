@@ -24,18 +24,24 @@ public final class PrefillCleanupDeadlockFixture {
         next = item(requestId + 1);
         if (batch) {
             enqueue(first);
-            try (var reservation = state.reserveBatch(first, 1L, 2, generation.tryAcquireHandoff()).reservation()) {
-                assertNotNull(reservation);
-                try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(first), 20L)) {
-                    assertNotNull(handoff);
+            {
+                var reservation = state.reserveBatch(first, 1L, 2, generation.tryAcquireHandoff()).reservation();
+                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                    assertNotNull(reservation);
+                    try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(first), 20L)) {
+                        assertNotNull(handoff);
+                    }
                 }
             }
         } else {
-            try (var reservation = state.reserveUnqueuedRoute(first, 20L, 0L).reservation()) {
-                assertNotNull(reservation);
-                try (var handoff = EndpointTestSupport.commitRoutes(state,
-                        List.of(first), List.of(reservation), generation.tryAcquireHandoff())) {
-                    assertNotNull(handoff);
+            {
+                var reservation = state.reserveUnqueuedRoute(first, 20L, 0L).reservation();
+                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                    assertNotNull(reservation);
+                    try (var handoff = EndpointTestSupport.commitRoutes(state,
+                            List.of(first), List.of(reservation), generation.tryAcquireHandoff())) {
+                        assertNotNull(handoff);
+                    }
                 }
             }
         }
@@ -54,8 +60,11 @@ public final class PrefillCleanupDeadlockFixture {
     }
 
     public void reserveNextBatch() {
-        try (var reservation = state.reserveBatch(next, 2L, 2, generation.tryAcquireHandoff()).reservation()) {
-            assertNotNull(reservation);
+        {
+            var reservation = state.reserveBatch(next, 2L, 2, generation.tryAcquireHandoff()).reservation();
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                assertNotNull(reservation);
+            }
         }
     }
 

@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
@@ -24,7 +25,7 @@ public final class ProvisionalRoute implements AutoCloseable {
     private final SelectedRole prefill;
     private final SelectedRole decode;
     private final long requestId;
-    private DecodeEndpoint.ReservationHandle decodeReservation;
+    private DecodeResources.ReservationHandle decodeReservation;
     private boolean provisional = true;
 
     private ProvisionalRoute(long requestId, Response response, SelectedRole prefill,
@@ -120,7 +121,7 @@ public final class ProvisionalRoute implements AutoCloseable {
     ServerStatus prefillStatus() { return prefill.serverStatus(); }
     ServerStatus decodeStatus() { return decode == null ? null : decode.serverStatus(); }
     long requestId() { return requestId; }
-    DecodeEndpoint.ReservationHandle decodeReservation() { return decodeReservation; }
+    DecodeResources.ReservationHandle decodeReservation() { return decodeReservation; }
 
     boolean reserveDecode(RequestRequirements requirements) {
         requireProvisional();
@@ -128,11 +129,11 @@ public final class ProvisionalRoute implements AutoCloseable {
             throw new IllegalArgumentException("request inputs do not match selected route");
         }
         if (decodeEndpoint() == null || decodeReservation != null) { return true; }
-        DecodeEndpoint.AdmissionCapacity capacity = switch (requirements.mode()) {
+        DecodeResources.AdmissionCapacity capacity = switch (requirements.mode()) {
             case IMMEDIATE -> null;
             case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> requirements.capacity();
         };
-        DecodeEndpoint.ReservationHandle reservation = decodeEndpoint().reserve(
+        DecodeResources.ReservationHandle reservation = decodeEndpoint().reserve(
                 decodePin(), requirements.requestId(), requirements.hardKvTokens(),
                 requirements.expectedKvTokens(), requirements.priority(), capacity);
         if (reservation == null) { return false; }
@@ -140,7 +141,7 @@ public final class ProvisionalRoute implements AutoCloseable {
         return true;
     }
 
-    public boolean adoptDecodeReservation(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+    public boolean adoptDecodeReservation(DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
         requireProvisional();
         boolean adopted = false;
         Throwable failure = null;
@@ -162,7 +163,7 @@ public final class ProvisionalRoute implements AutoCloseable {
         } finally {
             if (!adopted && endpoint != null && reservation != null) {
                 try {
-                    endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                    endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
                 } catch (RuntimeException | Error cleanupFailure) {
                     if (failure == null) { throw cleanupFailure; }
                     Failures.append(failure, cleanupFailure);
@@ -229,7 +230,7 @@ public final class ProvisionalRoute implements AutoCloseable {
             if (provisional) {
                 provisional = false;
                 if (decodeReservation != null) {
-                    decodeEndpoint().release(decodeReservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                    decodeEndpoint().release(decodeReservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
                 }
             }
         }

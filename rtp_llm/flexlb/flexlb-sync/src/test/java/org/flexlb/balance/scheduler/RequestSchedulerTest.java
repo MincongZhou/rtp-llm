@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -483,7 +484,7 @@ class RequestSchedulerTest {
         when(lifecycle.register(org.mockito.ArgumentMatchers.eq(context), org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> { BalanceContext registered = invocation.getArgument(0); registered.setFuture(future); return future; });
         AdmissionHandle handle = mock(AdmissionHandle.class);
         when(lifecycle.claimAdmissionHandle(897L, future)).thenReturn(handle);
-        DecodeEndpoint selectedEndpoint = mock(DecodeEndpoint.class);
+        DecodeEndpoint selectedEndpoint = RequestProtocolTestSupport.decodeEndpoint();
         when(selectedEndpoint.ipPort()).thenReturn("selected-decode:8080");
         ProvisionalRoute selectedRoute = mock(ProvisionalRoute.class);
         PlacementKey blocker = PlacementKey.exact(RoleType.DECODE, "g1", "selected-decode:8080");
@@ -499,13 +500,13 @@ class RequestSchedulerTest {
         var binding = RequestRequirements.capture(context);
         org.springframework.test.util.ReflectionTestUtils.setField(context, "requirements", binding);
         when(selectedRoute.decodeEndpoint()).thenReturn(selectedEndpoint);
-        var reservation = new DecodeEndpoint.ReservationHandle(1L, 897L, 7L);
+        var reservation = new DecodeResources.ReservationHandle(1L, 897L, 7L);
         when(selectedRoute.adoptDecodeReservation(selectedEndpoint, reservation))
                 .thenReturn(!outcome.equals("adopt_failed"));
         var rollbackFailure = new IllegalStateException("rollback failed");
         if (outcome.equals("closed_rollback_failure")) {
             org.mockito.Mockito.doThrow(rollbackFailure).when(selectedEndpoint)
-                    .release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                    .release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         }
         var result = new PreemptionResult(outcome.equals("rejected") ? null : reservation, false, "result");
         var execution = new CompletableFuture<PreemptionResult>();
@@ -544,7 +545,7 @@ class RequestSchedulerTest {
             verify(lifecycle, times(1)).claimAdmissionHandle(897L, future);
             boolean hasReservation = !outcome.equals("rejected") && !outcome.equals("error") && !outcome.startsWith("closed") && !outcome.equals("cancelled");
             if (outcome.startsWith("closed") || outcome.equals("cancelled")) {
-                verify(selectedEndpoint).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                verify(selectedEndpoint).release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             }
             Thread decision = (Thread) org.springframework.test.util.ReflectionTestUtils.getField(scheduler, "decisionThread");
             assertTrue(publicationThreads.stream().allMatch(thread -> thread == decision),

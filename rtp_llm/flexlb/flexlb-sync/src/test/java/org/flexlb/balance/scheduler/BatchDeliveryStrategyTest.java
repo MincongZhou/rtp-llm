@@ -163,7 +163,7 @@ class BatchDeliveryStrategyTest {
         assertEquals(CapacityBoundary.Status.UNAVAILABLE,
                 fixture.context.emptyBoundary().result().status());
         assertEquals(1, fixture.submission.closeCount());
-        verify(fixture.capabilities.batchReservation()).close();
+        verify(fixture.capabilities.prefill()).rollbackReservation(fixture.capabilities.batchReservation());
         assertTrue(fixture.schedulerFixture.committed().isEmpty());
     }
 
@@ -349,7 +349,7 @@ class BatchDeliveryStrategyTest {
             verify(fixture.capabilities.permit(item)).release();
             verify(fixture.capabilities.permit(item), never()).dispatch();
         }
-        verify(fixture.capabilities.batchReservation()).close();
+        verify(fixture.capabilities.prefill()).rollbackReservation(fixture.capabilities.batchReservation());
         assertEquals(1, fixture.submission.totalCloseCount());
         assertEquals(cleanupFails ? List.of(cleanup) : List.of(), List.of(primary.getSuppressed()));
         assertTrue(fixture.schedulerFixture.committed().isEmpty());
@@ -367,7 +367,7 @@ class BatchDeliveryStrategyTest {
             assertThrows(IllegalStateException.class, () -> transaction.append(late));
         }
         verify(fixture.capabilities.permit(first)).release();
-        verify(fixture.capabilities.batchReservation()).close();
+        verify(fixture.capabilities.prefill()).rollbackReservation(fixture.capabilities.batchReservation());
         assertEquals(1, fixture.submission.closeCount());
     }
 

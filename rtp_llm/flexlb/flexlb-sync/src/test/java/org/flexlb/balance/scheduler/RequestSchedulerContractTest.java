@@ -408,11 +408,14 @@ class RequestSchedulerContractTest {
                 assertEquals(PlacementResult.Status.SUCCESS, f.requests.commitRoute(route, RequestProtocolTestSupport.publication(() -> true)));
             }
             var failure = new IllegalStateException("endpoint release failed");
-            doThrow(failure).when(endpoint).releaseCommittedItem(route);
+            doThrow(failure).when(endpoint).releaseRequest(route);
             SchedulerTestSupport.runtime(api).stopAccepting();
             assertTrue(future.completeExceptionally(new IllegalStateException("request failed")));
+            f.requests.runtime.continuations().awaitIdle();
             assertSame(failure, SchedulerTestSupport.failure(api));
-            verify(endpoint).releaseCommittedItem(route);
+            assertTrue(future.isCompletedExceptionally(), "cleanup failure must not revoke the selected response");
+            assertEquals(BalanceContext.RequestStage.FINALIZING, request.stage());
+            verify(endpoint).releaseRequest(route);
         }
     }
 

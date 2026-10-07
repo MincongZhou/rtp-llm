@@ -41,17 +41,17 @@ public final class EndpointTestSupport {
 
     static boolean handoffPreemption(DecodeEndpoint endpoint, long token) {
         var victims = endpoint.resourceSnapshot().requests().values().stream()
-                .filter(DecodeEndpoint.DecodeRequestView::claimedForPreemption).toList();
+                .filter(DecodeResources.DecodeRequestView::claimedForPreemption).toList();
         return !victims.isEmpty() && victims.stream().allMatch(victim -> endpoint.updatePreemption(token,
-                DecodeEndpoint.PreemptionUpdate.handedOff(new DecodeEndpoint.ReservationHandle(
+                DecodeResources.PreemptionUpdate.handedOff(new DecodeResources.ReservationHandle(
                         endpoint.getStatus().getGenerationId(), victim.requestId(), victim.reservationToken()))));
     }
 
     static boolean handoffPreemption(DecodeState state, long token) {
         var victims = state.resourceSnapshot().requests().values().stream()
-                .filter(DecodeEndpoint.DecodeRequestView::claimedForPreemption).toList();
+                .filter(DecodeResources.DecodeRequestView::claimedForPreemption).toList();
         return !victims.isEmpty() && victims.stream().allMatch(victim -> state.updatePreemption(token,
-                DecodeEndpoint.PreemptionUpdate.handedOff(new DecodeEndpoint.ReservationHandle(
+                DecodeResources.PreemptionUpdate.handedOff(new DecodeResources.ReservationHandle(
                         state.routingView().generationId(), victim.requestId(), victim.reservationToken()))));
     }
 
@@ -323,10 +323,13 @@ public final class EndpointTestSupport {
         RequestRoute item = org.mockito.Mockito.mock(RequestRoute.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(requestId);
         org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(endpoint, item);
-        try (var reservation = reserveUnqueued(endpoint, item, predictedMs);
-             var commit = endpoint.tryBeginRouteCommitAdmission();
-             var handoff = commit.commit(List.of(item), List.of(reservation))) {
-            // The endpoint ledger owns this request until authoritative termination.
+        {
+            var reservation = reserveUnqueued(endpoint, item, predictedMs);
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation);
+                 var commit = endpoint.tryBeginRouteCommitAdmission();
+                 var handoff = commit.commit(List.of(item), List.of(reservation))) {
+                // The endpoint ledger owns this request until authoritative termination.
+            }
         }
     }
 
@@ -346,58 +349,56 @@ public final class EndpointTestSupport {
             throw new IllegalStateException(
                     "batch reservation rejected: " + result.status());
         }
-        try (PrefillState.BatchReservation reservation =
-                     result.reservation()) {
-            PrefillState state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
-            return commitBatch(state, reservation, items, predictedMs);
+        {
+            PrefillState.BatchReservation reservation =
+                     result.reservation();
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                PrefillState state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
+                return commitBatch(state, reservation, items, predictedMs);
+            }
         }
     }
 
-    static PrefillState.RouteReservation reserveRoute(PrefillState state, RequestRoute item, long predictedMs) {
+    public static boolean releaseRequest(PrefillState state, RequestRoute exact) {
+        return state.releaseRequest(exact) != PrefillState.RequestRelease.NONE;
+    }
+
+    public static PreparationScope preparation(PrefillState.Reservation reservation) {
+        return new PreparationScope(reservation);
+    }
+
+    static void rollback(PrefillState.Reservation reservation) {
+        if (reservation == null) { return; }
+        var released = reservation.owner.rollbackPreparation(reservation);
+        if (released.generationHandoff() != null) { released.generationHandoff().close(); }
+    }
+
+    public static final class PreparationScope implements AutoCloseable {
+        private final PrefillState.Reservation reservation;
+        private PreparationScope(PrefillState.Reservation reservation) { this.reservation = reservation; }
+        @Override public void close() { rollback(reservation); }
+    }
+
+    static PrefillState.CommittedHandoff commitQueuedRoutes(
+            PrefillState state, List<RequestRoute> items, long[] predictions,
+            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         state.ownershipLock().lock();
-        try {
-            return state.reserveRouteLocked(item, predictedMs);
-        } finally {
-            state.ownershipLock().unlock();
-        }
+        try { return state.commitQueuedRoutesLocked(items, predictions, generationHandoff); }
+        finally { state.ownershipLock().unlock(); }
     }
 
     static List<PrefillState.CommittedHandoff> commitRoutes(
-            PrefillEndpoint endpoint,
-            long predictedMs,
-            List<? extends RequestRoute> exactItems) {
-        if (exactItems.isEmpty()) {
-            throw new IllegalArgumentException("route group requires an item");
-        }
+            PrefillEndpoint endpoint, long predictedMs, List<? extends RequestRoute> exactItems) {
         List<RequestRoute> items = List.copyOf(exactItems);
         items.forEach(item -> org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(endpoint, item));
-        List<PrefillState.RouteReservation> reservations =
-                new ArrayList<>(items.size());
-        boolean committed = false;
-        try {
-            for (RequestRoute item : items) {
-                reservations.add(reserveRoute(
-                        org.flexlb.balance.scheduler.WorkerBatcherTestSupport.state(batcher(endpoint)),
-                        item, predictedMs));
-            }
-            PrefillEndpoint.RouteCommitAdmission admission =
-                    endpoint.tryBeginRouteCommitAdmission();
-            if (admission == null) {
-                throw new IllegalStateException("route endpoint retired");
-            }
-            PrefillState.CommittedHandoff handoff;
-            try (admission) {
-                handoff = admission.commit(items, reservations);
-            }
-            committed = true;
-            return List.of(handoff);
-        } finally {
-            if (!committed) {
-                for (int index = reservations.size() - 1;
-                     index >= 0; index--) {
-                    reservations.get(index).close();
-                }
-            }
+        long[] predictions = new long[items.size()];
+        java.util.Arrays.fill(predictions, predictedMs);
+        try (var admission = endpoint.tryBeginRouteCommitAdmission()) {
+            if (admission == null) { throw new IllegalStateException("route endpoint retired"); }
+            var lock = org.flexlb.balance.scheduler.WorkerBatcherTestSupport.state(batcher(endpoint)).ownershipLock();
+            lock.lock();
+            try { return List.of(admission.commitQueuedLocked(items, predictions)); }
+            finally { lock.unlock(); }
         }
     }
 

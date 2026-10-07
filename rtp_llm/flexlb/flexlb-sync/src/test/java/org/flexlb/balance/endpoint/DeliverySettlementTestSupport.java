@@ -44,11 +44,14 @@ public final class DeliverySettlementTestSupport {
         } finally {
             lock.unlock();
         }
-        try (var reservation = prefill.reserveBatch(items.getFirst(), batchId, 2,
-                generation.tryAcquireHandoff()).reservation()) {
-            assertNotNull(reservation);
-            try (var handoff = EndpointTestSupport.commitBatch(prefill, reservation, items, 100L)) {
-                assertNotNull(handoff);
+        {
+            var reservation = prefill.reserveBatch(items.getFirst(), batchId, 2,
+                generation.tryAcquireHandoff()).reservation();
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                assertNotNull(reservation);
+                try (var handoff = EndpointTestSupport.commitBatch(prefill, reservation, items, 100L)) {
+                    assertNotNull(handoff);
+                }
             }
         }
     }
@@ -67,7 +70,7 @@ public final class DeliverySettlementTestSupport {
         return result.schedulerFacts();
     }
 
-    public static void queueDecode(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+    public static void queueDecode(DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(Map.of());
         response.setFinishedTaskInfo(Map.of());
@@ -79,11 +82,11 @@ public final class DeliverySettlementTestSupport {
         }
     }
 
-    public static void dispatchDecode(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+    public static void dispatchDecode(DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
         queueDecode(endpoint, reservation);
-        var permit = endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.AdmissionCapacity(0, 100L)).permit();
+        var permit = endpoint.acquireDispatchPermit(reservation, new DecodeResources.AdmissionCapacity(0, 100L)).permit();
         assertNotNull(permit);
-        assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+        assertEquals(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                 permit.dispatch());
     }
 

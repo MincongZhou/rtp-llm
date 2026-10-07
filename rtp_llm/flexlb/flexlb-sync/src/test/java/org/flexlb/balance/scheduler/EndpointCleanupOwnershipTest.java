@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointCleanupTestSupport;
 import org.flexlb.balance.endpoint.EndpointCleanupTestSupport.PrefillLedger;
@@ -138,7 +139,7 @@ class EndpointCleanupOwnershipTest {
         var replacement = result.owner();
         assertNotEquals(oldReservation.reservationToken(), replacement.reservationToken());
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
-        endpoint.release(oldReservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        endpoint.release(oldReservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
         assertEquals(0, endpoint.evictExpiredRequests(-1L, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)::retainsIdentity));
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
@@ -151,7 +152,7 @@ class EndpointCleanupOwnershipTest {
         assertTrue(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).removeExactTerminal(org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(registry, retiredRecord1), Long.MAX_VALUE));
         assertEquals(1, endpoint.evictExpiredRequests(-1L, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)::retainsIdentity));
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
-        endpoint.release(replacement, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        endpoint.release(replacement, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         assertEquals(0, endpoint.evictExpiredRequests(-1L, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)::retainsIdentity));
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
     }
@@ -259,7 +260,7 @@ class EndpointCleanupOwnershipTest {
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
     }
 
-    private static DecodeEndpoint.ReservationHandle reserve(
+    private static DecodeResources.ReservationHandle reserve(
             DecodeEndpoint endpoint, long id, long hardKv, long expectedKv) {
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);

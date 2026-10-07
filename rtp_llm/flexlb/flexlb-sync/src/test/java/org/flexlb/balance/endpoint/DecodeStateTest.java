@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint.AdmissionCapacity;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DispatchOutcome;
-import org.flexlb.balance.endpoint.DecodeEndpoint.ReleaseReason;
+import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
+import org.flexlb.balance.endpoint.DecodeResources.DispatchOutcome;
+import org.flexlb.balance.endpoint.DecodeResources.ReleaseReason;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -18,8 +18,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Map;
 
-import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.*;
-import static org.flexlb.balance.endpoint.DecodeEndpoint.ReservationReleaseResult.*;
+import static org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitTransferStatus.*;
+import static org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** The resource ledger can run without an Endpoint, scheduler, RPC client or callback. */
@@ -104,9 +104,9 @@ class DecodeStateTest {
         }
         var sibling = state.reserve(2, 70, 90, 30, true, CAPACITY);
         long version = state.placementVersion();
-        var stale = new DecodeEndpoint.ReservationHandle(
+        var stale = new DecodeResources.ReservationHandle(
                 reservation.endpointGenerationId(), 1, reservation.reservationToken() + 100);
-        var foreign = new DecodeEndpoint.ReservationHandle(
+        var foreign = new DecodeResources.ReservationHandle(
                 reservation.endpointGenerationId() + 1, 1, reservation.reservationToken());
         assertEquals(STALE, state.release(stale, reason));
         assertEquals(STALE, state.release(foreign, reason));
@@ -156,7 +156,7 @@ class DecodeStateTest {
         assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
 
         var finished = calibrate(state, status, Map.of(), Map.of("2", task));
-        assertEquals(DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL, finished.facts().getFirst().kind());
+        assertEquals(DecodeResources.WorkerStatusFact.Kind.TERMINAL, finished.facts().getFirst().kind());
         assertEquals(reservation, finished.facts().getFirst().reservation());
         assertFalse(state.hasOwnedResources(reservation));
         assertEquals(0, state.routingView().engineCapacityUsed());
@@ -184,7 +184,7 @@ class DecodeStateTest {
         }
         var sibling = state.reserve(2, 70, 90, 30, true, CAPACITY);
         assertNotNull(sibling);
-        var stale = new DecodeEndpoint.ReservationHandle(
+        var stale = new DecodeResources.ReservationHandle(
                 reservation.endpointGenerationId(), 1, reservation.reservationToken() + 100);
         assertEquals(STALE, state.release(stale, ReleaseReason.EXPIRED));
         assertTrue(state.hasOwnedResources(reservation));
@@ -263,7 +263,7 @@ class DecodeStateTest {
         DecodeEndpoint owner = new DecodeEndpoint(status(), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
         DecodeEndpoint other = new DecodeEndpoint(status(), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
         try {
-            DecodeEndpoint.ReservationHandle reservation;
+            DecodeResources.ReservationHandle reservation;
             try (var pin = owner.tryPinGeneration()) {
                 reservation = owner.reserve(pin, 3, 100, 200, 50, null);
             }
@@ -296,7 +296,7 @@ class DecodeStateTest {
         assertEquals(1, state.routingView().engineCapacityUsed());
         var terminal = calibrate(state, status, Map.of(), Map.of("10", task(10, TaskPhase.RECEIVED)));
         assertEquals(reservation, terminal.facts().getFirst().reservation());
-        assertEquals(DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL, terminal.facts().getFirst().kind());
+        assertEquals(DecodeResources.WorkerStatusFact.Kind.TERMINAL, terminal.facts().getFirst().kind());
         assertFalse(state.hasOwnedResources(reservation));
         assertEquals(0, state.routingView().engineCapacityUsed());
     }
@@ -323,7 +323,7 @@ class DecodeStateTest {
         DecodeState state = new DecodeState(status);
         var victim = state.reserve(10, 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginPreemption(
+        assertEquals(DecodeResources.PreemptionBeginResult.SUCCESS, state.beginPreemption(
                 1, java.util.List.of(victim), 11, 100, 200, 80, new AdmissionCapacity(1, 100)));
         assertTrue(EndpointTestSupport.handoffPreemption(state, 1));
         for (int i = 0; i < 2; i++) {
@@ -334,7 +334,7 @@ class DecodeStateTest {
         var terminal = calibrate(state, status, Map.of("10", task(10, TaskPhase.RECEIVED)),
                 Map.of("10", task(10, TaskPhase.RECEIVED)));
         assertEquals(1, terminal.facts().size());
-        assertEquals(DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL, terminal.facts().getFirst().kind());
+        assertEquals(DecodeResources.WorkerStatusFact.Kind.TERMINAL, terminal.facts().getFirst().kind());
         assertEquals(victim, terminal.facts().getFirst().reservation());
         assertFalse(state.hasOwnedResources(victim));
         assertNotNull(state.finishPreemption(1, true));

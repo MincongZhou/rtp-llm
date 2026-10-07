@@ -55,29 +55,35 @@ class PrefillStateSnapshotTest {
         RequestRoute request = item(1);
         if (batch) {
             enqueue(request);
-            try (var reservation = state.reserveBatch(request, 9L, 1,
-                    generation.tryAcquireHandoff()).reservation()) {
-                assertThrows(IllegalStateException.class,
-                        () -> reservation.commitLocked(List.of(request), 10L));
-                assertEquals(List.of(request), state.captureQueue(1).items());
-                assertEquals(1, state.captureQueueCounters().batchSlots());
-                try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(request), 10L)) {
-                    assertTrue(state.captureQueue(1).items().isEmpty());
+            {
+                var reservation = state.reserveBatch(request, 9L, 1,
+                    generation.tryAcquireHandoff()).reservation();
+                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                    assertThrows(IllegalStateException.class,
+                            () -> reservation.commitLocked(List.of(request), 10L));
+                    assertEquals(List.of(request), state.captureQueue(1).items());
+                    assertEquals(1, state.captureQueueCounters().batchSlots());
+                    try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(request), 10L)) {
+                        assertTrue(state.captureQueue(1).items().isEmpty());
+                    }
                 }
             }
         } else {
-            try (var reservation = state.reserveUnqueuedRoute(request, 10L, 1L).reservation();
-                 var generationHandoff = generation.tryAcquireHandoff()) {
-                assertThrows(IllegalStateException.class,
-                        () -> state.commitRouteGroupLocked(List.of(request), List.of(reservation), generationHandoff));
-                assertEquals(1L, state.observedRequestCount());
-                try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(request),
-                        List.of(reservation), generationHandoff)) {
+            {
+                var reservation = state.reserveUnqueuedRoute(request, 10L, 1L).reservation();
+                try (var preparationReservation = EndpointTestSupport.preparation(reservation);
+                     var generationHandoff = generation.tryAcquireHandoff()) {
+                    assertThrows(IllegalStateException.class,
+                            () -> state.commitRouteGroupLocked(List.of(request), List.of(reservation), generationHandoff));
                     assertEquals(1L, state.observedRequestCount());
+                    try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(request),
+                            List.of(reservation), generationHandoff)) {
+                        assertEquals(1L, state.observedRequestCount());
+                    }
                 }
             }
         }
-        assertTrue(state.terminalizeCommittedItem(request));
+        assertTrue(EndpointTestSupport.releaseRequest(state, request));
         assertEquals(0L, state.observedRequestCount());
         assertEquals(0, state.captureQueueCounters().batchSlots());
     }
@@ -91,12 +97,18 @@ class PrefillStateSnapshotTest {
         PrefillState.CommittedHandoff handoff;
         if (batch) {
             enqueue(request);
-            try (var lease = state.reserveBatch(request, 9L, 1, lifecycle.tryAcquireHandoff()).reservation()) {
-                handoff = EndpointTestSupport.commitBatch(state, lease, List.of(request), 10L);
+            {
+                var lease = state.reserveBatch(request, 9L, 1, lifecycle.tryAcquireHandoff()).reservation();
+                try (var preparationLease = EndpointTestSupport.preparation(lease)) {
+                    handoff = EndpointTestSupport.commitBatch(state, lease, List.of(request), 10L);
+                }
             }
         } else {
-            try (var lease = state.reserveUnqueuedRoute(request, 10L, Long.MAX_VALUE).reservation()) {
-                handoff = EndpointTestSupport.commitRoutes(state, List.of(request), List.of(lease), lifecycle.tryAcquireHandoff());
+            {
+                var lease = state.reserveUnqueuedRoute(request, 10L, Long.MAX_VALUE).reservation();
+                try (var preparationLease = EndpointTestSupport.preparation(lease)) {
+                    handoff = EndpointTestSupport.commitRoutes(state, List.of(request), List.of(lease), lifecycle.tryAcquireHandoff());
+                }
             }
         }
         try (handoff; var otherHandoff = lifecycle.tryAcquireHandoff();
@@ -119,7 +131,7 @@ class PrefillStateSnapshotTest {
             handoff.close();
             assertEquals(1, drained.get());
             assertEquals(1L, state.observedRequestCount(), "closing handoff cannot release committed capacity");
-            assertTrue(state.terminalizeCommittedItem(request));
+            assertTrue(EndpointTestSupport.releaseRequest(state, request));
             assertEquals(0L, state.observedRequestCount());
         }
     }
@@ -129,20 +141,23 @@ class PrefillStateSnapshotTest {
         RequestRoute first = item(1), second = item(2);
         enqueue(first);
         enqueue(second);
-        try (var lease = state.reserveBatch(first, 9L, 1, generation.tryAcquireHandoff()).reservation()) {
-            var before = state.captureQueue(4);
-            assertThrows(IllegalStateException.class,
-                    () -> EndpointTestSupport.commitBatch(state, lease, List.of(first, first), 10L));
-            assertEquals(before, state.captureQueue(4), "invalid input must not detach any ACTIVE member");
-            assertEquals(1, state.captureQueueCounters().batchSlots());
-            try (var committed = EndpointTestSupport.commitBatch(state, lease, List.of(first, second), 10L)) {
-                assertTrue(state.captureQueue(4).items().isEmpty());
-                assertEquals(List.of(1L, 2L), state.committedSnapshot().batches().getFirst().requestIds());
+        {
+            var lease = state.reserveBatch(first, 9L, 1, generation.tryAcquireHandoff()).reservation();
+            try (var preparationLease = EndpointTestSupport.preparation(lease)) {
+                var before = state.captureQueue(4);
+                assertThrows(IllegalStateException.class,
+                        () -> EndpointTestSupport.commitBatch(state, lease, List.of(first, first), 10L));
+                assertEquals(before, state.captureQueue(4), "invalid input must not detach any ACTIVE member");
+                assertEquals(1, state.captureQueueCounters().batchSlots());
+                try (var committed = EndpointTestSupport.commitBatch(state, lease, List.of(first, second), 10L)) {
+                    assertTrue(state.captureQueue(4).items().isEmpty());
+                    assertEquals(List.of(1L, 2L), state.committedSnapshot().batches().getFirst().requestIds());
+                }
+                assertTrue(EndpointTestSupport.releaseRequest(state, first));
+                assertEquals(1, state.captureQueueCounters().batchSlots());
+                assertTrue(EndpointTestSupport.releaseRequest(state, second));
+                assertEquals(0, state.captureQueueCounters().batchSlots());
             }
-            assertTrue(state.terminalizeCommittedItem(first));
-            assertEquals(1, state.captureQueueCounters().batchSlots());
-            assertTrue(state.terminalizeCommittedItem(second));
-            assertEquals(0, state.captureQueueCounters().batchSlots());
         }
     }
 
@@ -189,9 +204,12 @@ class PrefillStateSnapshotTest {
             lock.unlock();
         }
         assertTrue(availability.getAsBoolean());
-        try (var lease = ledger.reserveBatch(request, 9L, 1, generation.tryAcquireHandoff()).reservation()) {
-            org.junit.jupiter.api.Assertions.assertNotNull(lease);
-            assertFalse(availability.getAsBoolean());
+        {
+            var lease = ledger.reserveBatch(request, 9L, 1, generation.tryAcquireHandoff()).reservation();
+            try (var preparationLease = EndpointTestSupport.preparation(lease)) {
+                org.junit.jupiter.api.Assertions.assertNotNull(lease);
+                assertFalse(availability.getAsBoolean());
+            }
         }
         assertTrue(availability.getAsBoolean());
     }
@@ -203,28 +221,27 @@ class PrefillStateSnapshotTest {
         RuntimeException failure = new IllegalStateException("generation drain failure");
         EndpointGenerationLifecycle retiring = new EndpointGenerationLifecycle(() -> { throw failure; });
         RequestRoute request = item(91L);
-        lock.lock();
-        try {
-            assertTrue(ledger.enqueueActiveLocked(request, 10L));
-        } finally {
-            lock.unlock();
+        if (batch) {
+            lock.lock();
+            try { assertTrue(ledger.enqueueActiveLocked(request, 10L)); }
+            finally { lock.unlock(); }
         }
         long queuedVersion = waiting.version();
         PrefillState.Reservation lease = batch
                 ? ledger.reserveBatch(request, 9L, 1, retiring.tryAcquireHandoff()).reservation()
-                : EndpointTestSupport.reserveRoute(ledger, request, 10L);
+                : ledger.reserveUnqueuedRoute(request, 10L, 10L).reservation();
         if (batch) {
             retiring.beginRetirement();
             assertFalse(retiring.tryStartCleanup());
-            assertSame(failure, assertThrows(IllegalStateException.class, lease::close));
+            assertSame(failure, assertThrows(IllegalStateException.class, () -> EndpointTestSupport.rollback(lease)));
         } else {
-            lease.close();
+            EndpointTestSupport.rollback(lease);
         }
-        lease.close();
+        EndpointTestSupport.rollback(lease);
         lock.lock();
         try {
             assertEquals(0, ledger.captureQueueCounters().batchSlots());
-            assertTrue(waiting.contains(request), "rollback retains the queued request");
+            assertEquals(batch, waiting.contains(request), "batch rollback retains queue ownership; DIRECT rollback releases its seat");
             assertEquals(queuedVersion, waiting.version(), "lease rollback does not change queue membership");
         } finally {
             lock.unlock();
@@ -237,27 +254,33 @@ class PrefillStateSnapshotTest {
         enqueue(first);
         enqueue(sibling);
         enqueue(next);
-        try (var lease = state.reserveBatch(first, 10, 4, generation.tryAcquireHandoff()).reservation()) {
-            try (var probe = generation.tryAcquireHandoff()) {
-                assertEquals(PrefillState.CapacityStatus.BATCH_ID_ALREADY_RESERVED,
-                        state.reserveBatch(next, 10, 4, probe).status());
-            }
-            try (var handoff = EndpointTestSupport.commitBatch(state, lease, List.of(first, sibling), 30)) {
-                assertEquals(1, state.stats().batchCount());
-            }
-            assertTrue(state.terminalizeCommittedItem(first));
-            try (var probe = generation.tryAcquireHandoff()) {
-                assertEquals(PrefillState.CapacityStatus.BATCH_ID_ALREADY_RESERVED,
-                        state.reserveBatch(next, 10, 4, probe).status());
-            }
-            assertTrue(state.terminalizeCommittedItem(sibling));
-            try (var replacement = state.reserveBatch(next, 10, 4,
-                    generation.tryAcquireHandoff()).reservation()) {
-                assertEquals(10, replacement.batchId());
-                try (var handoff = EndpointTestSupport.commitBatch(state, replacement, List.of(next), 20)) {
+        {
+            var lease = state.reserveBatch(first, 10, 4, generation.tryAcquireHandoff()).reservation();
+            try (var preparationLease = EndpointTestSupport.preparation(lease)) {
+                try (var probe = generation.tryAcquireHandoff()) {
+                    assertEquals(PrefillState.CapacityStatus.BATCH_ID_ALREADY_RESERVED,
+                            state.reserveBatch(next, 10, 4, probe).status());
+                }
+                try (var handoff = EndpointTestSupport.commitBatch(state, lease, List.of(first, sibling), 30)) {
                     assertEquals(1, state.stats().batchCount());
                 }
-                assertTrue(state.terminalizeCommittedItem(next));
+                assertTrue(EndpointTestSupport.releaseRequest(state, first));
+                try (var probe = generation.tryAcquireHandoff()) {
+                    assertEquals(PrefillState.CapacityStatus.BATCH_ID_ALREADY_RESERVED,
+                            state.reserveBatch(next, 10, 4, probe).status());
+                }
+                assertTrue(EndpointTestSupport.releaseRequest(state, sibling));
+                {
+                    var replacement = state.reserveBatch(next, 10, 4,
+                        generation.tryAcquireHandoff()).reservation();
+                    try (var preparationReplacement = EndpointTestSupport.preparation(replacement)) {
+                        assertEquals(10, replacement.batchId());
+                        try (var handoff = EndpointTestSupport.commitBatch(state, replacement, List.of(next), 20)) {
+                            assertEquals(1, state.stats().batchCount());
+                        }
+                        assertTrue(EndpointTestSupport.releaseRequest(state, next));
+                    }
+                }
             }
         }
         assertEquals(0, state.stats().locallyOwnedRequests());
@@ -271,23 +294,32 @@ class PrefillStateSnapshotTest {
         enqueue(sibling);
         enqueue(queued);
         long beforeCommitVersion = waiting.version();
-        try (var batch = state.reserveBatch(first, 1, 4, generation.tryAcquireHandoff()).reservation();
-             var handoff = EndpointTestSupport.commitBatch(state, batch, List.of(first, sibling), 30)) {
-            assertEquals(2, state.stats().locallyOwnedRequests());
-            assertTrue(waiting.version() > beforeCommitVersion, "batch commit invalidates the queue revision");
-            assertEquals(List.of(queued), waitingItems());
+        {
+            var batch = state.reserveBatch(first, 1, 4, generation.tryAcquireHandoff()).reservation();
+            try (var preparationBatch = EndpointTestSupport.preparation(batch);
+                 var handoff = EndpointTestSupport.commitBatch(state, batch, List.of(first, sibling), 30)) {
+                assertEquals(2, state.stats().locallyOwnedRequests());
+                assertTrue(waiting.version() > beforeCommitVersion, "batch commit invalidates the queue revision");
+                assertEquals(List.of(queued), waitingItems());
+            }
         }
-        try (var reservation = state.reserveUnqueuedRoute(individual, 20, Long.MAX_VALUE).reservation();
-             var handoff = EndpointTestSupport.commitRoutes(state, List.of(individual), List.of(reservation),
+        {
+            var reservation = state.reserveUnqueuedRoute(individual, 20, Long.MAX_VALUE).reservation();
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation);
+                 var handoff = EndpointTestSupport.commitRoutes(state, List.of(individual), List.of(reservation),
                      generation.tryAcquireHandoff())) {
-            assertEquals(3, state.stats().locallyOwnedRequests());
+                assertEquals(3, state.stats().locallyOwnedRequests());
+            }
         }
         clock.set(105);
         RequestRoute fresh = item(5);
-        try (var reservation = state.reserveUnqueuedRoute(fresh, 20, Long.MAX_VALUE).reservation();
-             var handoff = EndpointTestSupport.commitRoutes(state, List.of(fresh), List.of(reservation),
+        {
+            var reservation = state.reserveUnqueuedRoute(fresh, 20, Long.MAX_VALUE).reservation();
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation);
+                 var handoff = EndpointTestSupport.commitRoutes(state, List.of(fresh), List.of(reservation),
                      generation.tryAcquireHandoff())) {
-            assertEquals(4, state.stats().locallyOwnedRequests());
+                assertEquals(4, state.stats().locallyOwnedRequests());
+            }
         }
         clock.set(110);
         assertEquals(1, EndpointTestSupport.evictPrefill(state, 10, id -> id == first.requestId()));
@@ -325,8 +357,8 @@ class PrefillStateSnapshotTest {
             }
             assertEquals(List.of(1L, 2L), shared.requests().stream()
                     .map(WorkSnapshot.RequestWork::requestId).toList());
-            second.close();
-            first.close();
+            EndpointTestSupport.rollback(second);
+            EndpointTestSupport.rollback(first);
             assertEquals(2, shared.requests().size());
             assertTrue(capture().work().materialize().requests().isEmpty());
         }
@@ -348,7 +380,7 @@ class PrefillStateSnapshotTest {
         assertSame(after.work(), added.work());
         assertEquals(List.of(queued.requestId()), before.active().projectedItems().stream()
                 .map(org.flexlb.balance.planner.GroupPlanner.Item::requestId).toList());
-        reservation.close();
+        EndpointTestSupport.rollback(reservation);
         assertSame(added.active(), capture().active());
         assertTrue(capture().work().materialize().requests().isEmpty());
     }
@@ -370,32 +402,30 @@ class PrefillStateSnapshotTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void routeCommitValidatesEveryCanonicalLeaseBeforeTransferringAny(boolean replaced) {
-        RequestRoute first = routeItem(101), second = routeItem(102);
+    void queuedRouteCommitValidatesEveryCanonicalIdentityBeforeTransferringAny(boolean replaced) {
+        RequestRoute first = routeItem(101), second = routeItem(102), replacement = routeItem(102);
         enqueue(first);
         enqueue(second);
-        try (var firstLease = EndpointTestSupport.reserveRoute(state, first, 30L);
-             var secondLease = EndpointTestSupport.reserveRoute(state, second, 40L)) {
-            if (!replaced) { secondLease.close(); }
-            try (var permit = generation.tryAcquireHandoff()) {
-                assertThrows(IllegalStateException.class, () -> EndpointTestSupport.commitRoutes(state,
-                        List.of(first, second), List.of(firstLease, replaced ? firstLease : secondLease), permit));
-            }
-            assertEquals(List.of(first, second), waitingItems());
-            assertSame(firstLease, state.prepareRoute(first, 30L));
-            assertFalse(state.terminalizeCommittedItem(first));
-            var validSecond = replaced ? secondLease : EndpointTestSupport.reserveRoute(state, second, 40L);
-            try (validSecond; var handoff = EndpointTestSupport.commitRoutes(state, List.of(first, second),
-                    List.of(firstLease, validSecond), generation.tryAcquireHandoff())) {
-                assertTrue(waitingItems().isEmpty());
-                assertThrows(IllegalStateException.class, () -> state.prepareRoute(first, 50L));
-                assertThrows(IllegalStateException.class, () -> state.prepareRoute(second, 50L));
-                assertEquals(0L, handoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
-            }
+        assertTrue(state.releaseRequest(second) != PrefillState.RequestRelease.NONE);
+        if (replaced) { enqueue(replacement); }
+        try (var permit = generation.tryAcquireHandoff()) {
+            assertThrows(IllegalStateException.class, () -> EndpointTestSupport.commitQueuedRoutes(state,
+                    List.of(first, second), new long[]{30L, 40L}, permit));
+        }
+        assertEquals(replaced ? List.of(first, replacement) : List.of(first), waitingItems());
+        assertEquals(replaced ? 2L : 1L, state.observedRequestCount());
+        assertTrue(state.committedSnapshot().requests().isEmpty(),
+                "failed validation must not commit an earlier member");
+        RequestRoute validSecond = replaced ? replacement : second;
+        if (!replaced) { enqueue(second); }
+        try (var handoff = EndpointTestSupport.commitQueuedRoutes(state, List.of(first, validSecond),
+                new long[]{30L, 40L}, generation.tryAcquireHandoff())) {
+            assertTrue(waitingItems().isEmpty());
+            assertEquals(0L, handoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
         }
         assertEquals(2, state.committedSnapshot().requests().size());
-        assertTrue(state.terminalizeCommittedItem(first));
-        assertTrue(state.terminalizeCommittedItem(second));
+        assertTrue(EndpointTestSupport.releaseRequest(state, first));
+        assertTrue(EndpointTestSupport.releaseRequest(state, validSecond));
         assertTrue(state.committedSnapshot().requests().isEmpty());
     }
 
@@ -412,37 +442,88 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
+    void queuedRouteCommitCannotConsumeABatchPreparationOrPartiallyCommitThePrefix() {
+        RequestRoute first = item(1), second = item(2);
+        enqueue(first);
+        enqueue(second);
+        var batch = state.reserveBatch(second, 11L, 1, generation.tryAcquireHandoff()).reservation();
+        try (var preparation = EndpointTestSupport.preparation(batch);
+             var permit = generation.tryAcquireHandoff()) {
+            assertThrows(IllegalStateException.class, () -> EndpointTestSupport.commitQueuedRoutes(state,
+                    List.of(first, second), new long[]{30L, 40L}, permit));
+            assertEquals(List.of(first, second), waitingItems());
+            assertTrue(state.committedSnapshot().requests().isEmpty());
+            assertEquals(1, state.captureQueueCounters().batchSlots());
+        }
+        assertEquals(0, state.captureQueueCounters().batchSlots());
+        try (var handoff = EndpointTestSupport.commitQueuedRoutes(state, List.of(first, second),
+                new long[]{30L, 40L}, generation.tryAcquireHandoff())) {
+            assertTrue(waitingItems().isEmpty());
+        }
+        assertEquals(70L, state.committedSnapshot().totalRemainingWorkMs().orElseThrow());
+    }
+
+    @Test
+    void releasingQueuedBatchHeadLeavesPreparationToItsTransaction() {
+        RequestRoute head = item(1);
+        enqueue(head);
+        var batch = state.reserveBatch(head, 11L, 1, generation.tryAcquireHandoff()).reservation();
+        try (var preparation = EndpointTestSupport.preparation(batch)) {
+            assertEquals(PrefillState.RequestRelease.QUEUED, state.releaseRequest(head));
+            assertEquals(0L, state.observedRequestCount());
+            assertEquals(1, state.captureQueueCounters().batchSlots());
+            assertEquals(PrefillState.RequestRelease.NONE, state.releaseRequest(head));
+        }
+        assertEquals(0, state.captureQueueCounters().batchSlots());
+    }
+
+    @Test
+    void releasingCommittedBatchMemberRetainsItsSiblingsAndSlot() {
+        RequestRoute first = item(1), second = item(2);
+        commitBatch(List.of(first, second), 100L);
+        assertEquals(PrefillState.RequestRelease.COMMITTED, state.releaseRequest(first));
+        assertEquals(PrefillState.RequestRelease.NONE, state.releaseRequest(first));
+        assertEquals(List.of(2L), state.committedSnapshot().batches().getFirst().requestIds());
+        assertEquals(1L, state.observedRequestCount());
+        assertEquals(1, state.captureQueueCounters().batchSlots());
+        assertEquals(PrefillState.RequestRelease.COMMITTED, state.releaseRequest(second));
+        assertEquals(0, state.captureQueueCounters().batchSlots());
+    }
+
+    @Test
     void queuedAndImmediateRoutesUseOneCommitAndTerminalOwnership() {
         RequestRoute queued = item(1), immediate = item(2);
         enqueue(queued);
-        try (var queuedReservation = EndpointTestSupport.reserveRoute(state, queued, 30L);
-             var immediateReservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation()) {
+        var immediateReservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation();
+        try (var preparation = EndpointTestSupport.preparation(immediateReservation)) {
             assertEquals(List.of(queued), waitingItems());
             assertEquals(1, state.committedSnapshot().requests().size());
-            try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(queued, immediate),
-                    List.of(queuedReservation, immediateReservation), generation.tryAcquireHandoff())) {
+            try (var handoff = EndpointTestSupport.commitQueuedRoutes(state, List.of(queued),
+                    new long[]{30L}, generation.tryAcquireHandoff())) {
                 assertTrue(waitingItems().isEmpty());
-                assertEquals(0L, handoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow(),
-                        "the selected group's own provisional work is excluded");
-                assertEquals(List.of(1L, 2L), state.committedSnapshot().requests().stream()
-                        .map(work -> work.requestId()).toList());
-                assertEquals(70L, state.committedSnapshot().knownRemainingWorkMsAt(System.currentTimeMillis()));
+                assertEquals(40L, handoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow(),
+                        "uncommitted DIRECT work remains visible to the queued route");
+            }
+            try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(immediate),
+                    List.of(immediateReservation), generation.tryAcquireHandoff())) {
+                assertEquals(30L, handoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
             }
         }
-        assertEquals(2, state.committedSnapshot().requests().size(), "closing committed capabilities cannot release Engine ownership");
-        assertTrue(state.terminalizeCommittedItem(queued));
-        assertTrue(state.terminalizeCommittedItem(immediate));
+        assertEquals(70L, state.committedSnapshot().knownRemainingWorkMsAt(clock.get()));
+        assertTrue(EndpointTestSupport.releaseRequest(state, queued));
+        assertTrue(EndpointTestSupport.releaseRequest(state, immediate));
         assertTrue(state.committedSnapshot().requests().isEmpty());
     }
 
     @Test
     void immediatePreparationIsVisibleToLaterPredictionsAndRollbackRemovesIt() {
         RequestRoute immediate = item(1);
-        try (var reservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation()) {
-            assertTrue(waitingItems().isEmpty());
-            assertEquals(40L, capture().work().materialize().knownRemainingWorkMsAt(System.currentTimeMillis()));
-            assertSame(reservation, state.prepareRoute(immediate, 80L));
-            assertEquals(80L, capture().work().materialize().knownRemainingWorkMsAt(System.currentTimeMillis()));
+        {
+            var reservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation();
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                assertTrue(waitingItems().isEmpty());
+                assertEquals(40L, capture().work().materialize().knownRemainingWorkMsAt(System.currentTimeMillis()));
+            }
         }
         assertTrue(capture().work().materialize().requests().isEmpty());
         assertTrue(state.committedSnapshot().requests().isEmpty());
@@ -452,30 +533,30 @@ class PrefillStateSnapshotTest {
     void leaseRollbackRetainsQueuedWorkButReleasesUnqueuedAdmission() {
         RequestRoute queued = item(1), immediate = item(2);
         enqueue(queued);
-        EndpointTestSupport.reserveRoute(state, queued, 30L).close();
-        state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation().close();
+        var reservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation();
+        EndpointTestSupport.rollback(reservation);
         assertEquals(List.of(queued), waitingItems());
         assertTrue(state.committedSnapshot().requests().isEmpty());
-        assertTrue(EndpointTestSupport.reserveRoute(state, queued, 35L) != null);
     }
 
     @Test
     void routeCommitRejectsMissingQueueIndexBeforeCommittingAnyMember() {
-        RequestRoute queued = item(1), immediate = item(2);
-        enqueue(queued);
-        try (var queuedReservation = EndpointTestSupport.reserveRoute(state, queued, 30L);
-             var immediateReservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation()) {
-            assertTrue(waiting.remove(queued));
-            try (var handoff = generation.tryAcquireHandoff()) {
-                assertThrows(IllegalStateException.class, () -> EndpointTestSupport.commitRoutes(state,
-                        List.of(immediate, queued), List.of(immediateReservation, queuedReservation), handoff));
-            }
-            assertFalse(state.terminalizeCommittedItem(immediate));
-            assertTrue(waiting.add(queued));
-            try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(immediate, queued),
-                    List.of(immediateReservation, queuedReservation), generation.tryAcquireHandoff())) {
-                assertTrue(waiting.isEmpty());
-            }
+        RequestRoute first = item(1), second = item(2);
+        enqueue(first);
+        enqueue(second);
+        assertTrue(waiting.remove(second));
+        try (var permit = generation.tryAcquireHandoff()) {
+            assertThrows(IllegalStateException.class, () -> EndpointTestSupport.commitQueuedRoutes(state,
+                    List.of(first, second), new long[]{30L, 40L}, permit));
+        }
+        assertEquals(List.of(first), waitingItems());
+        assertEquals(2L, state.observedRequestCount(),
+                "failed validation preserves both canonical request owners");
+        assertTrue(state.committedSnapshot().requests().isEmpty());
+        assertTrue(waiting.add(second));
+        try (var handoff = EndpointTestSupport.commitQueuedRoutes(state, List.of(first, second),
+                new long[]{30L, 40L}, generation.tryAcquireHandoff())) {
+            assertTrue(waiting.isEmpty());
         }
     }
 
@@ -493,8 +574,8 @@ class PrefillStateSnapshotTest {
         assertNull(retired.invariantFailure());
         assertEquals(3, retired.ownedItems().size());
         assertTrue(retired.ownedItems().containsAll(List.of(queued, prepared, committed)));
-        preparedReservation.close();
-        committedReservation.close();
+        EndpointTestSupport.rollback(preparedReservation);
+        EndpointTestSupport.rollback(committedReservation);
         assertTrue(state.committedSnapshot().requests().isEmpty());
         assertTrue(waiting.isEmpty());
     }
@@ -527,7 +608,7 @@ class PrefillStateSnapshotTest {
         assertEquals(0, state.captureQueueCounters().batchSlots());
         assertEquals(0, state.observedRequestCount());
         assertTrue(waiting.isEmpty());
-        lease.close();
+        EndpointTestSupport.rollback(lease);
         assertEquals(1, drained.get(), "late lease cleanup cannot release the generation twice");
         var repeated = state.retireGenerationOwnership();
         assertTrue(repeated.ownedItems().isEmpty());
@@ -539,7 +620,6 @@ class PrefillStateSnapshotTest {
         RequestRoute first = item(1), second = item(2), detached = item(3);
         commitBatch(List.of(first, second), 100L);
         enqueue(detached);
-        var routeLease = EndpointTestSupport.reserveRoute(state, detached, 20L);
         assertSame(detached, state.detachNextActiveForStop());
 
         var retired = state.retireGenerationOwnership();
@@ -550,9 +630,8 @@ class PrefillStateSnapshotTest {
         assertFalse(retired.batchCompletions().getFirst().learningEligible());
         assertEquals(0, state.captureQueueCounters().batchSlots());
         assertEquals(0, state.observedRequestCount());
-        routeLease.close();
-        assertFalse(state.terminalizeCommittedItem(first));
-        assertFalse(state.terminalizeCommittedItem(second));
+        assertFalse(EndpointTestSupport.releaseRequest(state, first));
+        assertFalse(EndpointTestSupport.releaseRequest(state, second));
         assertTrue(state.retireGenerationOwnership().batchCompletions().isEmpty());
     }
 
@@ -560,64 +639,45 @@ class PrefillStateSnapshotTest {
     void cancellationBeforeCommitReleasesAnUnqueuedAdmissionExactlyOnce() {
         RequestRoute immediate = item(1);
         var reservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation();
-        lock.lock();
-        try {
-            assertTrue(state.removeQueuedLocked(immediate));
-            assertFalse(state.removeQueuedLocked(immediate));
-        } finally {
-            lock.unlock();
-        }
-        reservation.close();
+        assertEquals(PrefillState.RequestRelease.RESERVED, state.releaseRequest(immediate));
+        assertEquals(PrefillState.RequestRelease.NONE, state.releaseRequest(immediate));
+        EndpointTestSupport.rollback(reservation);
         assertTrue(state.committedSnapshot().requests().isEmpty());
         assertTrue(capture().work().materialize().requests().isEmpty());
     }
 
     @Test
-    void staleRouteCannotPrepareOrRemoveReplacementWithTheSameRequestId() {
+    void staleRouteCannotCommitOrReleaseReplacementWithTheSameRequestId() {
         RequestRoute first = item(1), replacement = item(1);
         enqueue(first);
-        var firstLease = EndpointTestSupport.reserveRoute(state, first, 10L);
-        lock.lock();
-        try {
-            assertTrue(state.removeQueuedLocked(first));
-            assertTrue(state.enqueueActiveLocked(replacement, 10L));
-            var replacementLease = state.reserveRouteLocked(replacement, 20L);
-            assertThrows(IllegalStateException.class, () -> state.prepareRoute(first, 999L));
-            assertFalse(state.removeQueuedLocked(first));
-            assertSame(replacementLease, state.prepareRoute(replacement, 20L));
-        } finally {
-            lock.unlock();
+        assertEquals(PrefillState.RequestRelease.QUEUED, state.releaseRequest(first));
+        enqueue(replacement);
+        assertEquals(PrefillState.RequestRelease.NONE, state.releaseRequest(first));
+        try (var permit = generation.tryAcquireHandoff()) {
+            assertThrows(IllegalStateException.class, () -> EndpointTestSupport.commitQueuedRoutes(state,
+                    List.of(first), new long[]{999L}, permit));
         }
-        firstLease.close();
         assertEquals(List.of(replacement), waitingItems());
         assertEquals(1L, state.observedRequestCount());
-        assertFalse(state.terminalizeCommittedItem(first));
+        assertFalse(EndpointTestSupport.releaseRequest(state, first));
     }
 
     @Test
-    void stopClosesOnlyTheCanonicalRouteLease() {
+    void stopCallbackAcknowledgesOwnershipAlreadyReleasedByTerminalCleanup() {
         var ledger = new PrefillState(lock, waiting, clock::get);
-        RequestRoute item = item(1);
+        RequestRoute request = item(1);
         lock.lock();
-        PrefillState.RouteReservation lease;
-        try {
-            assertTrue(ledger.enqueueActiveLocked(item, 10L));
-            lease = ledger.reserveRouteLocked(item, 20L);
-        } finally {
-            lock.unlock();
-        }
-        assertSame(item, ledger.detachNextActiveForStop());
+        try { assertTrue(ledger.enqueueActiveLocked(request, 10L)); }
+        finally { lock.unlock(); }
+        assertSame(request, ledger.detachNextActiveForStop());
         assertTrue(waitingItems().isEmpty());
-        assertEquals(1L, ledger.observedRequestCount(), "stop callback still owns the retained identity");
-        lease.close();
-        assertThrows(IllegalStateException.class, () -> ledger.prepareRoute(item, 30L));
-        lock.lock();
-        try {
-            assertTrue(ledger.acknowledgeStopTerminalLocked(item));
-        } finally {
-            lock.unlock();
-        }
+        assertEquals(1L, ledger.observedRequestCount(), "stop callback retains a request seat until settlement");
+        assertEquals(PrefillState.RequestRelease.QUEUED, ledger.releaseRequest(request));
         assertEquals(0L, ledger.observedRequestCount());
+        assertEquals(PrefillState.RequestRelease.NONE, ledger.releaseRequest(request));
+        lock.lock();
+        try { assertTrue(ledger.acknowledgeStopTerminalLocked(request)); }
+        finally { lock.unlock(); }
     }
 
     @Test
@@ -645,8 +705,8 @@ class PrefillStateSnapshotTest {
         } finally {
             lock.unlock();
         }
-        lease.close();
-        lease.close();
+        EndpointTestSupport.rollback(lease);
+        EndpointTestSupport.rollback(lease);
         assertEquals(1, drained.get());
         lock.lock();
         try {
@@ -659,16 +719,20 @@ class PrefillStateSnapshotTest {
     @Test
     void interleavedImmediateCommitsCaptureOtherWorkAtTheActualCommitBoundary() {
         RequestRoute first = item(1), second = item(2);
-        try (var firstReservation = state.reserveUnqueuedRoute(first, 30L, Long.MAX_VALUE).reservation();
-             var secondReservation = state.reserveUnqueuedRoute(second, 40L, Long.MAX_VALUE).reservation()) {
-            try (var secondHandoff = EndpointTestSupport.commitRoutes(state, List.of(second), List.of(secondReservation),
-                    generation.tryAcquireHandoff())) {
-                assertEquals(30L, secondHandoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
-            }
-            try (var firstHandoff = EndpointTestSupport.commitRoutes(state, List.of(first), List.of(firstReservation),
-                    generation.tryAcquireHandoff())) {
-                assertEquals(40L, firstHandoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow(),
-                        "the earlier reservation must see work committed before its own commit");
+        {
+            var firstReservation = state.reserveUnqueuedRoute(first, 30L, Long.MAX_VALUE).reservation();
+            var secondReservation = state.reserveUnqueuedRoute(second, 40L, Long.MAX_VALUE).reservation();
+            try (var preparationFirstReservation = EndpointTestSupport.preparation(firstReservation);
+                 var preparationSecondReservation = EndpointTestSupport.preparation(secondReservation)) {
+                try (var secondHandoff = EndpointTestSupport.commitRoutes(state, List.of(second), List.of(secondReservation),
+                        generation.tryAcquireHandoff())) {
+                    assertEquals(30L, secondHandoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
+                }
+                try (var firstHandoff = EndpointTestSupport.commitRoutes(state, List.of(first), List.of(firstReservation),
+                        generation.tryAcquireHandoff())) {
+                    assertEquals(40L, firstHandoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow(),
+                            "the earlier reservation must see work committed before its own commit");
+                }
             }
         }
     }
@@ -676,19 +740,28 @@ class PrefillStateSnapshotTest {
     @Test
     void batchAndIndividualCommitsCaptureTheSamePrecedingTimeline() {
         RequestRoute immediate = item(1), batchMember = item(2), later = item(3);
-        try (var immediateReservation = state.reserveUnqueuedRoute(immediate, 30L, Long.MAX_VALUE).reservation();
-             var firstHandoff = EndpointTestSupport.commitRoutes(state, List.of(immediate), List.of(immediateReservation),
+        {
+            var immediateReservation = state.reserveUnqueuedRoute(immediate, 30L, Long.MAX_VALUE).reservation();
+            try (var preparationImmediateReservation = EndpointTestSupport.preparation(immediateReservation);
+                 var firstHandoff = EndpointTestSupport.commitRoutes(state, List.of(immediate), List.of(immediateReservation),
                      generation.tryAcquireHandoff())) {
-            assertEquals(0L, firstHandoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
-            enqueue(batchMember);
-            try (var batchReservation = state.reserveBatch(batchMember, 10L, 2, generation.tryAcquireHandoff()).reservation();
-                 var batchHandoff = EndpointTestSupport.commitBatch(state, batchReservation, List.of(batchMember), 40L)) {
-                assertEquals(30L, batchHandoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
-            }
-            try (var laterReservation = state.reserveUnqueuedRoute(later, 50L, Long.MAX_VALUE).reservation();
-                 var laterHandoff = EndpointTestSupport.commitRoutes(state, List.of(later), List.of(laterReservation),
-                         generation.tryAcquireHandoff())) {
-                assertEquals(70L, laterHandoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
+                assertEquals(0L, firstHandoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
+                enqueue(batchMember);
+                {
+                    var batchReservation = state.reserveBatch(batchMember, 10L, 2, generation.tryAcquireHandoff()).reservation();
+                    try (var preparationBatchReservation = EndpointTestSupport.preparation(batchReservation);
+                         var batchHandoff = EndpointTestSupport.commitBatch(state, batchReservation, List.of(batchMember), 40L)) {
+                        assertEquals(30L, batchHandoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
+                    }
+                }
+                {
+                    var laterReservation = state.reserveUnqueuedRoute(later, 50L, Long.MAX_VALUE).reservation();
+                    try (var preparationLaterReservation = EndpointTestSupport.preparation(laterReservation);
+                         var laterHandoff = EndpointTestSupport.commitRoutes(state, List.of(later), List.of(laterReservation),
+                             generation.tryAcquireHandoff())) {
+                        assertEquals(70L, laterHandoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
+                    }
+                }
             }
         }
     }
@@ -704,18 +777,21 @@ class PrefillStateSnapshotTest {
         PrefillState.WorkCapture earlier = cached ? capture().work() : null;
         clock.set(150L);
         enqueue(incoming);
-        try (var reservation = state.reserveBatch(incoming, 82L, 2, generation.tryAcquireHandoff()).reservation();
-             var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(incoming), 50L)) {
-            if (cached) { assertSame(earlier, handoff.precedingWork()); }
-            assertTrue(state.terminalizeCommittedItem(preceding));
-            assertTrue(state.terminalizeCommittedItem(incoming));
-            clock.set(190L);
-            WorkSnapshot frozen = handoff.precedingWork().materialize();
-            assertEquals(List.of(81L), frozen.batches().getFirst().requestIds());
-            assertEquals(250L, frozen.knownRemainingWorkMsAt(150L));
-            assertEquals(210L, frozen.knownRemainingWorkMsAt(190L));
-            assertFalse(frozen.containsRequest(82L), "the incoming batch is not preceding work");
-            assertTrue(state.committedSnapshot().batches().isEmpty());
+        {
+            var reservation = state.reserveBatch(incoming, 82L, 2, generation.tryAcquireHandoff()).reservation();
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation);
+                 var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(incoming), 50L)) {
+                if (cached) { assertSame(earlier, handoff.precedingWork()); }
+                assertTrue(EndpointTestSupport.releaseRequest(state, preceding));
+                assertTrue(EndpointTestSupport.releaseRequest(state, incoming));
+                clock.set(190L);
+                WorkSnapshot frozen = handoff.precedingWork().materialize();
+                assertEquals(List.of(81L), frozen.batches().getFirst().requestIds());
+                assertEquals(250L, frozen.knownRemainingWorkMsAt(150L));
+                assertEquals(210L, frozen.knownRemainingWorkMsAt(190L));
+                assertFalse(frozen.containsRequest(82L), "the incoming batch is not preceding work");
+                assertTrue(state.committedSnapshot().batches().isEmpty());
+            }
         }
     }
 
@@ -730,13 +806,13 @@ class PrefillStateSnapshotTest {
                 });
 
         clock.set(150);
-        assertTrue(state.terminalizeCommittedItem(a));
+        assertTrue(EndpointTestSupport.releaseRequest(state, a));
         assertEquals(List.of(2L, 3L), state.committedSnapshot().batches().getFirst().requestIds());
         assertEquals(250L, remainingWork());
         clock.set(190);
-        assertTrue(state.terminalizeCommittedItem(b));
-        assertFalse(state.terminalizeCommittedItem(a));
-        assertFalse(state.terminalizeCommittedItem(item(3)), "cleanup must match the exact item");
+        assertTrue(EndpointTestSupport.releaseRequest(state, b));
+        assertFalse(EndpointTestSupport.releaseRequest(state, a));
+        assertFalse(EndpointTestSupport.releaseRequest(state, item(3)), "cleanup must match the exact item");
         assertEquals(210L, remainingWork());
 
         // Returning to QUEUED pauses elapsed-time accounting, but does not undo work already started.
@@ -847,10 +923,13 @@ class PrefillStateSnapshotTest {
         commitBatch(List.of(a, b), 300L);
         enqueue(c);
         enqueue(d);
-        try (var reservation = state.reserveBatch(c, 11L, 2,
+        {
+            var reservation = state.reserveBatch(c, 11L, 2,
                 generation.tryAcquireHandoff()).reservation();
-             var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(c, d), 400L)) {
-            assertTrue(waitingItems().isEmpty());
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation);
+                 var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(c, d), 400L)) {
+                assertTrue(waitingItems().isEmpty());
+            }
         }
         clock.set(200L);
         TaskInfo activeC = task(3L, TaskPhase.RUNNING, 0L, 0L);
@@ -915,14 +994,17 @@ class PrefillStateSnapshotTest {
     void oldBatchCompletionDoesNotSettleAReusedMemberId(boolean workerTerminal) {
         RequestRoute first = item(1), sibling = item(2);
         commitBatch(List.of(first, sibling), 300L);
-        assertTrue(state.terminalizeCommittedItem(first));
+        assertTrue(EndpointTestSupport.releaseRequest(state, first));
 
         RequestRoute replacement = item(1);
         enqueue(replacement);
-        try (var lease = state.reserveBatch(replacement, 11L, 2,
+        {
+            var lease = state.reserveBatch(replacement, 11L, 2,
                 generation.tryAcquireHandoff()).reservation();
-             var handoff = EndpointTestSupport.commitBatch(state, lease, List.of(replacement), 100L)) {
-            assertEquals(2, state.captureQueueCounters().batchSlots());
+            try (var preparationLease = EndpointTestSupport.preparation(lease);
+                 var handoff = EndpointTestSupport.commitBatch(state, lease, List.of(replacement), 100L)) {
+                assertEquals(2, state.captureQueueCounters().batchSlots());
+            }
         }
         ToLongFunction<List<RequestRoute>> noRepacking = unused -> {
             throw new AssertionError("completed batches do not need reprediction");
@@ -932,13 +1014,13 @@ class PrefillStateSnapshotTest {
             assertEquals(List.of(10L), completion.batchCompletions().stream()
                     .map(PrefillState.BatchCompletion::batchId).toList());
         } else {
-            assertTrue(state.terminalizeCommittedItem(sibling));
+            assertTrue(EndpointTestSupport.releaseRequest(state, sibling));
         }
         assertEquals(1, state.captureQueueCounters().batchSlots());
         assertEquals(1, state.stats().locallyOwnedRequests());
         assertEquals(11L, state.committedSnapshot().batches().getFirst().batchId());
         assertEquals(List.of(1L), state.committedSnapshot().batches().getFirst().requestIds());
-        assertFalse(state.terminalizeCommittedItem(first), "old item cannot settle the replacement");
+        assertFalse(EndpointTestSupport.releaseRequest(state, first), "old item cannot settle the replacement");
         var stale = reconcile(Map.of("1", task(1, null, 0L, 300L)), Map.of(), noRepacking);
         assertTrue(stale.batchCompletions().isEmpty(), "old batch proof cannot settle the new batch");
         assertTrue(stale.schedulerFacts().isEmpty());
@@ -955,10 +1037,13 @@ class PrefillStateSnapshotTest {
 
     private void commitBatch(List<RequestRoute> members, long predictedMs) {
         members.forEach(this::enqueue);
-        try (var reservation = state.reserveBatch(members.getFirst(), 10L, 2,
+        {
+            var reservation = state.reserveBatch(members.getFirst(), 10L, 2,
                 generation.tryAcquireHandoff()).reservation();
-             var handoff = EndpointTestSupport.commitBatch(state, reservation, members, predictedMs)) {
-            assertTrue(waitingItems().isEmpty());
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation);
+                 var handoff = EndpointTestSupport.commitBatch(state, reservation, members, predictedMs)) {
+                assertTrue(waitingItems().isEmpty());
+            }
         }
     }
 

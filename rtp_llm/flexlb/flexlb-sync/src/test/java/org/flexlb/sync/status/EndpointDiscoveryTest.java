@@ -1,5 +1,6 @@
 package org.flexlb.sync.status;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
@@ -42,7 +43,7 @@ class EndpointDiscoveryTest {
         RunnerTestSupport.publishEndpoint(registry,
                 RoleType.DECODE, filtered.getIpPort(), filtered);
 
-        List<DecodeEndpoint.DecodeRoutingView> result =
+        List<DecodeResources.DecodeRoutingView> result =
                 registry.decodeRoutingSnapshot("group1");
         assertEquals(1, result.size());
         try (WorkerEndpoint.GenerationPin pin =
@@ -148,7 +149,7 @@ class EndpointDiscoveryTest {
 
     private List<String> decodeAddresses(String group) {
         return registry.decodeRoutingSnapshot(group).stream()
-                .map(DecodeEndpoint.DecodeRoutingView::address).toList();
+                .map(DecodeResources.DecodeRoutingView::address).toList();
     }
 
     private void assertRoleEndpoint(RoleType role, int port) {

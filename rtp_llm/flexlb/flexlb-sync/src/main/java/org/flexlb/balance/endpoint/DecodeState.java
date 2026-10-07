@@ -1,20 +1,20 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint.AdmissionCapacity;
-import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
-import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityUsage;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DispatchOutcome;
-import org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitAcquireStatus;
-import org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus;
-import org.flexlb.balance.endpoint.DecodeEndpoint.ResourceSnapshot;
-import org.flexlb.balance.endpoint.DecodeEndpoint.PreemptionBeginResult;
-import org.flexlb.balance.endpoint.DecodeEndpoint.PreemptionUpdate;
-import org.flexlb.balance.endpoint.DecodeEndpoint.ReleaseReason;
-import org.flexlb.balance.endpoint.DecodeEndpoint.ReservationHandle;
-import org.flexlb.balance.endpoint.DecodeEndpoint.ReservationReleaseResult;
-import org.flexlb.balance.endpoint.DecodeEndpoint.WorkerStatusFact;
+import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityUsage;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
+import org.flexlb.balance.endpoint.DecodeResources.DispatchOutcome;
+import org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitAcquireStatus;
+import org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitTransferStatus;
+import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
+import org.flexlb.balance.endpoint.DecodeResources.PreemptionBeginResult;
+import org.flexlb.balance.endpoint.DecodeResources.PreemptionUpdate;
+import org.flexlb.balance.endpoint.DecodeResources.ReleaseReason;
+import org.flexlb.balance.endpoint.DecodeResources.ReservationHandle;
+import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
+import org.flexlb.balance.endpoint.DecodeResources.WorkerStatusFact;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.TaskPhase;
@@ -31,6 +31,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
+
+import static org.flexlb.balance.endpoint.DecodeResources.CapacityRelease.saturatedAddNonNegative;
 
 /** Resource ledger for one Decode generation. All mutations share admissionLock.
  * Endpoint owns lifecycle pins and publishes notifications only after these calls return.
@@ -107,7 +109,7 @@ final class DecodeState {
      * reference and therefore disappears with this endpoint generation.</p>
      */
     private volatile DecodeRoutingView routingViewCache;
-    private volatile DecodeEndpoint.AdmissionSummary admissionSummaryCache;
+    private volatile DecodeResources.AdmissionSummary admissionSummaryCache;
 
     // Reservation: acquire and release exact ownership.
 
@@ -518,10 +520,7 @@ final class DecodeState {
     }
 
     private int engineDispatchHardGateUsageLocked() {
-        int engineFacingInflight = Math.max(0,
-                reservedUsage.requests - queuedUsage.requests);
-        return confirmedEngineOwnedCount + engineFacingInflight
-                + dispatchUsage.requests;
+        return getEngineLoad() + dispatchUsage.requests;
     }
 
     private CapacityUsage dispatchCapacityUsage(WorkerStatus.EngineObservation fields) {
@@ -537,15 +536,18 @@ final class DecodeState {
 
     private long engineFacingKvUsed(
             WorkerStatus.EngineObservation fields) {
-        long totalCap = fields.totalKvCacheTokens();
-        long avail = fields.availableKvCacheTokens();
-        long reportedUsed = totalCap > 0 ? Math.max(0, totalCap - avail) : 0;
+        long reportedUsed = reportedKvUsed(fields);
         long localEngineFacing = Math.max(0L,
                 reservedUsage.expectedKv - queuedUsage.expectedKv)
                 + dispatchUsage.expectedKv;
         return saturatedAddNonNegative(
                 saturatedAddNonNegative(reportedUsed, localEngineFacing),
                 priorityPreemptionHeldExpectedKv);
+    }
+
+    private static long reportedKvUsed(WorkerStatus.EngineObservation fields) {
+        return fields.totalKvCacheTokens() > 0
+                ? Math.max(0L, fields.totalKvCacheTokens() - fields.availableKvCacheTokens()) : 0L;
     }
 
     private int getEngineLoad() {
@@ -1234,8 +1236,8 @@ final class DecodeState {
 
     // Read-only views: capture, cache and metrics.
 
-    DecodeEndpoint.AdmissionSummary admissionSummary() {
-        DecodeEndpoint.AdmissionSummary cached = admissionSummaryCache;
+    DecodeResources.AdmissionSummary admissionSummary() {
+        DecodeResources.AdmissionSummary cached = admissionSummaryCache;
         if (isCurrentAdmissionSummary(cached)) { return cached; }
         admissionLock.lock();
         try {
@@ -1270,14 +1272,14 @@ final class DecodeState {
                 engineOccupancy[priority] = engineRequests[priority] == 0 ? CapacityRelease.NONE
                         : new CapacityRelease(engineRequests[priority], engineHardKv[priority], engineExpectedKv[priority]);
             }
-            admissionSummaryCache = new DecodeEndpoint.AdmissionSummary(routing, placementOccupancy, engineOccupancy);
+            admissionSummaryCache = new DecodeResources.AdmissionSummary(routing, placementOccupancy, engineOccupancy);
             return admissionSummaryCache;
         } finally {
             admissionLock.unlock();
         }
     }
 
-    private boolean isCurrentAdmissionSummary(DecodeEndpoint.AdmissionSummary summary) {
+    private boolean isCurrentAdmissionSummary(DecodeResources.AdmissionSummary summary) {
         return summary != null
                 && summary.routing().admissionVersion() == admissionVersion
                 && summary.routing().workerStatus() == status.committedWorkerStatus()
@@ -1327,13 +1329,9 @@ final class DecodeState {
             long version) {
         WorkerStatus.EngineObservation fields = committed.fields();
         int inflight = reservedUsage.requests;
-        int queued = Math.max(0, Math.min(queuedUsage.requests, inflight));
         int totalLoad = confirmedEngineOwnedCount + inflight;
-        int engineLoad = confirmedEngineOwnedCount + Math.max(0, inflight - queued);
-        long reportedUsed = fields.totalKvCacheTokens() > 0
-                ? Math.max(0L, fields.totalKvCacheTokens()
-                        - fields.availableKvCacheTokens())
-                : 0L;
+        int engineLoad = getEngineLoad();
+        long reportedUsed = reportedKvUsed(fields);
         long hardInflight = reservedUsage.hardKv;
         long expectedInflight = reservedUsage.expectedKv;
         long used = saturatedAddNonNegative(
@@ -1449,13 +1447,6 @@ final class DecodeState {
         return current != null
                 && current.reservationToken
                         == reservation.reservationToken();
-    }
-
-    static long saturatedAddNonNegative(long left, long right) {
-        if (left < 0 || right < 0) {
-            throw new IllegalArgumentException("KV admission counters must be non-negative");
-        }
-        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
     }
 
     private static final class DecodeRequestState {

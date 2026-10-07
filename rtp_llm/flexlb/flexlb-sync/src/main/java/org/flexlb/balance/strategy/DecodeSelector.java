@@ -1,9 +1,10 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.RequestRequirements;
 import org.flexlb.balance.scheduler.RequestRequirements.DecodeMode;
@@ -131,7 +132,7 @@ public class DecodeSelector {
     }
 
     /** Classify only the dimensions that prevent this request from fitting. */
-    static Response classifyCapacityFailure(RequestRequirements request, DecodeEndpoint.AdmissionSummary snapshot) {
+    static Response classifyCapacityFailure(RequestRequirements request, DecodeResources.AdmissionSummary snapshot) {
         boolean dispatch = request.mode() == DecodeMode.IMMEDIATE;
         var routing = snapshot.routing();
         var usage = dispatch ? routing.dispatchUsage() : routing.placementUsage();

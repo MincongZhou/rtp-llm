@@ -42,10 +42,10 @@ class PrefillRequestCapacityTest {
         try (var handoff = commit(immediate, registration)) {
             assertEquals(2L, state.observedRequestCount());
         }
-        registration.close();
+        EndpointTestSupport.rollback(registration);
         assertEquals(2L, state.observedRequestCount(), "ACK and capability closure cannot release Engine ownership");
-        assertTrue(state.terminalizeCommittedItem(immediate));
-        assertFalse(state.terminalizeCommittedItem(immediate));
+        assertTrue(EndpointTestSupport.releaseRequest(state, immediate));
+        assertFalse(EndpointTestSupport.releaseRequest(state, immediate));
         assertTrue(enqueue(item(3), 2L));
         assertEquals(2L, state.observedRequestCount());
     }
@@ -59,7 +59,7 @@ class PrefillRequestCapacityTest {
         heartbeat(Map.of("local", localObservation, "foreign", foreign, "duplicate", foreign), 2L);
         assertEquals(2L, state.observedRequestCount(), "early Engine observation and prepared local ownership are one request");
         try (var handoff = commit(local, registration)) { }
-        registration.close();
+        EndpointTestSupport.rollback(registration);
         heartbeat(Map.of("local", localObservation, "foreign", foreign), 2L);
         assertEquals(2L, state.observedRequestCount());
         assertFalse(state.canAcceptRequest(2L));
@@ -74,7 +74,7 @@ class PrefillRequestCapacityTest {
         heartbeat(Map.of(), 2L);
         assertEquals(3L, state.observedRequestCount(), "unseen local shadow cannot explain unidentified Engine work");
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(2), 3L).status());
-        registration.close();
+        EndpointTestSupport.rollback(registration);
         assertEquals(2L, state.observedRequestCount());
     }
 
@@ -86,9 +86,9 @@ class PrefillRequestCapacityTest {
         assertEquals(2L, state.observedRequestCount());
         assertFalse(state.canAcceptRequest(1L));
         assertTrue(state.canAcceptRequest(5L));
-        first.close();
+        EndpointTestSupport.rollback(first);
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 1L).status());
-        second.close();
+        EndpointTestSupport.rollback(second);
         assertTrue(state.canAcceptRequest(1L));
         assertNotNull(reserve(item(3), 1L).reservation());
     }
@@ -103,10 +103,10 @@ class PrefillRequestCapacityTest {
         try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(first, second), 0L)) { }
         assertFalse(state.batchCapacityAvailable(1));
         assertTrue(enqueue(item(3), 0L));
-        assertTrue(state.terminalizeCommittedItem(first));
+        assertTrue(EndpointTestSupport.releaseRequest(state, first));
         assertEquals(2L, state.observedRequestCount());
         assertFalse(state.batchCapacityAvailable(1));
-        assertTrue(state.terminalizeCommittedItem(second));
+        assertTrue(EndpointTestSupport.releaseRequest(state, second));
         assertEquals(1L, state.observedRequestCount());
         assertTrue(state.batchCapacityAvailable(1));
     }
@@ -115,12 +115,12 @@ class PrefillRequestCapacityTest {
     void staleOwnerCannotReleaseAReusedRequestId() {
         RequestRoute previous = item(1);
         var old = reserve(previous, 1L).reservation();
-        old.close();
+        EndpointTestSupport.rollback(old);
         var current = reserve(item(1), 1L).reservation();
-        old.close();
-        assertFalse(state.terminalizeCommittedItem(previous));
+        EndpointTestSupport.rollback(old);
+        assertFalse(EndpointTestSupport.releaseRequest(state, previous));
         assertEquals(1L, state.observedRequestCount());
-        current.close();
+        EndpointTestSupport.rollback(current);
         assertEquals(0L, state.observedRequestCount());
     }
 
@@ -184,7 +184,7 @@ class PrefillRequestCapacityTest {
             }
             assertEquals(1, acquired.size());
             assertFalse(state.canAcceptRequest(1L));
-            acquired.getFirst().close();
+            EndpointTestSupport.rollback(acquired.getFirst());
             assertTrue(state.canAcceptRequest(1L));
         }
     }
@@ -194,7 +194,7 @@ class PrefillRequestCapacityTest {
         var reservation = reserve(item(1), 2L).reservation();
         heartbeat(Map.of(), Long.MAX_VALUE);
         assertFalse(state.canAcceptRequest(Long.MAX_VALUE));
-        reservation.close();
+        EndpointTestSupport.rollback(reservation);
         assertFalse(state.canAcceptRequest(Long.MAX_VALUE));
         heartbeat(Map.of(), 0L);
         assertTrue(enqueue(item(2), 1L));

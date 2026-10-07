@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.config.FlexlbConfig;
@@ -12,7 +13,7 @@ public record RequestRequirements(
         long requestId,
         int priority,
         long expectedKvTokens,
-        DecodeEndpoint.AdmissionCapacity capacity,
+        DecodeResources.AdmissionCapacity capacity,
         DecodeMode mode,
         DecodeCostFormula costFormula,
         long seqLen,
@@ -43,7 +44,7 @@ public record RequestRequirements(
                 ? Long.MAX_VALUE : promptTokens + outputTokens;
         var availability = config.getRouter().getRoles().getDecode().getAvailability();
         Long maxRequests = availability.getMaxEngineRequests();
-        DecodeEndpoint.AdmissionCapacity capacity = new DecodeEndpoint.AdmissionCapacity(
+        DecodeResources.AdmissionCapacity capacity = new DecodeResources.AdmissionCapacity(
                 maxRequests == null ? 0L : maxRequests, availability.getMaxKvUsagePercent());
         return new RequestRequirements(context.getRequestId(), context.getPriority(),
                 expectedTokens,

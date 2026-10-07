@@ -58,13 +58,13 @@ class PrefillEndpointDirectSchedulerTest {
                 assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, full.status(),
                         "four exact owners already consume the four-request limit");
             }
-            owned.forEach(PrefillState.RouteReservation::close);
+            owned.forEach(endpoint::rollbackReservation);
             assertEquals(0, endpoint.observedRequestCount());
             try (var pin = endpoint.tryPinGeneration()) {
                 var result = endpoint.reserveUnqueuedRoute(pin, item(65L), 10L);
                 assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
-                result.reservation().close();
-                result.reservation().close();
+                endpoint.rollbackReservation(result.reservation());
+                endpoint.rollbackReservation(result.reservation());
             }
             assertEquals(0, endpoint.observedRequestCount());
         } finally {

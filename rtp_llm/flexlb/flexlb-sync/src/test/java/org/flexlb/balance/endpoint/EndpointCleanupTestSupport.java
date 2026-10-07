@@ -57,22 +57,28 @@ public final class EndpointCleanupTestSupport {
                 } finally {
                     lock.unlock();
                 }
-                try (var reservation = state.reserveBatch(item, batchId, 1,
-                        generation.tryAcquireHandoff()).reservation()) {
-                    assertNotNull(reservation, "the expired batch must release its sole capacity slot");
-                    try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(item), predictedMs)) {
+                {
+                    var reservation = state.reserveBatch(item, batchId, 1,
+                        generation.tryAcquireHandoff()).reservation();
+                    try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                        assertNotNull(reservation, "the expired batch must release its sole capacity slot");
+                        try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(item), predictedMs)) {
+                            assertNotNull(handoff);
+                        }
+                        return new Owner(item, reservation);
+                    }
+                }
+            }
+            {
+                var reservation = state.reserveUnqueuedRoute(item, predictedMs, 1).reservation();
+                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                    assertNotNull(reservation, "the expired individual must release its sole capacity slot");
+                    try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(item), List.of(reservation),
+                            generation.tryAcquireHandoff())) {
                         assertNotNull(handoff);
                     }
                     return new Owner(item, reservation);
                 }
-            }
-            try (var reservation = state.reserveUnqueuedRoute(item, predictedMs, 1).reservation()) {
-                assertNotNull(reservation, "the expired individual must release its sole capacity slot");
-                try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(item), List.of(reservation),
-                        generation.tryAcquireHandoff())) {
-                    assertNotNull(handoff);
-                }
-                return new Owner(item, reservation);
             }
         }
 
@@ -109,8 +115,8 @@ public final class EndpointCleanupTestSupport {
         }
 
         public void assertStaleReleaseIsIgnored(Owner old) {
-            assertFalse(state.terminalizeCommittedItem(old.item()));
-            old.reservation().close();
+            assertFalse(EndpointTestSupport.releaseRequest(state, old.item()));
+            EndpointTestSupport.rollback(old.reservation());
         }
 
         public void assertEmpty() {

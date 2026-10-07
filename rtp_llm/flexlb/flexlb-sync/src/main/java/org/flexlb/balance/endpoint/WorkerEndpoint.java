@@ -145,7 +145,7 @@ public class WorkerEndpoint {
         return generationLifecycle.tryAcquireHandoff();
     }
 
-    protected final boolean isGenerationRetiringOrRetired() {
+    public final boolean isGenerationRetiringOrRetired() {
         return generationLifecycle.isRetiringOrRetired();
     }
 

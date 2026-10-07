@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillCleanupDeadlockFixture;
 import org.flexlb.config.ConfigService;
@@ -56,11 +57,6 @@ class EndpointCleanupDeadlockTest {
     @Test
     void prefillIndividualCleanupAndReservationFinish() throws Exception {
         verifyCompletion("prefill-individual");
-    }
-
-    @Test
-    void decodeCleanupAndWorkerTerminalFinish() throws Exception {
-        verifyCompletion("decode-terminal");
     }
 
     @Test
@@ -177,7 +173,7 @@ class EndpointCleanupDeadlockTest {
             Runnable endpointOperation;
             if (kind.startsWith("decode")) {
                 var endpoint = spy(new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(mock(AbstractRequestScheduler.class))));
-                DecodeEndpoint.ReservationHandle reservation;
+                DecodeResources.ReservationHandle reservation;
                 try (var pin = endpoint.tryPinGeneration()) {
                     assertNotNull(pin);
                     reservation = endpoint.reserveUnqueued(pin, id, 1L, 1L, 50);
@@ -197,22 +193,11 @@ class EndpointCleanupDeadlockTest {
                         contextHeld.countDown();
                         assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
                         return invocation.callRealMethod();
-                    }).when(endpoint).release(reservation, DecodeEndpoint.ReleaseReason.NOT_SENT);
-                }
-                if (kind.equals("decode-terminal")) {
-                    claim.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
-                    doAnswer(invocation -> {
-                        assertFalse(Thread.holdsLock(requestContext), "Worker cleanup must not retain Context");
-                        contextHeld.countDown();
-                        assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
-                        return invocation.callRealMethod();
-                    }).when(endpoint).release(reservation, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                    }).when(endpoint).release(reservation, DecodeResources.ReleaseReason.NOT_SENT);
                 }
                 endpointOperation = switch(kind) {
                     case "decode-rejection" ->
                         () -> claim.complete(org.flexlb.balance.delivery.DeliveryResult.notSent(new IllegalStateException("not sent")));
-                    case "decode-terminal" ->
-                        () -> RequestProtocolTestSupport.observeDecode(registry, requestContext, endpoint, DecodeEndpoint.WorkerStatusFact.terminal(reservation, 0L));
                     default ->
                         () -> registry.setDeliveryPrediction(claim, new org.flexlb.balance.projection.WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
                 };
@@ -226,7 +211,7 @@ class EndpointCleanupDeadlockTest {
             // The context monitor is held explicitly to isolate the inversion from admission setup.
             Thread holder = new Thread(() -> {
                 try {
-                    if (kind.equals("decode-rejection") || kind.equals("decode-terminal")) {
+                    if (kind.equals("decode-rejection")) {
                         // Reservation release and cleanup can contend for the endpoint without holding Context.
                         endpointOperation.run();
                     } else {

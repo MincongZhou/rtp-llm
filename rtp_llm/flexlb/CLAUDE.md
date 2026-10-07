@@ -69,7 +69,7 @@ Queue scheduling components:
 - `SchedulerRuntime`: Startup scheduler initialization, maintenance, and ordered shutdown; `ExpirationTimer` schedules exact registrations, while continuation and completion executors drain their own accepted work
 - `WorkerBatcher`: Endpoint-facing queue, capacity revalidation, and delivery runtime after placement
 - `GroupingPolicy`: Stateless SINGLE/FIXED_WINDOW decisions shared by live grouping and route projection
-- `BalanceContext.DeliveryClaim`: Exact send outcome, irreversible abandonment, remote cleanup retries, and immutable settlement evidence
+- `BalanceContext.DeliveryClaim`: Exact send outcome, irreversible abandonment and immutable release evidence; `DeliveryCleanupTask` owns remote cleanup retries
 
 Capacity management components:
 - Prefill and Decode selection pipelines evaluate immutable full-fleet snapshots.
@@ -326,7 +326,7 @@ completion, timeout, and cancellation races.
 
 Methods:
 - Lifecycle fields are private. Context behavior methods validate exact request/route/operation identities under its monitor; callers never assemble transitions through setters. Route publication, endpoint cleanup, and user callbacks run outside that monitor. Delivery eligibility, time checks, and local endpoint handoff remain one atomic request operation.
-- `RequestFuture`, `AdmissionHandle`, and `DeliveryClaim` are static Context types with narrow completion callbacks. `RequestScheduler` owns global admission draining and active/terminal indexes.
+- `RequestFuture`, `AdmissionHandle`, and `DeliveryClaim` are static Context types with narrow completion callbacks. `AbstractRequestScheduler` executes request effects; `SchedulerRuntime` drains admission, and `RequestRepository` owns active/terminal indexes.
 - `SchedulerRuntime` closes producers before continuations and publications; `closeRequestExecutors()` drains both executors last. Timer shutdown closes registration before detaching handles.
 
 ### Reactive Programming

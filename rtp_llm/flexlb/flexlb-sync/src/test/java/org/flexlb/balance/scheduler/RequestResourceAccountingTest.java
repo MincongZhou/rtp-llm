@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -56,33 +57,28 @@ class RequestResourceAccountingTest {
     void partialCleanupFailureStillAttemptsOtherResourcesAndPreservesDecodeSettlement() {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), ID);
         var prefill = mock(PrefillEndpoint.class);
-        var decode = mock(DecodeEndpoint.class);
-        var reservation = new DecodeEndpoint.ReservationHandle(1L, ID, 1L);
+        var decode = RequestProtocolTestSupport.decodeEndpoint();
+        var reservation = new DecodeResources.ReservationHandle(1L, ID, 1L);
         var item = RequestRoute.create(freezeInputs(context), new Response(), null, null,
                 prefill, decode, reservation, System.currentTimeMillis());
-        var queuedFailure = new IllegalStateException("queue removal failed");
-        var committedFailure = new IllegalStateException("committed release failed");
-        when(prefill.removeQueued(item, "TERMINAL_RELEASE")).thenThrow(queuedFailure);
-        when(prefill.releaseCommittedItem(item)).thenThrow(committedFailure);
-        var plan = new PrefillAdmissionResources.ReleasePlan(
-                PrefillAdmissionResources.PrefillRelease.QUEUED_AND_COMMITTED,
-                DecodeEndpoint.ReleaseReason.NOT_SENT, null);
-        var first = PrefillAdmissionResources.settle(item, plan, false, false);
+        when(decode.release(reservation, DecodeResources.ReleaseReason.NOT_SENT))
+                .thenReturn(DecodeResources.ReservationReleaseResult.RELEASED);
+        var releaseFailure = new IllegalStateException("Prefill release failed");
+        when(prefill.releaseRequest(item)).thenThrow(releaseFailure);
+        var first = AbstractRequestScheduler.releaseResources(item, DecodeResources.ReleaseReason.NOT_SENT, null, false, false);
         assertFalse(first.prefillSettled());
         assertTrue(first.decodeSettled());
-        assertSame(queuedFailure, first.failure());
-        assertSame(committedFailure, queuedFailure.getSuppressed()[0]);
-        org.mockito.Mockito.verify(prefill).releaseCommittedItem(item);
-        org.mockito.Mockito.verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.NOT_SENT);
+        assertSame(releaseFailure, first.failure());
+        org.mockito.Mockito.verify(decode).release(reservation, DecodeResources.ReleaseReason.NOT_SENT);
 
-        org.mockito.Mockito.doReturn(true).when(prefill).removeQueued(item, "TERMINAL_RELEASE");
-        org.mockito.Mockito.doReturn(true).when(prefill).releaseCommittedItem(item);
-        var retry = PrefillAdmissionResources.settle(item, plan, first.prefillSettled(), first.decodeSettled());
+        org.mockito.Mockito.doReturn(true).when(prefill).releaseRequest(item);
+        var retry = AbstractRequestScheduler.releaseResources(item, DecodeResources.ReleaseReason.NOT_SENT, null,
+                first.prefillSettled(), first.decodeSettled());
         assertTrue(retry.prefillSettled());
         assertTrue(retry.decodeSettled());
         assertNull(retry.failure());
         org.mockito.Mockito.verify(decode, org.mockito.Mockito.times(1))
-                .release(reservation, DecodeEndpoint.ReleaseReason.NOT_SENT);
+                .release(reservation, DecodeResources.ReleaseReason.NOT_SENT);
     }
 
     @ParameterizedTest
@@ -175,16 +171,49 @@ class RequestResourceAccountingTest {
         }
     }
 
+    @ParameterizedTest
+    @EnumSource(value = LocalEnd.class, names = {"EXPIRE", "CANCEL"})
+    void prefillFailureKeepsConfirmedDecodeTrackedUntilTerminalOrInactivity(LocalEnd ending) throws Exception {
+        try (Fixture f = new Fixture()) {
+            var acquisition = f.decode.acquireDispatchPermit(f.reservation, f.capacity);
+            assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+            try (var member = new PrefillAdmissionResources.Member(f.item, acquisition.permit())) {
+                var claim = RequestProtocolTestSupport.claimRouteWithoutPrediction(f.requests, f.item,
+                        () -> member.transferToEndpoint(f.item));
+                assertNotNull(claim);
+                f.requests.publishRoute(claim, new org.flexlb.balance.projection.WorkSnapshot(
+                        System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
+            } finally { f.prefillHandoff.close(); }
+            f.decodeStatus(Map.of("101", task(ID)), Map.of(), TOTAL_KV - HARD_KV);
+            TaskInfo failed = task(ID);
+            failed.setErrorCode(500L);
+            applyStatus(f.prefill, status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", failed), TOTAL_KV));
+            f.requests.runtime.continuations().awaitIdle();
+            assertEquals(BalanceContext.RequestStage.FINALIZING, f.item.ctx().stage());
+            assertEquals(1, f.decode.resourceSnapshot().runningCount());
+            assertEquals(1, SchedulerTestSupport.repository(f.requests).liveRequestCount());
+            assertEquals(0, f.prefill.ownershipStats().locallyOwnedRequests(),
+                    "the Prefill terminal reducer has already released its exact resource owner");
+            org.mockito.Mockito.verify(f.prefill, org.mockito.Mockito.never()).releaseRequest(f.item);
+            if (ending == LocalEnd.EXPIRE) { f.expire(); }
+            else { f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV); }
+            f.assertEmpty();
+            org.mockito.Mockito.verify(f.prefill, org.mockito.Mockito.never()).releaseRequest(f.item);
+            assertTrue(f.item.future().join().isSuccess(), "resource completion preserves the published scheduling response");
+        }
+    }
+
     @Test
     void localRollbackCannotReleaseAnEngineOwnerWhoseProjectionHasNotArrived() throws Exception {
         try (Fixture f = new Fixture()) {
             var acquisition = f.decode.acquireDispatchPermit(f.reservation, f.capacity);
-            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
-            assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+            assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+            assertEquals(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().dispatch());
             // Endpoint ownership can advance before its notification reaches the context.
             f.requests.cancel(ID, 0, CancelReason.CLIENT_CANCELLED);
-            assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.requests).liveRequestCount());
+            assertEquals(1, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.requests).liveRequestCount());
+            assertEquals(BalanceContext.RequestStage.FINALIZING, f.item.ctx().stage());
             assertEquals(0, f.prefill.ownershipStats().locallyOwnedRequests());
             assertEquals(HARD_KV, f.decode.routingView().inflightHardKv());
             assertEquals(1, f.decode.routingView().engineCapacityUsed());
@@ -245,7 +274,28 @@ class RequestResourceAccountingTest {
             // No inactivity expiry, sweep, sleep or shutdown is allowed to make this assertion pass.
             f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV);
             f.assertEmpty();
+            org.mockito.Mockito.verify(f.prefill, org.mockito.Mockito.never()).releaseRequest(f.item);
             f.assertCapacityReusable();
+        }
+    }
+
+    @Test
+    void prefillCompletionAfterDecodeAcceptanceRemainsSettledAtDecodeTerminal() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.handoff().complete(DeliveryResult.delivered());
+            assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
+            f.decodeStatus(Map.of("101", task(ID)), Map.of(), TOTAL_KV - HARD_KV);
+            assertTrue(f.item.ctx().decodeAccepted());
+            assertTrue(RequestProtocolTestSupport.<java.util.OptionalLong>field(f.item.ctx(), "decisionExpiresAtMs").isEmpty());
+            applyStatus(f.prefill, status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", task(ID)), TOTAL_KV));
+            f.requests.runtime.continuations().awaitIdle();
+            assertTrue(RequestProtocolTestSupport.<java.util.OptionalLong>field(f.item.ctx(), "decisionExpiresAtMs").isEmpty(),
+                    "Prefill completion cannot rearm visibility checks after Decode acceptance");
+            assertEquals(0, f.prefill.ownershipStats().locallyOwnedRequests());
+            assertEquals(1, f.decode.resourceSnapshot().runningCount());
+            f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV);
+            f.assertEmpty();
+            org.mockito.Mockito.verify(f.prefill, org.mockito.Mockito.never()).releaseRequest(f.item);
         }
     }
 
@@ -275,7 +325,7 @@ class RequestResourceAccountingTest {
             oldClaim.complete(DeliveryResult.delivered());
             f.proveCleanup();
             f.assertEmpty();
-            var replacementRef = new AtomicReference<DecodeEndpoint.ReservationHandle>();
+            var replacementRef = new AtomicReference<DecodeResources.ReservationHandle>();
             RequestProtocolTestSupport.awaitCondition(() -> {
                 if (replacementRef.get() != null) { return true; }
                 f.decode.evictExpiredRequests(0, ignored -> false);
@@ -288,12 +338,12 @@ class RequestResourceAccountingTest {
             assertNotEquals(oldReservation.reservationToken(), replacement.reservationToken());
             assertThrows(IllegalStateException.class, () -> oldClaim.complete(DeliveryResult.delivered()));
             f.expire();
-            assertFalse(f.decode.release(oldReservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
-            assertFalse(f.decode.release(oldReservation, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
+            assertFalse(f.decode.release(oldReservation, DecodeResources.ReleaseReason.EXPIRED).released());
+            assertFalse(f.decode.release(oldReservation, DecodeResources.ReleaseReason.COUNTERPART_FINISHED).released());
             assertEquals(HARD_KV * 2, f.decode.routingView().inflightHardKv());
             assertEquals(EXPECTED_KV * 2, f.decode.routingView().inflightExpectedKv());
             assertEquals(replacement, f.decode.reservationHandle(ID));
-            f.decode.release(replacement, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            f.decode.release(replacement, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             f.assertEmpty();
         }
     }
@@ -306,11 +356,11 @@ class RequestResourceAccountingTest {
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
         final RequestRoute item;
-        final DecodeEndpoint.ReservationHandle reservation;
+        final DecodeResources.ReservationHandle reservation;
         final PrefillState.RouteReservation routeReservation;
         final PrefillState.CommittedHandoff prefillHandoff;
         final BalanceContext.AdmissionHandle admission;
-        final DecodeEndpoint.AdmissionCapacity capacity = new DecodeEndpoint.AdmissionCapacity(1, 90);
+        final DecodeResources.AdmissionCapacity capacity = new DecodeResources.AdmissionCapacity(1, 90);
         long version = 1;
         final java.util.concurrent.CompletableFuture<org.flexlb.balance.eviction.EngineCancelChannel.CancelAck> cleanup = new java.util.concurrent.CompletableFuture<>();
 
@@ -336,8 +386,8 @@ class RequestResourceAccountingTest {
             var worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");
             worker.lock.lock();
             try {
-                prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
-                        worker.prepareNewStatus(worker.freezeStatusResponse(status(RoleType.PREFILL, 1, Map.of(), Map.of(), TOTAL_KV)))).endpoint();
+                prefill = org.mockito.Mockito.spy((PrefillEndpoint) endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
+                        worker.prepareNewStatus(worker.freezeStatusResponse(status(RoleType.PREFILL, 1, Map.of(), Map.of(), TOTAL_KV)))).endpoint());
             } finally { worker.lock.unlock(); }
             decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(projector));
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
@@ -370,7 +420,7 @@ class RequestResourceAccountingTest {
 
         DeliveryClaim handoff() {
             var acquisition = decode.acquireDispatchPermit(reservation, capacity);
-            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+            assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
             var member = new PrefillAdmissionResources.Member(item, acquisition.permit());
             try {
                 var claim = RequestProtocolTestSupport.claimBatchWithoutPrediction(
@@ -421,9 +471,9 @@ class RequestResourceAccountingTest {
                 var next = decode.reserve(pin, 999L, HARD_KV, EXPECTED_KV, 50, null);
                 assertNotNull(next);
                 var permit = decode.acquireDispatchPermit(next, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit.status());
+                assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, permit.status());
                 assertTrue(permit.permit().release());
-                decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             }
             // A second exact request must be able to use the sole Prefill slot too.
             var nextContext = RequestProtocolTestSupport.context(item.ctx().getConfig(), 999L);
@@ -433,7 +483,7 @@ class RequestResourceAccountingTest {
             try (var pin = prefill.tryPinGeneration()) {
                 var result = prefill.reserveUnqueuedRoute(pin, next, 1);
                 assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
-                result.reservation().close();
+                prefill.rollbackReservation(result.reservation());
             }
             assertEmpty();
         }
@@ -452,7 +502,7 @@ class RequestResourceAccountingTest {
             try {
                 admission.finish();
                 prefillHandoff.close();
-                routeReservation.close();
+                prefill.rollbackReservation(routeReservation);
                 runtime.shutdown();
             } finally {
                 decode.close();

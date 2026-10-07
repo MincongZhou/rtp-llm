@@ -160,12 +160,12 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         return PROJECTION;
     }
 
-    /** One ordered list owns each prepared member and its exact route reservation. */
+    /** One ordered list owns each prepared member and its frozen prediction. */
     static final class RouteTransaction implements Transaction, PrefillAdmissionResources.Preparation {
         private enum Phase { PREPARING, PREPARED, COMMITTED, CLOSED }
 
         private record PreparedRoute(PrefillAdmissionResources.Member member,
-                PrefillState.RouteReservation reservation, long predictedMs) {
+                long predictedMs) {
             RequestRoute item() { return member.item(); }
         }
 
@@ -174,10 +174,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         private final ArrayList<PreparedRoute> prepared;
         private final List<PrefillAdmissionResources.Member> members = new AbstractList<>() {
             @Override public PrefillAdmissionResources.Member get(int index) { return prepared.get(index).member(); }
-            @Override public int size() { return prepared.size(); }
-        };
-        private final List<PrefillState.RouteReservation> reservations = new AbstractList<>() {
-            @Override public PrefillState.RouteReservation get(int index) { return prepared.get(index).reservation(); }
             @Override public int size() { return prepared.size(); }
         };
         private final List<RequestRoute> items = new AbstractList<>() {
@@ -204,11 +200,10 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                         evaluator, item.seqLen(), item.hitCache());
             PrefillAdmissionResources.Member member = null;
             try {
-                var reservation = prefill.prepareRoute(item, predictedMs);
                 var attempt = prepareMember(item);
                 if (!attempt.accepted()) { return attempt.boundary(); }
                 member = attempt.value();
-                prepared.add(new PreparedRoute(member, reservation, predictedMs));
+                prepared.add(new PreparedRoute(member, predictedMs));
                 return null;
             } catch (Throwable failure) {
                 return CapacityBoundary.failed(rollback(member, failure));
@@ -224,7 +219,11 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             requirePhase(Phase.PREPARED);
             try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
                 if (routeCommit == null) { throw PrefillAdmissionResources.retired("Prefill", items.getFirst()); }
-                var handoff = routeCommit.commitLocked(items, reservations);
+                long[] predictions = new long[prepared.size()];
+                for (int index = 0; index < predictions.length; index++) {
+                    predictions[index] = prepared.get(index).predictedMs();
+                }
+                var handoff = routeCommit.commitQueuedLocked(items, predictions);
                 committed = handoff;
                 phase = Phase.COMMITTED;
                 return handoff.precedingWork();

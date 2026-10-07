@@ -120,7 +120,7 @@ public class EndpointRegistry {
      * replacement after changing the endpoint map. A racing reader may finish
      * an older traversal, but it cannot acquire stale ownership because the
      * selected address and generation are always revalidated by
-     * {@link #captureDecodeGeneration(DecodeEndpoint.DecodeRoutingView)}.
+     * {@link #captureDecodeGeneration(DecodeResources.DecodeRoutingView)}.
      */
     private volatile List<Map.Entry<String, DecodeEndpoint>> decodeDirectory =
             List.of();
@@ -244,11 +244,11 @@ public class EndpointRegistry {
      * <p>The registry is intentionally not locked while an endpoint takes its
      * admission lock.  This avoids introducing a map-bin/admission-lock order;
      * publication races are resolved when the selected generation is pinned
-     * by {@link #captureDecodeGeneration(DecodeEndpoint.DecodeRoutingView)}.</p>
+     * by {@link #captureDecodeGeneration(DecodeResources.DecodeRoutingView)}.</p>
      */
-    public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot(String group) {
+    public List<DecodeResources.DecodeRoutingView> decodeRoutingSnapshot(String group) {
         List<Map.Entry<String, DecodeEndpoint>> directory = decodeDirectory;
-        List<DecodeEndpoint.DecodeRoutingView> snapshot =
+        List<DecodeResources.DecodeRoutingView> snapshot =
                 new ArrayList<>(directory.size());
         for (Map.Entry<String, DecodeEndpoint> entry : directory) {
             var view = entry.getValue().routingViewSnapshot(entry.getKey());
@@ -269,7 +269,7 @@ public class EndpointRegistry {
      * here, while a successful caller owns the returned generation pin.</p>
      */
     public WorkerEndpoint.GenerationPin captureDecodeGeneration(
-            DecodeEndpoint.DecodeRoutingView expected) {
+            DecodeResources.DecodeRoutingView expected) {
         WorkerEndpoint.GenerationPin pin =
                 capture(RoleType.DECODE, expected.address());
         if (pin == null) {

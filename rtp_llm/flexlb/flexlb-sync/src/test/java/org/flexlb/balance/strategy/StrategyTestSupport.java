@@ -144,14 +144,17 @@ final class StrategyTestSupport {
             throw new IllegalStateException(
                     "batch reservation rejected: " + result.status());
         }
-        try (PrefillState.BatchReservation reservation =
-                     result.reservation()) {
-            PrefillState state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
-            state.ownershipLock().lock();
-            try {
-                return reservation.commitLocked(items, predictedMs);
-            } finally {
-                state.ownershipLock().unlock();
+        {
+            PrefillState.BatchReservation reservation =
+                     result.reservation();
+            try (var preparationReservation = org.flexlb.balance.endpoint.EndpointTestSupport.preparation(reservation)) {
+                PrefillState state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
+                state.ownershipLock().lock();
+                try {
+                    return reservation.commitLocked(items, predictedMs);
+                } finally {
+                    state.ownershipLock().unlock();
+                }
             }
         }
     }
