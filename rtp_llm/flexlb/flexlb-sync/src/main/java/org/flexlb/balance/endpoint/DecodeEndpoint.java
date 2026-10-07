@@ -64,10 +64,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     // Reservation and release. Lifecycle pins remain valid for the entire handoff.
 
-    public ReservationHandle reserve(GenerationPin pin, long requestId, long hardKv,
+    public ReservationHandle tryReserveQueuedRequest(GenerationPin pin, long requestId, long hardKv,
                                      long expectedKv, int priority, AdmissionCapacity capacity) {
         requirePinnedGeneration(pin);
-        return state.reserve(requestId, hardKv, expectedKv, priority, true, capacity);
+        return state.tryReserveQueuedRequest(requestId, hardKv, expectedKv, priority, capacity);
     }
 
     /** LOCAL_ROLLBACK requires local ownership; other evidence may leave Engine/protocol ownership intact. */

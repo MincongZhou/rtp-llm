@@ -153,7 +153,7 @@ class DefaultRouterTest {
         var capture = stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(RequestRoute.class), eq(1L)))
                 .thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
-        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(7L), eq(32L), eq(48L), eq(50), isNull()))
+        when(((DecodeEndpoint) decode.endpoint).tryReserveQueuedRequest(eq(decode.pin), eq(7L), eq(32L), eq(48L), eq(50), isNull()))
                 .thenReturn(reservation);
         var permit = stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
         if (pinCloseFails) {
@@ -204,7 +204,7 @@ class DefaultRouterTest {
         when(decodeSelector.select(RequestRequirements.capture(context), "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
-        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(8L), eq(32L), eq(48L), eq(50), isNull()))
+        when(((DecodeEndpoint) decode.endpoint).tryReserveQueuedRequest(eq(decode.pin), eq(8L), eq(32L), eq(48L), eq(50), isNull()))
                 .thenReturn(reservation);
         stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
         when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(RequestRoute.class), eq(1L)))
@@ -259,7 +259,7 @@ class DefaultRouterTest {
             when(decodeSelector.select(RequestRequirements.capture(context), "g1")).thenReturn(PlacementResult.success(decode.selection));
             stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
             when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(RequestRoute.class), eq(1L))).thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, mock(PrefillState.RouteReservation.class)));
-            when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(9L), eq(32L), eq(48L), eq(50), isNull())).thenReturn(reservation);
+            when(((DecodeEndpoint) decode.endpoint).tryReserveQueuedRequest(eq(decode.pin), eq(9L), eq(32L), eq(48L), eq(50), isNull())).thenReturn(reservation);
             stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
             when(((DecodeEndpoint) decode.endpoint).isAcceptedByEngine(reservation)).thenReturn(true);
             assertTrue(scheduler(router(), context).submit(context).get(2L, TimeUnit.SECONDS).isSuccess());
@@ -360,7 +360,7 @@ class DefaultRouterTest {
         var selectedDecode = selection(RoleType.DECODE, 701L, "10.0.0.2", 8080, "g1");
         var decode = (DecodeEndpoint) selectedDecode.endpoint();
         var reservation = new DecodeResources.ReservationHandle(1L, 701L, 1L);
-        when(decode.reserve(any(), anyLong(), anyLong(), anyLong(), anyInt(), eq(frozen.capacity())))
+        when(decode.tryReserveQueuedRequest(any(), anyLong(), anyLong(), anyLong(), anyInt(), eq(frozen.capacity())))
                 .thenReturn(reservation);
         when(decode.acquireDispatchPermit(reservation, frozen.capacity())).thenReturn(
                 new DecodeEndpoint.EngineDispatchPermitAcquisition(
@@ -402,8 +402,8 @@ class DefaultRouterTest {
             assertFalse(delivery.boundary().availability().isAvailable());
             verify(decode).shouldRetryDispatch(701L, frozen.capacity());
             verify(decode).acquireDispatchPermit(reservation, frozen.capacity());
-            verify(decode).reserve(any(), eq(701L), eq(hardKv), eq(expectedKv), eq(73), eq(frozen.capacity()));
-            verify(decode, never()).reserve(any(), anyLong(), anyLong(), anyLong(), anyInt(), isNull());
+            verify(decode).tryReserveQueuedRequest(any(), eq(701L), eq(hardKv), eq(expectedKv), eq(73), eq(frozen.capacity()));
+            verify(decode, never()).tryReserveQueuedRequest(any(), anyLong(), anyLong(), anyLong(), anyInt(), isNull());
         }
         verify(decode).release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
     }

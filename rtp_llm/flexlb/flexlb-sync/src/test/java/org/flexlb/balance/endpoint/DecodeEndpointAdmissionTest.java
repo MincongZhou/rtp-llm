@@ -107,7 +107,7 @@ class DecodeEndpointAdmissionTest {
         try (WorkerEndpoint.GenerationPin pin =
                      exactEndpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            speculative = exactEndpoint.reserve(pin, 11L, 100L, 110L, 10, null);
+            speculative = exactEndpoint.tryReserveQueuedRequest(pin, 11L, 100L, 110L, 10, null);
         }
         exactEndpoint.release(speculative, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         verify(availability).changed(
@@ -117,7 +117,7 @@ class DecodeEndpointAdmissionTest {
         try (WorkerEndpoint.GenerationPin pin =
                      exactEndpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            published = exactEndpoint.reserve(pin, 12L, 100L, 110L, 10, null);
+            published = exactEndpoint.tryReserveQueuedRequest(pin, 12L, 100L, 110L, 10, null);
         }
         exactEndpoint.release(published, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         verify(availability, times(2)).changed(
@@ -846,7 +846,7 @@ class DecodeEndpointAdmissionTest {
                     start.await();
                     DecodeResources.ReservationHandle reservation;
                     try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-                        reservation = endpoint.reserve(pin, requestId, 100L, 3000L, 50, null);
+                        reservation = endpoint.tryReserveQueuedRequest(pin, requestId, 100L, 3000L, 50, null);
                     }
                     assertNotNull(reservation);
                     var acquired = endpoint.acquireDispatchPermit(reservation, new DecodeResources.AdmissionCapacity(8L, 90L));
@@ -1031,7 +1031,7 @@ class DecodeEndpointAdmissionTest {
                         "Decode endpoint generation is retired");
             }
             DecodeResources.ReservationHandle reservation =
-                    endpoint.reserve(pin, requestId, hardKv, expectedKv, priority, null);
+                    endpoint.tryReserveQueuedRequest(pin, requestId, hardKv, expectedKv, priority, null);
             reservations.put(requestId, reservation);
             return reservation;
         }

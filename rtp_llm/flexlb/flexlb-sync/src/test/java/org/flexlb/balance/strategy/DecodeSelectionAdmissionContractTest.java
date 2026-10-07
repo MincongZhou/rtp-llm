@@ -56,7 +56,7 @@ class DecodeSelectionAdmissionContractTest {
                     fixture.assertSelectionHasNoReservation(requestId, queuedUsage, freeUsage);
                     WorkerEndpoint.GenerationPin pin = selected.generationPin();
                     DecodeEndpoint endpoint = (DecodeEndpoint) pin.endpoint();
-                    DecodeResources.ReservationHandle reservation = endpoint.reserve(
+                    DecodeResources.ReservationHandle reservation = endpoint.tryReserveQueuedRequest(
                             pin,
                             request.requestId(),
                             request.hardKvTokens(),
@@ -156,8 +156,8 @@ class DecodeSelectionAdmissionContractTest {
             long expectedKv = dimension == CapacityDimension.EXPECTED_KV ? 400L : 0L;
             try (WorkerEndpoint.GenerationPin pin = queued.tryPinGeneration()) {
                 assertNotNull(pin);
-                assertNotNull(queued.reserve(pin, 1L, 0L, expectedKv, 50, null));
-                assertNotNull(queued.reserve(pin, 2L, 0L, expectedKv, 50, null));
+                assertNotNull(queued.tryReserveQueuedRequest(pin, 1L, 0L, expectedKv, 50, null));
+                assertNotNull(queued.tryReserveQueuedRequest(pin, 2L, 0L, expectedKv, 50, null));
             }
         }
 

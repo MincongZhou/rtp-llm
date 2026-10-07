@@ -100,7 +100,7 @@ class DecodeSelectorTest {
             DecodeResources.AdmissionSummary empty = endpoint.admissionSummary();
             Assertions.assertSame(empty, endpoint.admissionSummary());
             try (var pin = endpoint.tryPinGeneration()) {
-                var reservation = endpoint.reserve(pin, 42L, 128L, 256L, 70, null);
+                var reservation = endpoint.tryReserveQueuedRequest(pin, 42L, 128L, 256L, 70, null);
                 var queued = endpoint.admissionSummary();
                 Assertions.assertNotSame(empty, queued);
                 Assertions.assertSame(queued, endpoint.admissionSummary());
@@ -752,7 +752,7 @@ class DecodeSelectorTest {
             long expectedKvTokens,
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.reserve(pin, requestId, kvTokens, expectedKvTokens, priority, null);
+            endpoint.tryReserveQueuedRequest(pin, requestId, kvTokens, expectedKvTokens, priority, null);
         }
     }
 

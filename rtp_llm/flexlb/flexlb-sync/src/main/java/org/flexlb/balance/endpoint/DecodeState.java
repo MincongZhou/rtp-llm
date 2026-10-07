@@ -115,25 +115,25 @@ final class DecodeState {
 
     // Reservation: acquire and release exact ownership.
 
-    ReservationHandle reserve(long requestId, long hardKv, long expectedKv, int priority,
-                              boolean queued, AdmissionCapacity capacity) {
+    ReservationHandle tryReserveQueuedRequest(long requestId, long hardKv, long expectedKv,
+                                              int priority, AdmissionCapacity capacity) {
         admissionLock.lock();
         try {
             if (!requestIdAvailableForReservationLocked(requestId)) { return null; }
             if (capacity != null && queuedPlacementIsFullLocked(hardKv, expectedKv, capacity)) { return null; }
-            ReservationHandle reservation = reserveLocked(requestId, hardKv, expectedKv, priority);
-            if (queued) { setQueuedLocked(shadowReservation(requestId), true); }
-            return reservation;
+            return createReservationLocked(requestId, hardKv, expectedKv, priority,
+                    DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED);
         } finally {
             admissionLock.unlock();
         }
     }
 
-    /** Caller has checked request ID availability under admissionLock. */
-    private ReservationHandle reserveLocked(long requestId,
-                                            long kvTokens,
-                                            long expectedKvTokens,
-                                            int priority) {
+    /** Creates local or queued ownership after the caller checks admission under admissionLock. */
+    private ReservationHandle createReservationLocked(long requestId,
+                                                      long kvTokens,
+                                                      long expectedKvTokens,
+                                                      int priority,
+                                                      DecodeTaskPhase initialPhase) {
         long reservationToken = nextReservationTokenLocked();
         DecodeRequestState newReservation =
                 new DecodeRequestState(
@@ -143,6 +143,9 @@ final class DecodeState {
         decodeRequests.put(requestId, newReservation);
         reservedUsage.add(newReservation);
         admissionVersion++;
+        if (initialPhase == DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED) {
+            setQueuedLocked(newReservation, true);
+        }
         return handle;
     }
 
@@ -598,11 +601,8 @@ final class DecodeState {
                             "validated victim changed while admissionLock was held");
                 }
             }
-            return reserveLocked(
-                    incomingRequestId,
-                    kvTokens,
-                    expectedKvTokens,
-                    priority);
+            return createReservationLocked(incomingRequestId, kvTokens, expectedKvTokens, priority,
+                    DecodeTaskPhase.LOCAL_RESERVED);
         } finally {
             admissionLock.unlock();
         }
@@ -674,9 +674,9 @@ final class DecodeState {
 
             // Provisional incoming ownership closes the free-pool race while
             // Cancel runs.  It is not visible to the prefill queue yet.
-            ReservationHandle incomingReservation = reserveLocked(
-                    incomingRequestId, incomingKvTokens,
-                    incomingExpectedKvTokens, incomingPriority);
+            ReservationHandle incomingReservation = createReservationLocked(
+                    incomingRequestId, incomingKvTokens, incomingExpectedKvTokens, incomingPriority,
+                    DecodeTaskPhase.LOCAL_RESERVED);
             EndpointPreemptionAttempt preparedAttempt = null;
             try {
                 preparedAttempt = new EndpointPreemptionAttempt(incomingReservation, exactVictims);

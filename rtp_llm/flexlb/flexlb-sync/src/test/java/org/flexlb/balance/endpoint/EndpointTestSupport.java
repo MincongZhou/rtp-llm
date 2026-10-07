@@ -30,11 +30,19 @@ public final class EndpointTestSupport {
             long hardKv, long expectedKv, int priority) {
         endpoint.requirePinnedGeneration(pin);
         var state = (DecodeState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "state");
-        var reservation = state.reserve(requestId, hardKv, expectedKv, priority, false, null);
-        if (reservation == null) {
-            throw new IllegalStateException("Decode request id is already owned: " + requestId);
+        var lock = (java.util.concurrent.locks.ReentrantLock)
+                org.springframework.test.util.ReflectionTestUtils.getField(state, "admissionLock");
+        lock.lock();
+        try {
+            if (!Boolean.TRUE.equals(org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    state, "requestIdAvailableForReservationLocked", requestId))) {
+                throw new IllegalStateException("Decode request id is already owned: " + requestId);
+            }
+            return org.springframework.test.util.ReflectionTestUtils.invokeMethod(state, "createReservationLocked",
+                    requestId, hardKv, expectedKv, priority, org.flexlb.enums.DecodeTaskPhase.LOCAL_RESERVED);
+        } finally {
+            lock.unlock();
         }
-        return reservation;
     }
 
     /** Read shadow ownership for assertions, without granting a production lookup capability. */

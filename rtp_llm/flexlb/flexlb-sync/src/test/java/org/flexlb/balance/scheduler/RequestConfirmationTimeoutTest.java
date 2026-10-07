@@ -76,7 +76,7 @@ class RequestConfirmationTimeoutTest {
             var capacity = new DecodeResources.AdmissionCapacity(1L, 90L);
             DecodeResources.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.reserve(pin, REQUEST_ID, 16L, 32L, 50, capacity);
+                reservation = decode.tryReserveQueuedRequest(pin, REQUEST_ID, 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
                 var acquired = decode.acquireDispatchPermit(reservation, capacity);
                 assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
@@ -152,7 +152,7 @@ class RequestConfirmationTimeoutTest {
 
             // Admission resumes only after delivery settlement and exact local cleanup.
             try (var pin = decode.tryPinGeneration()) {
-                var next = decode.reserve(pin, 102L, 16L, 32L, 50, capacity);
+                var next = decode.tryReserveQueuedRequest(pin, 102L, 16L, 32L, 50, capacity);
                 assertNotNull(next);
                 var acquired = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());

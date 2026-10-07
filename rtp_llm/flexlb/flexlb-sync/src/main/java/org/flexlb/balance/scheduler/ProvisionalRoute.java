@@ -126,7 +126,7 @@ public final class ProvisionalRoute implements AutoCloseable {
             case IMMEDIATE -> null;
             case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> requirements.capacity();
         };
-        DecodeResources.ReservationHandle reservation = decodeEndpoint().reserve(
+        DecodeResources.ReservationHandle reservation = decodeEndpoint().tryReserveQueuedRequest(
                 decodePin(), requirements.requestId(), requirements.hardKvTokens(),
                 requirements.expectedKvTokens(), requirements.priority(), capacity);
         if (reservation == null) { return false; }

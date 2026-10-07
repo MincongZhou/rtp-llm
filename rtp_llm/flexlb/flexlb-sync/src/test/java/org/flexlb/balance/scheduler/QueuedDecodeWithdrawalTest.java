@@ -86,7 +86,7 @@ class QueuedDecodeWithdrawalTest {
         context.setFuture(future);
         DecodeResources.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reserve(pin, id, 16, 16, 30, capacity);
+            reservation = decode.tryReserveQueuedRequest(pin, id, 16, 16, 30, capacity);
         }
         assertNotNull(reservation);
         var prefill = mock(PrefillEndpoint.class);
@@ -201,12 +201,12 @@ class QueuedDecodeWithdrawalTest {
         verify(queue).requeue(item);
         assertFalse(item.future().isDone());
         try (var pin = decode.tryPinGeneration()) {
-            assertNull(decode.reserve(pin, 1, 16, 16, 30, capacity),
+            assertNull(decode.tryReserveQueuedRequest(pin, 1, 16, 16, 30, capacity),
                     "victim cannot reclaim capacity already assigned to the incoming request");
         }
         decode.release(EndpointTestSupport.decodeReservation(decode, 100), DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         DecodeResources.ReservationHandle second;
-        try (var pin = decode.tryPinGeneration()) { second = decode.reserve(pin, 1, 16, 16, 30, capacity); }
+        try (var pin = decode.tryPinGeneration()) { second = decode.tryReserveQueuedRequest(pin, 1, 16, 16, 30, capacity); }
         var next = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(item.ctx()), new Response(), item.prefill(), item.decode(),
                 item.prefillEp(), decode, second, item.enqueuedAtMs() + 1000);
         assertEquals(item.enqueuedAtMs(), next.enqueuedAtMs());
@@ -318,7 +318,7 @@ class QueuedDecodeWithdrawalTest {
             assertNotNull(original);
             decode.release(original, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             try (var pin = decode.tryPinGeneration()) {
-                replacement.set(decode.reserve(pin, 100, 16, 16, 80, capacity));
+                replacement.set(decode.tryReserveQueuedRequest(pin, 100, 16, 16, 80, capacity));
             }
             assertNotNull(replacement.get());
             assertNotEquals(original.reservationToken(), replacement.get().reservationToken());

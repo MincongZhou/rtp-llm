@@ -1,12 +1,11 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.EndpointTestSupport;
-import org.flexlb.balance.endpoint.DecodeResources;
-import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
-
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
@@ -40,10 +39,11 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.ArgumentMatchers.*;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /** Resource assertions use real endpoint ledgers, not invocations of mocked release methods. */
@@ -196,8 +196,7 @@ class RequestResourceAccountingTest {
             assertEquals(0, f.prefill.ownershipStats().locallyOwnedRequests(),
                     "the Prefill terminal reducer has already released its exact resource owner");
             org.mockito.Mockito.verify(f.prefill, org.mockito.Mockito.never()).releaseRequest(f.item);
-            if (ending == LocalEnd.EXPIRE) { f.expire(); }
-            else { f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV); }
+            if (ending == LocalEnd.EXPIRE) { f.expire(); } else { f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV); }
             f.assertEmpty();
             org.mockito.Mockito.verify(f.prefill, org.mockito.Mockito.never()).releaseRequest(f.item);
             assertTrue(f.item.future().join().isSuccess(), "resource completion preserves the published scheduling response");
@@ -331,7 +330,7 @@ class RequestResourceAccountingTest {
                 if (replacementRef.get() != null) { return true; }
                 f.decode.evictExpiredRequests(0, ignored -> false);
                 try (var pin = f.decode.tryPinGeneration()) {
-                    replacementRef.set(f.decode.reserve(pin, ID, HARD_KV * 2, EXPECTED_KV * 2, 50, null));
+                    replacementRef.set(f.decode.tryReserveQueuedRequest(pin, ID, HARD_KV * 2, EXPECTED_KV * 2, 50, null));
                 }
                 return replacementRef.get() != null;
             });
@@ -393,7 +392,7 @@ class RequestResourceAccountingTest {
             decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(projector));
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.reserve(pin, ID, HARD_KV, EXPECTED_KV, 50, null);
+                reservation = decode.tryReserveQueuedRequest(pin, ID, HARD_KV, EXPECTED_KV, 50, null);
             }
             assertNotNull(reservation);
             var context = RequestProtocolTestSupport.context(config, ID);
@@ -469,7 +468,7 @@ class RequestResourceAccountingTest {
 
         void assertCapacityReusable() {
             try (var pin = decode.tryPinGeneration()) {
-                var next = decode.reserve(pin, 999L, HARD_KV, EXPECTED_KV, 50, null);
+                var next = decode.tryReserveQueuedRequest(pin, 999L, HARD_KV, EXPECTED_KV, 50, null);
                 assertNotNull(next);
                 var permit = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, permit.status());
