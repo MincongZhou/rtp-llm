@@ -234,7 +234,11 @@ public final class WorkerBatcher {
     public Runnable capacityAvailableSignal() { return capacityAvailableSignal; }
 
     public synchronized void start() {
-        checkState(runtimeState == RuntimeState.NEW, "Worker batcher cannot start from %s", runtimeState);
+        if (runtimeState != RuntimeState.NEW) {
+            throw new IllegalStateException(
+                    "Worker batcher cannot start from "
+                            + runtimeState);
+        }
         runtimeState = RuntimeState.STARTING;
         try {
             workerThread.start();

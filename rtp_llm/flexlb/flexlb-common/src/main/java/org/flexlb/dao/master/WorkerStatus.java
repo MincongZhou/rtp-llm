@@ -425,10 +425,13 @@ public class WorkerStatus {
         checkArgument(observation.owner == this, "status observation belongs to another worker generation");
         CommittedWorkerStatus current = committedStatus.get();
         Long responseVersion = observation.statusVersion();
-        checkArgument(responseVersion != null
-                && responseVersion > 0L
-                && responseVersion > current.cursor().statusVersion(),
-                "new status version must strictly advance committed version: committed=%s, response=%s", current.cursor().statusVersion(), responseVersion);
+        if (responseVersion == null || responseVersion <= 0L
+                || responseVersion <= current.cursor().statusVersion()) {
+            throw new IllegalArgumentException(
+                    "new status version must strictly advance committed version: committed="
+                            + current.cursor().statusVersion()
+                            + ", response=" + responseVersion);
+        }
         AppliedStatusCursor cursor = new AppliedStatusCursor(
                 responseVersion,
                 mergedFinishedVersion(current.cursor(),
@@ -448,10 +451,14 @@ public class WorkerStatus {
         requireActiveGeneration();
         checkArgument(prepared.observation.owner == this, "prepared status belongs to another worker generation");
         Long responseVersion = prepared.observation.statusVersion();
-        checkState(responseVersion != null
-                && responseVersion > 0L
-                && responseVersion > prepared.baseCommitted.cursor().statusVersion(),
-                "invalid prepared status version: committed=%s, response=%s", prepared.baseCommitted.cursor().statusVersion(), responseVersion);
+        if (responseVersion == null || responseVersion <= 0L
+                || responseVersion
+                        <= prepared.baseCommitted.cursor().statusVersion()) {
+            throw new IllegalStateException(
+                    "invalid prepared status version: committed="
+                            + prepared.baseCommitted.cursor().statusVersion()
+                            + ", response=" + responseVersion);
+        }
         checkState(committedStatus.compareAndSet( prepared.baseCommitted, prepared.nextCommitted),
                 "prepared status is stale or has already been published");
     }

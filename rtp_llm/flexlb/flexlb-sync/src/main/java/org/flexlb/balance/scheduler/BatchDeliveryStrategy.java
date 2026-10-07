@@ -402,7 +402,10 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         private void requirePhase(Phase expected, String operation) {
-            checkState(phase == expected, "cannot %s batch transaction in %s", operation, phase);
+            if (phase != expected) {
+                throw new IllegalStateException(
+                        "cannot " + operation + " batch transaction in " + phase);
+            }
         }
     }
 

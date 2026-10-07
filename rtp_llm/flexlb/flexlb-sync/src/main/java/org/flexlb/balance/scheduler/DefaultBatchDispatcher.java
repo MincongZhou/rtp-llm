@@ -600,7 +600,9 @@ public class DefaultBatchDispatcher {
             BatchRoleAddressCache roleAddresses)
             throws InvalidProtocolBufferException, InterruptedException {
         EngineRpcService.GenerateInputPB generateInput = item.ctx().getGenerateInput();
-        checkArgument(generateInput != null, "generateInputPb is missing for request %s", item.requestId());
+        if (generateInput == null) {
+            throw new IllegalArgumentException("generateInputPb is missing for request " + item.requestId());
+        }
         EngineRpcService.GenerateInputPB.Builder input = generateInput.toBuilder();
         checkArgument(input.getRequestId() == item.requestId(),
                 "request_id mismatch between schedule request and GenerateInputPB");

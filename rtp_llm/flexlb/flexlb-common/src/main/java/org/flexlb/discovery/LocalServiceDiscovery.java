@@ -89,12 +89,16 @@ public final class LocalServiceDiscovery implements ServiceDiscovery {
         for (Iterator<Map.Entry<String, JsonNode>> it = root.fields(); it.hasNext(); ) {
             Map.Entry<String, JsonNode> entry = it.next();
             JsonNode array = entry.getValue();
-            checkArgument(array != null && array.isArray(),
-                    "discovery entry for domain '%s' must be an array of ip:port strings", entry.getKey());
+            if (array == null || !array.isArray()) {
+                throw new IllegalArgumentException(String.format(
+                        "discovery entry for domain '%s' must be an array of ip:port strings", entry.getKey()));
+            }
             List<WorkerHost> hosts = new ArrayList<>(array.size());
             for (JsonNode node : array) {
-                checkArgument(node != null && node.isTextual(),
-                        "discovery entry for domain '%s' contains a non-string element", entry.getKey());
+                if (node == null || !node.isTextual()) {
+                    throw new IllegalArgumentException(String.format(
+                            "discovery entry for domain '%s' contains a non-string element", entry.getKey()));
+                }
                 hosts.add(parseHost(node.asText()));
             }
             result.put(entry.getKey(), List.copyOf(hosts));

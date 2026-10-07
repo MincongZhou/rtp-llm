@@ -79,8 +79,10 @@ public class DecodeSelector {
                     }
                 }
             }
-            checkState(Double.isFinite(minimumCost),
-                    "Decode cost formula produced no finite score: %s", request.costFormula().expression());
+            if (!Double.isFinite(minimumCost)) {
+                throw new IllegalStateException("Decode cost formula produced no finite score: "
+                        + request.costFormula().expression());
+            }
             double selectedCost = minimumCost;
             int selectedIndex = rotation.next(RoleType.DECODE, group, snapshots.size(),
                     i -> availabilityByWorker[i] == selectedAvailability && costByWorker[i] == selectedCost,

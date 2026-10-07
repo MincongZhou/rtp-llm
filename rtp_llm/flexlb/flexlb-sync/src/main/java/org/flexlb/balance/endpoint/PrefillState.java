@@ -313,7 +313,10 @@ public final class PrefillState {
         }
 
         private void commitIndividual(long predictedMs, long nowMs) {
-            checkState(isActive(), "request is not an ACTIVE route request_id=%s", item.requestId());
+            if (!isActive()) {
+                throw new IllegalStateException(
+                        "request is not an ACTIVE route request_id=" + item.requestId());
+            }
             remainingWorkMs = Math.clamp(predictedMs, 0L, (long) Integer.MAX_VALUE);
             phaseBaseMs = nowMs;
             queueMembership = QueueMembership.UNINDEXED;
@@ -322,7 +325,10 @@ public final class PrefillState {
         }
 
         private void commitBatch(BatchWork work) {
-            checkState(isActive(), "request is not an ACTIVE batch member request_id=%s", item.requestId());
+            if (!isActive()) {
+                throw new IllegalStateException(
+                        "request is not an ACTIVE batch member request_id=" + item.requestId());
+            }
             batchWork = work;
             reservation = null;
             queueMembership = QueueMembership.UNINDEXED;
@@ -330,8 +336,10 @@ public final class PrefillState {
 
         private void observeIndividualPhase(Phase next, long nowMs) {
             checkArgument(next == Phase.ENGINE_QUEUED || next == Phase.ENGINE_RUNNING, "invalid Engine phase %s", next);
-            checkState(batchWork == null && individualPhase != null,
-                    "request is not individual request_id=%s", item.requestId());
+            if (batchWork != null || individualPhase == null) {
+                throw new IllegalStateException(
+                        "request is not individual request_id=" + item.requestId());
+            }
             remainingWorkMs = remainingWorkAt(nowMs);
             phaseBaseMs = Math.max(phaseBaseMs, nowMs);
             individualPhase = next;
@@ -846,8 +854,12 @@ public final class PrefillState {
             RequestEntry entry = requests.get(items.get(index).requestId());
             RouteReservation lease = exactReservations.get(index);
             checkArgument(lease != null && lease.owner == this, "route reservation belongs to another Prefill ledger");
-            checkState(entry.reservation == lease && lease.originalOwner == entry,
-                    "route commit does not own exact OPEN lease request_id=%s", items.get(index).requestId());
+            if (entry.reservation != lease
+                    || lease.originalOwner != entry) {
+                throw new IllegalStateException(
+                        "route commit does not own exact OPEN lease request_id="
+                                + items.get(index).requestId());
+            }
         }
         long nowMs = clock.getAsLong();
         CommittedHandoff committedHandoff = new CommittedHandoff(generationHandoff,
@@ -898,16 +910,22 @@ public final class PrefillState {
         RequestEntry head = lease.originalOwner == null ? null
                 : requests.get(lease.originalOwner.item.requestId());
         RequestRoute headItem = head == null || !head.isActive() ? null : head.item;
-        checkState(head != null
-                && head.reservation == lease
-                && items.contains(headItem)
-                && lease.generationHandoff != null,
-                "batch commit does not own exact OPEN lease batch_id=%s", lease.batchId);
+        if (head == null
+                || head.reservation != lease
+                || !items.contains(headItem)
+                || lease.generationHandoff == null) {
+            throw new IllegalStateException(
+                    "batch commit does not own exact OPEN lease batch_id="
+                            + lease.batchId);
+        }
         for (RequestRoute item : items) {
             RequestEntry member = requests.get(item.requestId());
             Reservation expected = item == headItem ? lease : null;
-            checkState(member.reservation == expected,
-                    "batch member owns another exact reservation request_id=%s", item.requestId());
+            if (member.reservation != expected) {
+                throw new IllegalStateException(
+                        "batch member owns another exact reservation request_id="
+                                + item.requestId());
+            }
         }
         long nowMs = clock.getAsLong();
         Set<RequestEntry> members = new HashSet<>(items.size());
@@ -1581,12 +1599,18 @@ public final class PrefillState {
         RequestEntry originalOwner = lease.originalOwner;
         RequestEntry current = requests.get(originalOwner.item.requestId());
         if (current == originalOwner) {
-            checkState(current.reservation == lease,
-                    "canonical Prefill lease owner lost its exact reservation request_id=%s", originalOwner.item.requestId());
+            if (current.reservation != lease) {
+                throw new IllegalStateException(
+                        "canonical Prefill lease owner lost its exact reservation"
+                                + " request_id=" + originalOwner.item.requestId());
+            }
             return current;
         }
-        checkState(current == null || current.reservation != lease,
-                "replacement request cannot own an earlier Prefill lease request_id=%s", originalOwner.item.requestId());
+        if (current != null && current.reservation == lease) {
+            throw new IllegalStateException(
+                    "replacement request cannot own an earlier Prefill lease"
+                            + " request_id=" + originalOwner.item.requestId());
+        }
         return null;
     }
 

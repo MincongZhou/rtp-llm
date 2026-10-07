@@ -514,9 +514,9 @@ public class BalanceContext {
             admission.prefillRetirement = candidate;
             return;
         }
-        checkState(admission.prefillRetirement.source == candidate.source
-                && admission.prefillRetirement.item == candidate.item,
-                "admission observed another Prefill generation for request %s", this.getRequestId());
+        if (admission.prefillRetirement.source != candidate.source || admission.prefillRetirement.item != candidate.item) {
+            throw new IllegalStateException("admission observed another Prefill generation for request " + this.getRequestId());
+        }
     }
 
     boolean ownsPrefillRouteLocked(PrefillEndpoint source, RequestRoute expected) {
@@ -572,8 +572,9 @@ public class BalanceContext {
     }
 
     CancelReason requireCancellationFirstCauseLocked() {
-        checkState(this.cancellationReason != null,
-                "missing cancellation first cause for request %s", this.getRequestId());
+        if (this.cancellationReason == null) {
+            throw new IllegalStateException("missing cancellation first cause for request " + this.getRequestId());
+        }
         return this.cancellationReason;
     }
 
@@ -599,7 +600,9 @@ public class BalanceContext {
             if (!this.isOpen()) {
                 return false;
             }
-            checkState(this.requestDeadline == null, "request deadline already installed for %s", this.getRequestId());
+            if (this.requestDeadline != null) {
+                throw new IllegalStateException("request deadline already installed for " + this.getRequestId());
+            }
             this.requestDeadline = exact;
             this.assertInvariantLocked();
             return true;
@@ -783,8 +786,9 @@ public class BalanceContext {
             var prefill = route.prefill();
             CancelTarget cancelTarget = prefill == null ? null
                     : new CancelTarget(prefill.getServerIp(), prefill.getGrpcPort());
-            checkState(cancelTarget != null && cancelTarget.isRoutable(),
-                    "Priority victim has no routable Cancel target request_id=%s", getRequestId());
+            if (cancelTarget == null || !cancelTarget.isRoutable()) {
+                throw new IllegalStateException("Priority victim has no routable Cancel target request_id=" + getRequestId());
+            }
             preemption = new PreemptionRegistration(this, attemptToken, detail, cancelTarget);
             this.assertInvariantLocked();
             return preemption;
@@ -809,10 +813,9 @@ public class BalanceContext {
 
     void requireCleanupOwner(TerminalAction action) {
         synchronized (this) {
-            checkState(this.stage == RequestStage.FINALIZING
-                    && action.requestContext() == this
-                    && action.item() == this.route,
-                    "cleanup does not own request %s", this.getRequestId());
+            if (this.stage != RequestStage.FINALIZING || action.requestContext() != this || action.item() != this.route) {
+                throw new IllegalStateException("cleanup does not own request " + this.getRequestId());
+            }
         }
     }
 
@@ -864,7 +867,9 @@ public class BalanceContext {
             case FINISHED ->
                 false;
         };
-        checkState(allowed, "invalid request stage %s -> %s", this.stage, next);
+        if (!allowed) {
+            throw new IllegalStateException("invalid request stage " + this.stage + " -> " + next);
+        }
         this.stage = next;
     }
 
@@ -997,7 +1002,7 @@ public class BalanceContext {
             Objects.requireNonNull(result, "delivery result");
             synchronized (owner) {
                 checkState(kind == DeliveryClaimKind.BATCH_ENQUEUE, "not a batch delivery");
-                checkState(!senderFinished, "delivery already completed: %s", item.requestId());
+                if (senderFinished) { throw new IllegalStateException("delivery already completed: " + item.requestId()); }
                 senderFinished = true;
                 sendOutcome = switch (result.status()) {
                     case NOT_SENT -> SendOutcome.NOT_SENT;
@@ -1171,8 +1176,9 @@ public class BalanceContext {
         }
 
         void consumeForSelection() {
-            checkState(consumed.compareAndSet(false, true),
-                    "response selection permit already consumed for request %s", requestContext.getRequestId());
+            if (!consumed.compareAndSet(false, true)) {
+                throw new IllegalStateException("response selection permit already consumed for request " + requestContext.getRequestId());
+            }
         }
     }
 
@@ -1317,7 +1323,9 @@ public class BalanceContext {
      */
     TerminalAction claimFinalizationLocked(DeferredTerminal event, TerminalOutcome transition, Response response, boolean requestPublication, Supplier<PublicationPermit> publication) {
         this.requireContextLock("terminal claim");
-        checkState(transition != null, "terminal transition is required for request %s", this.getRequestId());
+        if (transition == null) {
+            throw new IllegalStateException("terminal transition is required for request " + this.getRequestId());
+        }
         if (terminalAction != null || !this.ownsResourceTrackingLocked() || admission != null || this.cleanup != null && (!this.cleanup.ready() || preemption != null && !preemption.isFinished())) {
             return null;
         }
@@ -1428,7 +1436,9 @@ public class BalanceContext {
 
     void detachWithdrawnRoute(AdmissionHandle operation, RequestRoute exact) {
         requireContextLock("route withdrawal");
-        checkState(admission == operation && route == exact, "route withdrawal lost its owner: %s", getRequestId());
+        if (admission != operation || route != exact) {
+            throw new IllegalStateException("route withdrawal lost its owner: " + getRequestId());
+        }
         route = null;
         detail = "queued after Decode reservation withdrawal";
         updatedAtMs = System.currentTimeMillis();
@@ -1447,16 +1457,18 @@ public class BalanceContext {
 
     void rejectRoutePublication(RequestRoute exact) {
         requireContextLock("route publication rollback");
-        checkState(stage == RequestStage.ROUTING && route == exact && admission != null,
-                "request route publication ownership changed for %s", getRequestId());
+        if (stage != RequestStage.ROUTING || route != exact || admission == null) {
+            throw new IllegalStateException("request route publication ownership changed for " + getRequestId());
+        }
         route = null;
         assertInvariantLocked();
     }
 
     void confirmRoutePublication(RequestRoute exact) {
         requireContextLock("route publication confirmation");
-        checkState(route == exact && stage == RequestStage.ROUTING,
-                "route publication lost its owner for %s", getRequestId());
+        if (route != exact || stage != RequestStage.ROUTING) {
+            throw new IllegalStateException("route publication lost its owner for " + getRequestId());
+        }
         advanceStageLocked(RequestStage.READY_TO_DELIVER);
         assertInvariantLocked();
     }

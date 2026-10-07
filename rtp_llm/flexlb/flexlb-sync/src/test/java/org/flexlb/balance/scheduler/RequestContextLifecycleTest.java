@@ -77,6 +77,14 @@ class RequestContextLifecycleTest {
     }
 
     @Test
+    void deadlineInstallationDoesNotReadUnboundRequestForDiagnostics() {
+        BalanceContext context = new BalanceContext(config);
+        context.setFuture(new CompletableFuture<>());
+        var deadline = mock(ExpirationTimer.RequestDeadline.class);
+        assertTrue(context.installRequestDeadline(deadline));
+    }
+
+    @Test
     void registrationCapturesCurrentIdentityAndKeepsItAfterFutureCompletion() {
         BalanceContext context = context(890L);
         SchedulingTestConfig.freezeInputs(context);

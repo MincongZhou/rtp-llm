@@ -589,5 +589,106 @@
     },
     "conclusion": "The 10k QPS failure was not reproduced in the diagnostic or latest confirmation runs. Its cause is not established; passing repetitions do not erase the failure.",
     "raw_directory": "/tmp/flexlb-standard-checks-20261007/evidence-combined-attempt-1"
+  },
+  "equivalence_audit": {
+    "date": "2026-10-08",
+    "reviewed_commit": "7666e7b263f0e573d03f8035c230e0431deedd41",
+    "original_behavior_commit": "e9a5a12fa1416475dfde08c280cca728f4e53d63",
+    "verification_base_commit": "894de97dfd86bad89fe8f5159f802f41ba8b17e1",
+    "restored_guards": {
+      "total": 35,
+      "production_files": 12,
+      "checkArgument": 6,
+      "checkState": 29
+    },
+    "remaining_conversions": {
+      "total": 275,
+      "checkArgument": 177,
+      "checkState": 98
+    },
+    "observed_regressions": [
+      {
+        "test": "RequestContextLifecycleTest.deadlineInstallationDoesNotReadUnboundRequestForDiagnostics",
+        "original": "pass",
+        "refactored": "NullPointerException while reading unbound request for successful deadline-install diagnostic",
+        "corrected": "pass"
+      },
+      {
+        "test": "EvictionPlannerDecodeContractTest.negativeHarmPropagatesDiagnosticFormattingFailure",
+        "original": "pass; original diagnostic exception propagated",
+        "refactored": "Guava lenientFormat swallows diagnostic toString exception and throws IllegalArgumentException",
+        "corrected": "pass"
+      }
+    ],
+    "restoration_policy": "Preserve failure-only evaluation of diagnostic getters, mutable fields and BigInteger formatting; restore exact original guards rather than add lazy wrappers.",
+    "condition_audit": {
+      "auto_guards_checked_including_priority_bounds": 265,
+      "boolean_assignments_checked": 906,
+      "failure_condition_negated": true,
+      "short_circuit_atom_order_preserved": true,
+      "limitation": "Ordered comparison complements require integral operands; manually reviewed integer types. Floating guards retain logical negation."
+    },
+    "manual_conversions_reviewed": 10,
+    "business_fixes_preserved": [
+      "Verified cache hit overflow correction e9a5a12fa1",
+      "Queued Decode reservation ownership clarification 894de97dfd"
+    ],
+    "source": {
+      "tracked_inputs": 654,
+      "manifest_sha256": "019af696cdddea64fe2610adfd7592b49520efc5b9681cceaf2360a57eff4342",
+      "hash_format": "SHA-256 of json.dumps(manifest, sort_keys=True)",
+      "unchanged_after_tests": true,
+      "excluded_parallel_uncommitted_work": true
+    },
+    "verification": {
+      "environment": "local Microsoft JDK 21.0.9; isolated source snapshot",
+      "modules": [
+        {
+          "tests": 226,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "module": "common"
+        },
+        {
+          "tests": 37,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "module": "cache"
+        },
+        {
+          "tests": 15,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "module": "grpc"
+        },
+        {
+          "tests": 1687,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "module": "sync"
+        },
+        {
+          "tests": 175,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 1,
+          "module": "api"
+        }
+      ],
+      "total": {
+        "tests": 2140,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1
+      },
+      "baseline_log": "/tmp/flexlb-standard-checks-20261007/evidence/equivalence-baseline-2026-10-08.log",
+      "refactored_log": "/tmp/flexlb-standard-checks-20261007/evidence/equivalence-red-2026-10-08.log",
+      "corrected_log": "/tmp/flexlb-standard-checks-20261007/evidence/equivalence-green-final-2026-10-08.log"
+    },
+    "perf": "Not rerun for this correction: only diagnostic evaluation and original guards restored; no scheduling algorithm or resource-accounting changes."
   }
 }

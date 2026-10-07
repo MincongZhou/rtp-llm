@@ -66,7 +66,10 @@ public final class DecodePreemptionCoordinator {
                         "victim requestId and reservation token must be positive");
                 checkArgument(victim.phase() != null && victim.phase().requiresEngineCancel(),
                         "coordinator accepts only Engine-Cancel victims");
-                checkArgument(victimIds.add(victim.requestId()), "duplicate victim %s", victim.requestId());
+                if (!victimIds.add(victim.requestId())) {
+                    throw new IllegalArgumentException(
+                            "duplicate victim " + victim.requestId());
+                }
             }
             checkArgument(admissionOpen != null, "admission gate is required");
         }
@@ -341,8 +344,11 @@ public final class DecodePreemptionCoordinator {
             if (owned.disposition == ClaimDisposition.TERMINAL) {
                 return false;
             }
-            checkState(owned.disposition == ClaimDisposition.RELEASABLE,
-                    "Cancel outbound ownership changed request_id=%s", owned.requestId());
+            if (owned.disposition != ClaimDisposition.RELEASABLE) {
+                throw new IllegalStateException(
+                        "Cancel outbound ownership changed request_id="
+                                + owned.requestId());
+            }
             // Install the conservative resource hold before RPC invocation. No ACK changes this fact.
             if (!command.endpoint().updatePreemption(token,
                     DecodeResources.PreemptionUpdate.handedOff(owned.reservation))) { return false; }

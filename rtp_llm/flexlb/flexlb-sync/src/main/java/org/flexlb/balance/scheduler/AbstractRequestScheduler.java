@@ -143,8 +143,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         try {
             if (committed) {
                 // Decode replacement has committed. Never take the Prefill lock under the context monitor.
-                checkState(item.prefillEp().removeQueued(item, "DECODE_RESERVATION_YIELDED"),
-                        "withdrawn route is no longer queued: %s", context.getRequestId());
+                if (!item.prefillEp().removeQueued(item, "DECODE_RESERVATION_YIELDED")) {
+                    throw new IllegalStateException("withdrawn route is no longer queued: " + context.getRequestId());
+                }
                 synchronized (context) {
                     context.detachWithdrawnRoute(withdrawal, item);
                 }
@@ -642,8 +643,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 ctx.recordCancellationLocked(CancelReason.DEADLINE_EXCEEDED, "request scheduling deadline exceeded before delivery");
                 expired = finalizationEffects(ctx.tryTerminateCancellationLocked(() -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), null);
             } else {
-                checkState(handoff.transferToEndpoint(exact),
-                        "endpoint ownership lost for request %s", ctx.getRequestId());
+                if (!handoff.transferToEndpoint(exact)) {
+                    throw new IllegalStateException("endpoint ownership lost for request " + ctx.getRequestId());
+                }
                 return ctx.beginDelivery(exact, kind, correlationId, nowMs, (claim, result) -> {
                     Runnable work = acceptDeliveryResult(claim, result);
                     if (work != null) { submitContinuation(claim.item.ctx(), work); }
@@ -1186,7 +1188,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     PublicationPermit requirePublicationPermitLocked(BalanceContext ctx, PublicationKind kind) {
         ctx.requireContextLock("publication registration");
         var registration = responseCompletions.tryRegister();
-        checkState(registration != null, "frontend publication is closed for request %s", ctx.getRequestId());
+        if (registration == null) {
+            throw new IllegalStateException("frontend publication is closed for request " + ctx.getRequestId());
+        }
         return new PublicationPermit(registration, ctx, kind);
     }
 

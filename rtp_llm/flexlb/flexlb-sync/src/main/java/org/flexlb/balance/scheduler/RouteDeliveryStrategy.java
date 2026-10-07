@@ -20,7 +20,6 @@ import java.util.Objects;
 import java.util.OptionalLong;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.missingEndpoint;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.prepareMember;
@@ -273,7 +272,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         private void requirePhase(Phase expected) {
-            checkState(phase == expected, "expected %s route admission, was %s", expected, phase);
+            if (phase != expected) { throw new IllegalStateException("expected " + expected + " route admission, was " + phase); }
         }
     }
 
