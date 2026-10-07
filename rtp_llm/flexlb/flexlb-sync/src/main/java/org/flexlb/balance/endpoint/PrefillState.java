@@ -25,6 +25,8 @@ import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Canonical Prefill request ownership for one worker generation.
  *
@@ -644,8 +646,8 @@ public final class PrefillState {
             return false;
         }
         Reservation lease = entry.reservation;
-        requireState(lease == null || lease.originalOwner != null,
-                "ACTIVE request owns a non-OPEN Prefill lease request_id=", item.requestId());
+        checkState(lease == null || lease.originalOwner != null,
+                "ACTIVE request owns a non-OPEN Prefill lease request_id=%s", item.requestId());
         removeValidatedActiveIndexLocked(item);
         // Batch preparation still owns its OPEN lease and generation handoff.
         removeRequestLocked(item.requestId(), entry);
@@ -748,7 +750,7 @@ public final class PrefillState {
         // The selected victims fund this seat; the shared lock hides the temporary excess.
         if (!enqueueActiveLocked(incoming, 0L)) { return List.of(); }
         for (RequestRoute victim : victims) {
-            requireState(removeQueuedLocked(victim), "queued preemption lost its exact victim");
+            checkState(removeQueuedLocked(victim), "queued preemption lost its exact victim");
         }
         return victims;
     }
@@ -765,11 +767,11 @@ public final class PrefillState {
             RequestRoute item = activeIndex.peek();
             if (item == null) { return null; }
             RequestEntry entry = requests.get(item.requestId());
-            requireState(entry != null && entry.activeIdentity(item),
-                    "stopped queue head has no canonical ACTIVE owner request_id=", item.requestId());
+            checkState(entry != null && entry.activeIdentity(item),
+                    "stopped queue head has no canonical ACTIVE owner request_id=%s", item.requestId());
             Reservation lease = entry.reservation;
-            requireState(lease == null || lease.originalOwner != null,
-                    "stopped ACTIVE request owns a non-OPEN Prefill lease request_id=", item.requestId());
+            checkState(lease == null || lease.originalOwner != null,
+                    "stopped ACTIVE request owns a non-OPEN Prefill lease request_id=%s", item.requestId());
             removeValidatedActiveIndexLocked(item);
             entry.queueMembership = QueueMembership.STOP_DETACHED;
             recordMutationLocked();
@@ -902,8 +904,8 @@ public final class PrefillState {
         }
         validateGroupLocked(items, true);
         for (RequestRoute item : items) {
-            requireState(requests.get(item.requestId()).reservation == null,
-                    "queued route commit cannot consume another preparation request_id=", item.requestId());
+            checkState(requests.get(item.requestId()).reservation == null,
+                    "queued route commit cannot consume another preparation request_id=%s", item.requestId());
         }
         long nowMs = clock.getAsLong();
         CommittedHandoff committedHandoff = new CommittedHandoff(generationHandoff, captureWorkLocked(nowMs));
@@ -960,7 +962,7 @@ public final class PrefillState {
         for (RequestRoute item : items) {
             removeValidatedActiveIndexLocked(item);
         }
-        requireState(preparedBatches.remove(lease.batchId, lease), "batch preparation is not canonical");
+        checkState(preparedBatches.remove(lease.batchId, lease), "batch preparation is not canonical");
         lease.generationHandoff = null;
         consumeReservationLocked(lease);
         for (RequestRoute item : items) {
@@ -973,19 +975,19 @@ public final class PrefillState {
 
     private void validateGroupLocked(List<RequestRoute> items, boolean queuedOnly) {
         requireLock();
-        requireState(!items.isEmpty(), "committed group requires members");
+        checkState(!items.isEmpty(), "committed group requires members");
         Set<RequestRoute> unique = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (RequestRoute item : items) {
-            requireState(unique.add(item), "duplicate group member request_id=", item.requestId());
+            checkState(unique.add(item), "duplicate group member request_id=%s", item.requestId());
             RequestEntry entry = requests.get(item.requestId());
-            requireState(entry != null && entry.activeIdentity(item),
-                    "group member is not canonical ACTIVE request_id=", item.requestId());
+            checkState(entry != null && entry.activeIdentity(item),
+                    "group member is not canonical ACTIVE request_id=%s", item.requestId());
             if (queuedOnly) {
-                requireState(activeIndex.contains(item),
-                        "canonical ACTIVE request has no queue index request_id=", item.requestId());
+                checkState(activeIndex.contains(item),
+                        "canonical ACTIVE request has no queue index request_id=%s", item.requestId());
             } else {
-                requireState(entry.queueMembership == QueueMembership.UNINDEXED && !activeIndex.contains(item),
-                        "immediate admission cannot have a queue index request_id=", item.requestId());
+                checkState(entry.queueMembership == QueueMembership.UNINDEXED && !activeIndex.contains(item),
+                        "immediate admission cannot have a queue index request_id=%s", item.requestId());
             }
         }
     }
@@ -993,8 +995,8 @@ public final class PrefillState {
     private void removeValidatedActiveIndexLocked(RequestRoute item) {
         requireLock();
         boolean removed = activeIndex.remove(item);
-        requireState(removed,
-                "validated ACTIVE queue index disappeared request_id=", item.requestId());
+        checkState(removed,
+                "validated ACTIVE queue index disappeared request_id=%s", item.requestId());
     }
 
     /**
@@ -1042,8 +1044,8 @@ public final class PrefillState {
                 return RequestRelease.COMMITTED;
             }
             if (entry.queueMembership == QueueMembership.UNINDEXED) {
-                requireState(entry.reservation instanceof RouteReservation && entry.reservation.originalOwner != null,
-                        "unqueued admission has no preparation request_id=", exactItem.requestId());
+                checkState(entry.reservation instanceof RouteReservation && entry.reservation.originalOwner != null,
+                        "unqueued admission has no preparation request_id=%s", exactItem.requestId());
                 closeOpenLeaseLocked(entry.reservation);
                 return RequestRelease.RESERVED;
             }
@@ -1502,16 +1504,16 @@ public final class PrefillState {
     private void removeCommittedLocked(RequestEntry entry) {
         BatchWork batch = entry.batchWork;
         if (batch != null) {
-            requireState(committedBatches.get(batch.batchId) == batch && batch.members.contains(entry),
+            checkState(committedBatches.get(batch.batchId) == batch && batch.members.contains(entry),
                     "terminal member is not owned by its batch");
             batch.members.remove(entry);
             if (batch.members.isEmpty()) {
                 committedBatches.remove(batch.batchId, batch);
             }
         }
-        requireState(entry.reservation == null, "committed request retained a preparation");
-        requireState(removeRequestLocked(entry.item.requestId(), entry),
-                "terminal request is not canonical request_id=", entry.item.requestId());
+        checkState(entry.reservation == null, "committed request retained a preparation");
+        checkState(removeRequestLocked(entry.item.requestId(), entry),
+                "terminal request is not canonical request_id=%s", entry.item.requestId());
     }
 
     private Map<Long, TerminalObservation> terminalObservationsLocked(
@@ -1594,11 +1596,11 @@ public final class PrefillState {
     /** Rollback returns only resources owned by this uncommitted preparation. */
     private void closeOpenLeaseLocked(Reservation lease) {
         requireLock();
-        requireState(lease.originalOwner != null, "Prefill preparation was already consumed");
+        checkState(lease.originalOwner != null, "Prefill preparation was already consumed");
         RequestEntry owner = openLeaseOwnerLocked(lease);
-        requireState(owner == null || owner.isActive(), "preparation has a committed owner");
+        checkState(owner == null || owner.isActive(), "preparation has a committed owner");
         if (lease instanceof BatchReservation batch) {
-            requireState(preparedBatches.remove(batch.batchId, batch), "batch preparation is not canonical");
+            checkState(preparedBatches.remove(batch.batchId, batch), "batch preparation is not canonical");
             Objects.requireNonNull(batch.generationHandoff, "batch preparation lost its handoff");
             batch.generationHandoff = null;
         }
@@ -1634,20 +1636,8 @@ public final class PrefillState {
     }
 
     private void requireLock() {
-        requireState(lock.isHeldByCurrentThread(),
+        checkState(lock.isHeldByCurrentThread(),
                 "Prefill ownership requires queueLock");
-    }
-
-    private static void requireState(boolean condition, String message, long requestId) {
-        if (!condition) {
-            throw new IllegalStateException(message + requestId);
-        }
-    }
-
-    private static void requireState(boolean condition, String message) {
-        if (!condition) {
-            throw new IllegalStateException(message);
-        }
     }
 
     private static long individualRemaining(RequestEntry entry, long nowMs) {
