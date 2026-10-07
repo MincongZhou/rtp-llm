@@ -44,7 +44,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private void notifyRequestStatuses(List<DecodeRequestStatus> requestStatuses) {
         for (DecodeRequestStatus requestStatus : requestStatuses) {
             var context = requests.findActive(requestStatus.reservation().requestId());
-            if (context != null) { context.scheduler().onDecodeStatus(this, List.of(requestStatus)); }
+            if (context != null) { context.scheduler().onDecodeStatus(context, this, requestStatus); }
         }
     }
 

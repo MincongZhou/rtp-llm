@@ -28,6 +28,7 @@ import static org.flexlb.balance.scheduler.SchedulingTestConfig.freezeInputs;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -98,6 +99,65 @@ class RequestInactivityTest {
             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).timer().close();
             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).closeRequestExecutors();
         }
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RoleType.class, names = {"PREFILL", "DECODE"})
+    void repeatedActiveStatusRenewsLivenessWithoutSchedulingContinuation(RoleType source) throws Exception {
+        acknowledgeDelivery();
+        long firstAt = registeredAtMs + TIMEOUT_MS;
+        Runnable first = acceptActive(source, firstAt);
+        if (first != null) { first.run(); }
+        for (int index = 1; index <= 1_000; index++) {
+            assertNull(acceptActive(source, firstAt + index),
+                    "repeated activity must not create a continuation without pending effects");
+        }
+        RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext,
+                firstAt + 1_000 + TIMEOUT_MS - 1);
+        assertTrue(registry.requests.isCurrent(requestContext), "the last matching heartbeat extends liveness");
+        verify(prefill, never()).releaseRequest(item);
+        verify(decode, never()).release(any(), any());
+    }
+
+    @Test
+    void activeStatusPreservesPendingDecodeHandoffTimerInstallation() throws Exception {
+        acknowledgeDelivery();
+        long completedAt = registeredAtMs + TIMEOUT_MS;
+        Runnable completed = requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL,
+                PrefillState.PrefillRequestStatus.terminal(item,
+                        PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L), completedAt);
+        assertNotNull(completed);
+        // A second report can arrive while the completion's continuation is still queued.
+        Runnable active = acceptActive(RoleType.PREFILL, completedAt + 1);
+        assertNotNull(active, "pending timer installation is real work even when status does not advance");
+        active.run();
+        completed.run();
+        assertNotNull(org.springframework.test.util.ReflectionTestUtils.getField(requestContext, "decisionDeadline"));
+        assertNull(acceptActive(RoleType.PREFILL, completedAt + 2),
+                "installed handoff timer does not require a new continuation on every heartbeat");
+    }
+
+    @Test
+    void singleStatusEntryRejectsForeignOwnerAndIsolatesMalformedStatus() throws Exception {
+        acknowledgeDelivery();
+        BalanceContext foreign = mock(BalanceContext.class);
+        when(foreign.scheduler()).thenReturn(mock(AbstractRequestScheduler.class));
+        registry.onDecodeStatus(foreign, decode, DecodeResources.DecodeRequestStatus.active(item.decodeReservation()));
+        verify(foreign, never()).acceptDecodeStatus(any(), any(), org.mockito.ArgumentMatchers.anyLong());
+        registry.onPrefillStatus(requestContext, prefill, RoleType.PREFILL, null);
+        registry.onDecodeStatus(requestContext, decode, null);
+        registry.onDecodeStatus(requestContext, decode, DecodeResources.DecodeRequestStatus.active(item.decodeReservation()));
+        synchronized (requestContext) {
+            assertTrue(requestContext.decodeAccepted(), "a malformed status must not prevent later valid activity");
+        }
+    }
+
+    private Runnable acceptActive(RoleType source, long nowMs) {
+        return source == RoleType.PREFILL
+                ? requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL,
+                        PrefillState.PrefillRequestStatus.active(item), nowMs)
+                : requestContext.acceptDecodeStatus(decode,
+                        DecodeResources.DecodeRequestStatus.active(item.decodeReservation()), nowMs);
     }
 
     @ParameterizedTest

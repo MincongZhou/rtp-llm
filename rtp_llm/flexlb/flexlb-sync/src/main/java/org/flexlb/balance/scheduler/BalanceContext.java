@@ -1883,6 +1883,10 @@ public class BalanceContext {
             obsolete = cleaning ? null : this.detachObsoleteDecisionDeadlineLocked();
             resume = previous != null && this.preemption() == null && this.hasCleanup() && work == null;
             routeToCancel = previous == null ? null : pendingWorkerQueueCancellationLocked();
+            if (work == null && obsolete == null && !resume && routeToCancel == null
+                    && decisionDeadlineAtMs().isEmpty()) {
+                return null;
+            }
         }
         return () -> {
             if (resume) {
@@ -2017,6 +2021,11 @@ public class BalanceContext {
                         }
                     }
                 }
+            }
+            if (requestStatus.kind() == DecodeResources.DecodeRequestStatus.Kind.ACTIVE
+                    && work == null && obsolete == null && !capacityChanged
+                    && decisionDeadlineAtMs().isEmpty()) {
+                return null;
             }
         }
         Runnable effect = work;

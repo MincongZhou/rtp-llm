@@ -505,9 +505,8 @@ class RequestDeliveryLockContractTest {
         assertNotNull(claim);
         BalanceContext original = lifecycle.findRequestContext(207L);
 
-        lifecycle.onPrefillStatus(endpoint, RoleType.PDFUSION,
-                List.of(PrefillState.PrefillRequestStatus.terminal(
-                        registered.item(), PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L)));
+        lifecycle.onPrefillStatus(original, endpoint, RoleType.PDFUSION, PrefillState.PrefillRequestStatus.terminal(
+                        registered.item(), PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L));
         Response terminal = registered.future().get(5L, TimeUnit.SECONDS);
         assertTrue(terminal.isSuccess());
         assertEquals(RequestState.Phase.COMPLETED, original.snapshot().state());

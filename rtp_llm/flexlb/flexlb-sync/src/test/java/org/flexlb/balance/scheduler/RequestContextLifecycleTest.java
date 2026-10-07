@@ -883,7 +883,7 @@ class RequestContextLifecycleTest {
             assertFalse(Thread.holdsLock(registered.item().ctx()));
             return null;
         }).when(source).publishCapacityRelease();
-        lifecycle.onDecodeStatus(source, List.of(DecodeResources.DecodeRequestStatus.allocated(registered.item().decodeReservation())));
+        lifecycle.onDecodeStatus(registered.item().ctx(), source, DecodeResources.DecodeRequestStatus.allocated(registered.item().decodeReservation()));
         lifecycle.runtime.continuations().awaitIdle();
         assertSame(acceptedCancel ? claim : null, registered.item().ctx().preemption());
         if (acceptedCancel) {
@@ -922,7 +922,7 @@ class RequestContextLifecycleTest {
         var source = registered.item().decodeEp();
         when(source.reconcilePreemptionResources(org.mockito.ArgumentMatchers.eq(21L), org.mockito.ArgumentMatchers.any())).thenReturn(true);
 
-        lifecycle.onDecodeStatus(source, List.of(DecodeResources.DecodeRequestStatus.allocated(registered.item().decodeReservation())));
+        lifecycle.onDecodeStatus(registered.item().ctx(), source, DecodeResources.DecodeRequestStatus.allocated(registered.item().decodeReservation()));
         lifecycle.runtime.continuations().awaitIdle();
 
         verify(source).reconcilePreemptionResources(21L, DecodeResources.PreemptionUpdate.finished(registered.item().decodeReservation()));
@@ -957,7 +957,7 @@ class RequestContextLifecycleTest {
             return null;
         }).when(source).publishCapacityRelease();
 
-        lifecycle.onDecodeStatus(source, List.of(DecodeResources.DecodeRequestStatus.allocated(registered.item().decodeReservation())));
+        lifecycle.onDecodeStatus(registered.item().ctx(), source, DecodeResources.DecodeRequestStatus.allocated(registered.item().decodeReservation()));
         lifecycle.runtime.continuations().awaitIdle();
 
         verify(source).reconcilePreemptionResources(22L,

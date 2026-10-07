@@ -143,7 +143,7 @@ class DeliverySettlementTest {
         for (int i = 1; i < members.size(); i++) {
             Member member = members.get(i);
             member.claim().complete(DeliveryResult.delivered());
-            registry.onPrefillStatus(prefill, RoleType.PREFILL, ledger.finish(20L, member.item()));
+            ledger.finish(20L, member.item()).forEach(status -> registry.onPrefillStatus(status.route().ctx(), prefill, RoleType.PREFILL, status));
             assertOccupancy(i == 15 ? 0 : 1, 15 - i);
         }
         assertTrue(ledger.prefill.batchCapacityAvailable(2));
@@ -196,7 +196,7 @@ class DeliverySettlementTest {
         Member replacement = member(50L, 51L);
         ledger.commit(51L, List.of(replacement.item()));
         decodeFinished(old);
-        registry.onPrefillStatus(prefill, RoleType.PREFILL, ledger.finish(50L, old.item()));
+        ledger.finish(50L, old.item()).forEach(status -> registry.onPrefillStatus(status.route().ctx(), prefill, RoleType.PREFILL, status));
         registry.runtime.continuations().awaitIdle();
         assertOccupancy(1, 1);
         assertSame(replacement.requestContext(), registry.requests.findActive(50L));
@@ -296,7 +296,7 @@ class DeliverySettlementTest {
         for (int index = 0; index < order.length(); index++) {
             switch (order.charAt(index)) {
                 case 'A' -> member.claim().complete(DeliveryResult.delivered());
-                case 'P' -> registry.onPrefillStatus(prefill, RoleType.PREFILL, ledger.finish(70L, member.item()));
+                case 'P' -> ledger.finish(70L, member.item()).forEach(status -> registry.onPrefillStatus(status.route().ctx(), prefill, RoleType.PREFILL, status));
                 case 'D' -> {
                     DeliverySettlementTestSupport.decodeStatus(decode, 70L, true);
                     decodeEnded = true;
@@ -319,7 +319,7 @@ class DeliverySettlementTest {
         assertFalse(registry.requests.isCurrent(member.requestContext()));
         assertTrue(cancellations.isEmpty(), "normal completion must not start Engine cancel");
         DeliverySettlementTestSupport.decodeStatus(decode, 70L, true);
-        registry.onPrefillStatus(prefill, RoleType.PREFILL, ledger.finish(70L, member.item()));
+        ledger.finish(70L, member.item()).forEach(status -> registry.onPrefillStatus(status.route().ctx(), prefill, RoleType.PREFILL, status));
         registry.runtime.continuations().awaitIdle();
         assertOccupancy(0, 0);
         assertSame(response, member.item().future().join());

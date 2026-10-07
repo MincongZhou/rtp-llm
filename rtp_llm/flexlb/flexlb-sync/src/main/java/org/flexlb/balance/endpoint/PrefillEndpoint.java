@@ -498,7 +498,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         List<PrefillState.PrefillRequestStatus> requestStatuses =
                 reconciliation.requestStatuses();
         return () -> requestStatuses.forEach(requestStatus -> requestStatus.route().ctx().scheduler().onPrefillStatus(
-                this, observation.role(), List.of(requestStatus)));
+                requestStatus.route().ctx(), this, observation.role(), requestStatus));
     }
 
     @Override
@@ -586,7 +586,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             signalSchedulingInputsChanged();
         }
         return () -> reconciliation.requestStatuses().forEach(requestStatus -> requestStatus.route().ctx().scheduler().onPrefillStatus(
-                this, observation.role(), List.of(requestStatus)));
+                requestStatus.route().ctx(), this, observation.role(), requestStatus));
     }
 
     private void reportBatchCompletionsNoFail(

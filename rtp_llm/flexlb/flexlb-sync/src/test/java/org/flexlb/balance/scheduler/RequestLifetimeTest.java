@@ -354,9 +354,9 @@ class RequestLifetimeTest {
             }
             AbstractRequestScheduler projector = registry;
             if (evidenceSource == RoleType.PREFILL) {
-                projector.onPrefillStatus(prefill, RoleType.PREFILL, List.of(PrefillState.PrefillRequestStatus.active(item)));
+                projector.onPrefillStatus(requestContext, prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item));
             } else {
-                projector.onDecodeStatus(decode, List.of(DecodeResources.DecodeRequestStatus.active(reservation)));
+                projector.onDecodeStatus(requestContext, decode, DecodeResources.DecodeRequestStatus.active(reservation));
             }
             if (!ackBeforeEvidence) {
                 assertFalse(future.isDone(), "Engine activity cannot create an EnqueueBatch ACK");

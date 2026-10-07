@@ -203,24 +203,27 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    /** Endpoint accounting is committed before these request statuses enter request transitions. */
-    public void onPrefillStatus(PrefillEndpoint source, RoleType role,
-                                List<PrefillState.PrefillRequestStatus> requestStatuses) {
-        forEachEndpointUpdate("Prefill status", requestStatuses, requestStatus -> {
-            BalanceContext context = findRequestContext(requestStatus.route().requestId());
-            if (context != null) {
+    /** The resolved request retains its identity through archival; Context rejects retired routes. */
+    public void onPrefillStatus(BalanceContext context, PrefillEndpoint source, RoleType role,
+                                PrefillState.PrefillRequestStatus requestStatus) {
+        try {
+            if (context != null && context.scheduler() == this) {
                 submitContinuation(context, context.acceptPrefillStatus(source, role, requestStatus, System.currentTimeMillis()));
             }
-        });
+        } catch (Throwable failure) {
+            logEndpointFailure("Prefill status", failure);
+        }
     }
 
-    public void onDecodeStatus(DecodeEndpoint source, List<DecodeResources.DecodeRequestStatus> requestStatuses) {
-        forEachEndpointUpdate("Decode status", requestStatuses, requestStatus -> {
-            BalanceContext context = findRequestContext(requestStatus.reservation().requestId());
-            if (context != null) {
+    public void onDecodeStatus(BalanceContext context, DecodeEndpoint source,
+                               DecodeResources.DecodeRequestStatus requestStatus) {
+        try {
+            if (context != null && context.scheduler() == this) {
                 submitContinuation(context, context.acceptDecodeStatus(source, requestStatus, System.currentTimeMillis()));
             }
-        });
+        } catch (Throwable failure) {
+            logEndpointFailure("Decode status", failure);
+        }
     }
 
     private void submitContinuation(BalanceContext context, Runnable work) {

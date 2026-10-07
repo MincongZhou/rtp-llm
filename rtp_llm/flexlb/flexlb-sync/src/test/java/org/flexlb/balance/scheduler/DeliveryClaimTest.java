@@ -313,10 +313,9 @@ class DeliveryClaimTest {
 
             timeout.run();
             f.cancel.complete(EngineCancelChannel.CancelAck.REQUEST_FENCED);
-            f.owner.onDecodeStatus(RequestProtocolTestSupport.decodeEndpoint(),
-                    List.of(DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L)));
-            f.owner.onDecodeStatus(f.decode, List.of(DecodeResources.DecodeRequestStatus.terminal(
-                    new DecodeResources.ReservationHandle(1L, 41L, 99L), 0L)));
+            f.owner.onDecodeStatus(f.context, RequestProtocolTestSupport.decodeEndpoint(), DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L));
+            f.owner.onDecodeStatus(f.context, f.decode, DecodeResources.DecodeRequestStatus.terminal(
+                    new DecodeResources.ReservationHandle(1L, 41L, 99L), 0L));
             f.owner.runtime.continuations().awaitIdle();
             assertFalse(f.settlement().isDone(), "Prefill fencing and foreign Decode facts do not settle the request");
             assertTrue(f.owner.requests.isCurrent(f.context));
@@ -715,7 +714,7 @@ class DeliveryClaimTest {
 
         void applyDecodeTerminal() {
             clearDecodeStateOwnership();
-            owner.onDecodeStatus(decode, List.of(DecodeResources.DecodeRequestStatus.terminal(reservation, 0L)));
+            owner.onDecodeStatus(context, decode, DecodeResources.DecodeRequestStatus.terminal(reservation, 0L));
         }
 
         void retireDecode() {
