@@ -114,7 +114,7 @@ public final class DeliveryStrategyTestSupport {
                 if (!commit) {
                     return "NOT_COMMITTED";
                 }
-                WorkSnapshot precedingWork = transaction.commitUnderLock().materialize();
+                WorkSnapshot precedingWork = transaction.commitLocked().materialize();
                 transaction.handoff(decisionReason, remainingQueueDepth, precedingWork);
                 return "COMMITTED";
             }
@@ -163,7 +163,7 @@ public final class DeliveryStrategyTestSupport {
                     .thenReturn(unavailable);
             Mockito.when(prefill.tryBeginRouteCommitAdmission())
                     .thenReturn(routeCommit);
-            Mockito.when(routeCommit.commit(
+            Mockito.when(routeCommit.commitLocked(
                             Mockito.anyList(), Mockito.anyList()))
                     .thenAnswer(invocation -> committedHandoffs(1).getFirst());
             Mockito.when(prefill.reserveBatch(
@@ -234,7 +234,7 @@ public final class DeliveryStrategyTestSupport {
         private PrefillState.ReservationResult<PrefillState.BatchReservation>
                 reserveBatch() {
             batchReservation = Mockito.mock(PrefillState.BatchReservation.class);
-            Mockito.when(batchReservation.commit(
+            Mockito.when(batchReservation.commitLocked(
                             Mockito.anyList(), Mockito.anyLong()))
                     .thenAnswer(invocation -> committedHandoffs(1).getFirst());
             return new PrefillState.ReservationResult<>(

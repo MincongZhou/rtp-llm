@@ -122,16 +122,16 @@ class WorkerBatcherRequestCapacityTest {
                 assertTrue(EndpointTestSupport.offer(fixture.endpoint, second));
                 // Two seats are required; a completed request cannot fund the replacement.
                 org.mockito.Mockito.doReturn(CompletableFuture.completedFuture(null)).when(first).future();
-                assertTrue(state.replaceQueuedRoutesUnderLock(incoming, 1L).isEmpty());
+                assertTrue(state.replaceQueuedRoutesLocked(incoming, 1L).isEmpty());
                 assertEquals(2L, state.observedRequestCount());
                 assertEquals(List.of(first, second), state.captureQueue(Integer.MAX_VALUE).items());
                 org.mockito.Mockito.doCallRealMethod().when(first).future();
-                assertEquals(List.of(second, first), state.replaceQueuedRoutesUnderLock(incoming, 1L));
+                assertEquals(List.of(second, first), state.replaceQueuedRoutesLocked(incoming, 1L));
                 assertEquals(List.of(incoming), state.captureQueue(Integer.MAX_VALUE).items());
                 assertEquals(1L, state.observedRequestCount());
-                assertFalse(state.removeQueuedUnderLock(first));
-                assertFalse(state.removeQueuedUnderLock(second));
-                assertTrue(state.removeQueuedUnderLock(incoming));
+                assertFalse(state.removeQueuedLocked(first));
+                assertFalse(state.removeQueuedLocked(second));
+                assertTrue(state.removeQueuedLocked(incoming));
                 assertEquals(0L, state.observedRequestCount());
             } finally {
                 state.ownershipLock().unlock();

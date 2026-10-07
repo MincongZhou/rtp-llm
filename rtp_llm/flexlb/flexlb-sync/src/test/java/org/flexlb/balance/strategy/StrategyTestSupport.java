@@ -146,7 +146,13 @@ final class StrategyTestSupport {
         }
         try (PrefillState.BatchReservation reservation =
                      result.reservation()) {
-            return reservation.commit(items, predictedMs);
+            PrefillState state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
+            state.ownershipLock().lock();
+            try {
+                return reservation.commitLocked(items, predictedMs);
+            } finally {
+                state.ownershipLock().unlock();
+            }
         }
     }
 

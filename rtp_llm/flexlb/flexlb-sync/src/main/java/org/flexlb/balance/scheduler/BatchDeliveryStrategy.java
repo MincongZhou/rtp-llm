@@ -300,10 +300,10 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public synchronized PrefillState.WorkCapture commitUnderLock() {
+        public synchronized PrefillState.WorkCapture commitLocked() {
             requirePhase(Phase.PREPARED, "commit");
             PrefillState.CommittedHandoff handoff =
-                    reservation.commit(items, predictedMs);
+                    reservation.commitLocked(items, predictedMs);
             committedHandoff = handoff;
             reservation = null;
             phase = Phase.COMMITTED;

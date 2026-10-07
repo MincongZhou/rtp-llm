@@ -52,13 +52,25 @@ public class PrefillEndpoint extends WorkerEndpoint {
         public PrefillState.CommittedHandoff commit(
                 List<RequestRoute> exactItems,
                 List<PrefillState.RouteReservation> exactReservations) {
+            prefillState.ownershipLock().lock();
+            try {
+                return commitLocked(exactItems, exactReservations);
+            } finally {
+                prefillState.ownershipLock().unlock();
+            }
+        }
+
+        /** Caller holds the shared Prefill ownership lock through queue validation and commit. */
+        public PrefillState.CommittedHandoff commitLocked(
+                List<RequestRoute> exactItems,
+                List<PrefillState.RouteReservation> exactReservations) {
             EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
             if (exact == null) {
                 throw new IllegalStateException(
                         "route commit no longer owns its generation handoff");
             }
             PrefillState.CommittedHandoff committed =
-                    prefillState.commitRouteGroup(
+                    prefillState.commitRouteGroupLocked(
                             exactItems, exactReservations, exact);
             generationHandoff = null;
             return committed;
@@ -178,7 +190,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             try {
                 source = projectionSource;
                 if (source == null || !prefillState.isCurrentProjection(source.version)) {
-                    source = captureProjectionSourceUnderLock();
+                    source = captureProjectionSourceLocked();
                     projectionSource = source;
                 }
             } finally {
@@ -191,12 +203,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Caller holds the endpoint ownership lock. */
-    private ProjectionSource captureProjectionSourceUnderLock() {
-        PrefillState.Snapshot ownership = prefillState.snapshotUnderLock();
+    private ProjectionSource captureProjectionSourceLocked() {
+        PrefillState.Snapshot ownership = prefillState.snapshotLocked();
         return new ProjectionSource(ownership,
                 runtime == null ? new GroupPlanner.Constraints(1, Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L)
-                        : runtime.projectionConstraintsUnderLock(),
-                runtime == null || ownership.active().isEmpty() ? null : runtime.admissionBlockUnderLock());
+                        : runtime.projectionConstraintsLocked(),
+                runtime == null || ownership.active().isEmpty() ? null : runtime.admissionBlockLocked());
     }
 
     /**
@@ -226,7 +238,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             if (settings == null || settings.dispatcherType() != dispatcherType) {
                 throw new IllegalArgumentException("queued admission requires a compatible QUEUE configuration");
             }
-            prefillState.enableQueueUnderLock(settings.priorityOrdering()
+            prefillState.enableQueueLocked(settings.priorityOrdering()
                     ? WorkerBatcher.PRIORITY_QUEUE_ORDER : WorkerBatcher.FIFO_QUEUE_ORDER);
             WorkerBatcher worker = new WorkerBatcher(ipPort(), this, settings, deliveryStrategy, prefillState);
             projectionOrder = settings.priorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
@@ -272,7 +284,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         } else {
             prefillState.ownershipLock().lock();
             try {
-                prefillState.schedulingInputsChangedUnderLock();
+                prefillState.schedulingInputsChangedLocked();
             } finally {
                 prefillState.ownershipLock().unlock();
             }

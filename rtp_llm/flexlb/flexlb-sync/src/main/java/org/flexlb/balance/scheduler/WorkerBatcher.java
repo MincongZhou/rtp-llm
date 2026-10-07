@@ -262,11 +262,11 @@ public final class WorkerBatcher {
             if (stopped) {
                 return false;
             }
-            accepted = prefillState.enqueueForDeliveryUnderLock(item, settings.maxOutstandingRequests());
+            accepted = prefillState.enqueueForDeliveryLocked(item, settings.maxOutstandingRequests());
             if (accepted) { stateChanged.signal(); }
             if (!accepted && !stopped
                     && settings.preemptQueued()) {
-                victims = prefillState.replaceQueuedRoutesUnderLock(item, settings.maxOutstandingRequests());
+                victims = prefillState.replaceQueuedRoutesLocked(item, settings.maxOutstandingRequests());
                 accepted = !victims.isEmpty();
                 if (accepted) { stateChanged.signal(); }
             }
@@ -302,14 +302,14 @@ public final class WorkerBatcher {
      * <p>The availability read is the already-subscribed wait predicate; it
      * neither previews nor reserves capacity. Caller holds {@link #queueLock}.
      */
-    public AdmissionBlock admissionBlockUnderLock() {
+    public AdmissionBlock admissionBlockLocked() {
         if (!queueLock.isHeldByCurrentThread()) {
             throw new IllegalStateException(
                     "capacity block snapshot requires queueLock");
         }
         BatcherCycleResult blocked = capacityBlockedHead;
         if (blocked == null
-                || !prefillState.queueWaitCurrentUnderLock(blocked.request(), 0L, 0L,
+                || !prefillState.queueWaitCurrentLocked(blocked.request(), 0L, 0L,
                         blocked.unavailable().availability(), now())) {
             return null;
         }
@@ -394,7 +394,7 @@ public final class WorkerBatcher {
                 queueLock.lock();
                 try {
                     controlInbox.clear();
-                    cleanupFailure = Failures.run(cleanupFailure, () -> setCapacityBlockedHeadUnderLock(null));
+                    cleanupFailure = Failures.run(cleanupFailure, () -> setCapacityBlockedHeadLocked(null));
                     stateChanged.signalAll();
                 } catch (Throwable wakeFailure) {
                     cleanupFailure = Failures.append(cleanupFailure, wakeFailure);
@@ -452,7 +452,7 @@ public final class WorkerBatcher {
     private boolean acknowledgeStoppedItem(RequestRoute item) {
         queueLock.lock();
         try {
-            return prefillState.acknowledgeStopTerminalUnderLock(item);
+            return prefillState.acknowledgeStopTerminalLocked(item);
         } finally {
             queueLock.unlock();
         }
@@ -470,7 +470,7 @@ public final class WorkerBatcher {
         try {
             removed = runtimeState == RuntimeState.RUNNING
                     && !stopped
-                    && prefillState.removeQueuedUnderLock(item);
+                    && prefillState.removeQueuedLocked(item);
             if (removed) {
                 stateChanged.signal();
             }
@@ -537,10 +537,14 @@ public final class WorkerBatcher {
         return System.currentTimeMillis();
     }
 
-    /** Capture scheduling constraints while holding the shared ownership lock. */
+    /** Grouping semantics fixed for this endpoint generation. */
     public GroupingPolicy groupingPolicy() { return grouping; }
 
-    public GroupPlanner.Constraints projectionConstraintsUnderLock() {
+    /** Capture scheduling constraints while holding the shared Prefill ownership lock. */
+    public GroupPlanner.Constraints projectionConstraintsLocked() {
+        if (!queueLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException("projection constraints require queueLock");
+        }
         return schedulingConstraints(maxDecisionRequests(), predictedExecutionBudgetMs(), collectionWindowMs());
     }
 
@@ -604,7 +608,7 @@ public final class WorkerBatcher {
     private boolean selectionStillOwned(List<RequestRoute> candidates) {
         queueLock.lock();
         try {
-            return !stopped && prefillState.ownsSelectionUnderLock(candidates, now());
+            return !stopped && prefillState.ownsSelectionLocked(candidates, now());
         } finally {
             queueLock.unlock();
         }
@@ -620,11 +624,11 @@ public final class WorkerBatcher {
             queueLock.lock();
             try {
                 long nowMs = now();
-                if (stopped || !prefillState.ownsSelectionUnderLock(items, nowMs)) {
+                if (stopped || !prefillState.ownsSelectionLocked(items, nowMs)) {
                     return BatcherCycleResult.NO_ACTION;
                 }
-                precedingWork = transaction.commitUnderLock();
-                PrefillState.SelectionRemainder remainder = prefillState.finishPreparedSelectionUnderLock(
+                precedingWork = transaction.commitLocked();
+                PrefillState.SelectionRemainder remainder = prefillState.finishPreparedSelectionLocked(
                         transaction.blockedItem(), transaction.blockedResult(), nowMs);
                 removedBoundary = remainder.removedBoundary();
                 remainingQueueDepth = remainder.queueDepth();
@@ -655,7 +659,7 @@ public final class WorkerBatcher {
             if (stopped) {
                 return BatcherCycleResult.NO_ACTION;
             }
-            boundary = prefillState.resolveEmptySelectionUnderLock(
+            boundary = prefillState.resolveEmptySelectionLocked(
                     blockedItem, blockedResult, now());
         } finally {
             queueLock.unlock();
@@ -697,7 +701,7 @@ public final class WorkerBatcher {
         boolean removed;
         queueLock.lock();
         try {
-            removed = prefillState.removeQueuedUnderLock(head);
+            removed = prefillState.removeQueuedLocked(head);
         } finally {
             queueLock.unlock();
         }
@@ -846,16 +850,16 @@ public final class WorkerBatcher {
         queueLock.lockInterruptibly();
         try {
             if (capacityWait && !stopped) {
-                setCapacityBlockedHeadUnderLock(waiting);
+                setCapacityBlockedHeadLocked(waiting);
             }
-            while (!stopped && controlInbox.isEmpty() && prefillState.queueWaitCurrentUnderLock(
+            while (!stopped && controlInbox.isEmpty() && prefillState.queueWaitCurrentLocked(
                     waiting == null ? null : waiting.request(),
                     waiting == null ? 0L : waiting.queueVersion(),
                     waiting == null ? 0L : waiting.schedulingInputVersion(),
                     capacityWait ? waiting.unavailable().availability() : null,
                     now())) {
                 if (waiting == null) {
-                    setCapacityBlockedHeadUnderLock(null);
+                    setCapacityBlockedHeadLocked(null);
                 }
                 long wakeAtMs = waiting == null ? Long.MAX_VALUE
                         : capacityWait ? waiting.request().expiresAtMs() : waiting.wakeAtMs();
@@ -872,7 +876,7 @@ public final class WorkerBatcher {
         } finally {
             try {
                 if (capacityWait) {
-                    setCapacityBlockedHeadUnderLock(null);
+                    setCapacityBlockedHeadLocked(null);
                 }
             } finally {
                 queueLock.unlock();
@@ -885,7 +889,7 @@ public final class WorkerBatcher {
         queueLock.lock();
         try {
             if (capacityBlockedHead != null) {
-                prefillState.schedulingInputsChangedUnderLock();
+                prefillState.schedulingInputsChangedLocked();
                 stateChanged.signal();
             }
         } finally {
@@ -894,7 +898,7 @@ public final class WorkerBatcher {
     }
 
     /** Own the blocked head, its listener and projection invalidation under queueLock. */
-    private void setCapacityBlockedHeadUnderLock(
+    private void setCapacityBlockedHeadLocked(
             BatcherCycleResult blocked) {
         if (!queueLock.isHeldByCurrentThread()) {
             throw new IllegalStateException(
@@ -908,7 +912,7 @@ public final class WorkerBatcher {
         CapacityBoundary.Availability nextSource = blocked == null
                 ? null : blocked.unavailable().availability();
         capacityBlockedHead = blocked;
-        prefillState.schedulingInputsChangedUnderLock();
+        prefillState.schedulingInputsChangedLocked();
         if (previousSource != nextSource) {
             try {
                 if (previousSource != null) {
@@ -926,7 +930,7 @@ public final class WorkerBatcher {
     public void signalSchedulingInputsChanged() {
         queueLock.lock();
         try {
-            prefillState.schedulingInputsChangedUnderLock();
+            prefillState.schedulingInputsChangedLocked();
             stateChanged.signal();
         } finally {
             queueLock.unlock();

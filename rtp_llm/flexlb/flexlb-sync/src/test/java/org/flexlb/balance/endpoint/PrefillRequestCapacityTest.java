@@ -100,7 +100,7 @@ class PrefillRequestCapacityTest {
         assertTrue(enqueue(second, 0L));
         var generation = new EndpointGenerationLifecycle(() -> { });
         var reservation = state.reserveBatch(first, 10L, 1, generation.tryAcquireHandoff()).reservation();
-        try (var handoff = reservation.commit(List.of(first, second), 0L)) { }
+        try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(first, second), 0L)) { }
         assertFalse(state.batchAvailability(1).isAvailable());
         assertTrue(enqueue(item(3), 0L));
         assertTrue(state.terminalizeCommittedItem(first));
@@ -143,7 +143,7 @@ class PrefillRequestCapacityTest {
             try {
                 assertFalse(reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS));
                 assertTrue(reader.submit(() -> state.canAcceptRequest(2L)).get(5, TimeUnit.SECONDS));
-                assertTrue(state.removeQueuedUnderLock(queued));
+                assertTrue(state.removeQueuedLocked(queued));
                 assertTrue(reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS),
                         "removal publishes capacity before the ownership lock is released");
             } finally {
@@ -210,7 +210,7 @@ class PrefillRequestCapacityTest {
         var direct = new PrefillState(lock, PrefillActiveIndex.disabled(), () -> { });
         lock.lock();
         try {
-            assertThrows(IllegalStateException.class, () -> direct.enqueueActiveUnderLock(item(1), 1L));
+            assertThrows(IllegalStateException.class, () -> direct.enqueueActiveLocked(item(1), 1L));
             assertTrue(direct.canAcceptRequest(1L));
             assertEquals(0L, direct.observedRequestCount());
         } finally {
@@ -240,13 +240,13 @@ class PrefillRequestCapacityTest {
     }
 
     private PrefillState.CommittedHandoff commit(RequestRoute item, PrefillState.RouteReservation registration) {
-        return state.commitRouteGroup(List.of(item), List.of(registration),
+        return EndpointTestSupport.commitRoutes(state, List.of(item), List.of(registration),
                 new EndpointGenerationLifecycle(() -> { }).tryAcquireHandoff());
     }
 
     private boolean enqueue(RequestRoute item, long limit) {
         lock.lock();
-        try { return state.enqueueActiveUnderLock(item, limit); }
+        try { return state.enqueueActiveLocked(item, limit); }
         finally { lock.unlock(); }
     }
 

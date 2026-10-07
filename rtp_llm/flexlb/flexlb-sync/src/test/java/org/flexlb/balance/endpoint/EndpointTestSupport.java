@@ -24,13 +24,36 @@ public final class EndpointTestSupport {
     private EndpointTestSupport() {
     }
 
+    static PrefillState.CommittedHandoff commitBatch(
+            PrefillState state, PrefillState.BatchReservation reservation,
+            List<RequestRoute> items, long predictedMs) {
+        state.ownershipLock().lock();
+        try {
+            return reservation.commitLocked(items, predictedMs);
+        } finally {
+            state.ownershipLock().unlock();
+        }
+    }
+
+    static PrefillState.CommittedHandoff commitRoutes(
+            PrefillState state, List<RequestRoute> items,
+            List<PrefillState.RouteReservation> reservations,
+            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+        state.ownershipLock().lock();
+        try {
+            return state.commitRouteGroupLocked(items, reservations, generationHandoff);
+        } finally {
+            state.ownershipLock().unlock();
+        }
+    }
+
     public static PrefillEndpoint unstartedPrefill(
             org.flexlb.config.FlexlbConfig config, WorkerStatus status,
             DeliveryStrategy delivery, AbstractRequestScheduler scheduler) {
         var endpoint = EndpointTestSupport.prefill(status, config, delivery, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(scheduler), org.mockito.Mockito.mock(BatchSchedulerReporter.class));
         var state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
         state.ownershipLock().lock();
-        try { state.enableQueueUnderLock(config.isPriorityOrdering()
+        try { state.enableQueueLocked(config.isPriorityOrdering()
                 ? org.flexlb.balance.scheduler.WorkerBatcher.PRIORITY_QUEUE_ORDER : org.flexlb.balance.scheduler.WorkerBatcher.FIFO_QUEUE_ORDER); }
         finally { state.ownershipLock().unlock(); }
         var worker = org.mockito.Mockito.mock(org.flexlb.balance.scheduler.WorkerBatcher.class, org.mockito.Mockito.withSettings()
@@ -279,14 +302,15 @@ public final class EndpointTestSupport {
         }
         try (PrefillState.BatchReservation reservation =
                      result.reservation()) {
-            return reservation.commit(items, predictedMs);
+            PrefillState state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
+            return commitBatch(state, reservation, items, predictedMs);
         }
     }
 
     static PrefillState.RouteReservation reserveRoute(PrefillState state, RequestRoute item, long predictedMs) {
         state.ownershipLock().lock();
         try {
-            return state.reserveRouteUnderLock(item, predictedMs);
+            return state.reserveRouteLocked(item, predictedMs);
         } finally {
             state.ownershipLock().unlock();
         }

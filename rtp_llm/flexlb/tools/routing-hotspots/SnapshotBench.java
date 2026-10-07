@@ -34,8 +34,8 @@ public class SnapshotBench {
         void changeMembership() {
             lock.lock();
             try {
-                if (!state.removeQueuedUnderLock(member)
-                        || !state.enqueueActiveUnderLock(member, 0)) {
+                if (!state.removeQueuedLocked(member)
+                        || !state.enqueueActiveLocked(member, 0)) {
                     throw new AssertionError("membership update failed");
                 }
             } finally {
@@ -83,7 +83,7 @@ public class SnapshotBench {
         Field lockField = PrefillState.class.getDeclaredField("lock");
         lockField.setAccessible(true);
         var lock = (ReentrantLock) lockField.get(state);
-        var enableQueue = PrefillState.class.getDeclaredMethod("enableQueueUnderLock", Comparator.class);
+        var enableQueue = PrefillState.class.getDeclaredMethod("enableQueueLocked", Comparator.class);
         enableQueue.setAccessible(true);
         lock.lock();
         try {
@@ -102,7 +102,7 @@ public class SnapshotBench {
         try {
             for (int i = 0; i < depth; i++) {
                 last = request(config, i, 1 + i % 4, 100 + random.nextInt(4096));
-                if (!state.enqueueActiveUnderLock(last, 0)) throw new AssertionError();
+                if (!state.enqueueActiveLocked(last, 0)) throw new AssertionError();
             }
         } finally {
             lock.unlock();

@@ -40,8 +40,11 @@ public interface DeliveryStrategy {
 
         CapacityBoundary blockedResult();
 
-        /** Commit ownership and capture preceding work under the same endpoint lock. */
-        PrefillState.WorkCapture commitUnderLock();
+        /**
+         * Commit ownership and capture preceding work atomically.
+         * Caller holds the selected Prefill's shared ownership lock.
+         */
+        PrefillState.WorkCapture commitLocked();
 
         /** Transfer committed ownership to the configured delivery mode. */
         void handoff(String decisionReason, int remainingQueueDepth,

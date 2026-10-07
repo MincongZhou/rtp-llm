@@ -221,7 +221,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         postEvent(new QueueEvent(EventKind.CONTROL, new GlobalQueueEntry(context, 0, null), null));
     }
 
-    private void consumeEventsUnderLock() {
+    private void consumeEventsLocked() {
         QueueEvent event;
         while ((event = events.pollFirst()) != null) {
             switch (event.kind) {
@@ -252,7 +252,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         }
     }
 
-    private void processControlUnderLock(List<GlobalQueueEntry> readyControls) {
+    private void processControlLocked(List<GlobalQueueEntry> readyControls) {
         GlobalQueueEntry entry;
         while ((entry = controlInbox.pollFirst()) != null) {
             orderedQueue.remove(entry);
@@ -314,8 +314,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private Plan pollCompletedPlan(List<GlobalQueueEntry> readyControls) {
         lock.lock();
         try {
-            consumeEventsUnderLock();
-            processControlUnderLock(readyControls);
+            consumeEventsLocked();
+            processControlLocked(readyControls);
             return completedPlans.pollFirst();
         } finally {
             lock.unlock();
@@ -325,8 +325,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private List<GlobalQueueEntry> claimPlanningSlots(List<GlobalQueueEntry> readyControls) {
         lock.lock();
         try {
-            consumeEventsUnderLock();
-            processControlUnderLock(readyControls);
+            consumeEventsLocked();
+            processControlLocked(readyControls);
             int slots = plannerCount - inFlight.size();
             if (closed.get() || slots == 0) {
                 return List.of();
@@ -451,7 +451,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         return orderedQueue.scanForPlanningCandidates(
                 slots, calculateScanBudget(slots), entry -> {
                     if (entry.context.getFuture().isDone()) {
-                        removeRequestUnderLock(entry);
+                        removeRequestLocked(entry);
                         return false;
                     }
                     return !entry.removed && !inFlight.contains(entry)
@@ -646,7 +646,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private void removeRequest(GlobalQueueEntry entry) {
         lock.lock();
         try {
-            removeRequestUnderLock(entry);
+            removeRequestLocked(entry);
         } finally {
             lock.unlock();
         }
@@ -657,7 +657,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
      * share this boundary and return any active retry opportunity to its domain.
      * Caller holds {@link #lock}.
      */
-    private void removeRequestUnderLock(GlobalQueueEntry entry) {
+    private void removeRequestLocked(GlobalQueueEntry entry) {
         orderedQueue.remove(entry);
         waitingRequests.remove(entry);
         preemptionQuotaWaiters.remove(entry);

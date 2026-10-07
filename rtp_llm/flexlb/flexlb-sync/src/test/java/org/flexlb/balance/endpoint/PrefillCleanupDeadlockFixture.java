@@ -26,14 +26,14 @@ public final class PrefillCleanupDeadlockFixture {
             enqueue(first);
             try (var reservation = state.reserveBatch(first, 1L, 2, generation.tryAcquireHandoff()).reservation()) {
                 assertNotNull(reservation);
-                try (var handoff = reservation.commit(List.of(first), 20L)) {
+                try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(first), 20L)) {
                     assertNotNull(handoff);
                 }
             }
         } else {
             try (var reservation = state.reserveUnqueuedRoute(first, 20L, 0L).reservation()) {
                 assertNotNull(reservation);
-                try (var handoff = state.commitRouteGroup(
+                try (var handoff = EndpointTestSupport.commitRoutes(state,
                         List.of(first), List.of(reservation), generation.tryAcquireHandoff())) {
                     assertNotNull(handoff);
                 }
@@ -61,7 +61,7 @@ public final class PrefillCleanupDeadlockFixture {
 
     private void enqueue(RequestRoute item) {
         lock.lock();
-        try { assertTrue(state.enqueueActiveUnderLock(item, Long.MAX_VALUE)); }
+        try { assertTrue(state.enqueueActiveLocked(item, Long.MAX_VALUE)); }
         finally { lock.unlock(); }
     }
 

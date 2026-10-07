@@ -53,14 +53,14 @@ public final class EndpointCleanupTestSupport {
             if (batch) {
                 lock.lock();
                 try {
-                    assertTrue(state.enqueueActiveUnderLock(item, Long.MAX_VALUE));
+                    assertTrue(state.enqueueActiveLocked(item, Long.MAX_VALUE));
                 } finally {
                     lock.unlock();
                 }
                 try (var reservation = state.reserveBatch(item, batchId, 1,
                         generation.tryAcquireHandoff()).reservation()) {
                     assertNotNull(reservation, "the expired batch must release its sole capacity slot");
-                    try (var handoff = reservation.commit(List.of(item), predictedMs)) {
+                    try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(item), predictedMs)) {
                         assertNotNull(handoff);
                     }
                     return new Owner(item, reservation);
@@ -68,7 +68,7 @@ public final class EndpointCleanupTestSupport {
             }
             try (var reservation = state.reserveUnqueuedRoute(item, predictedMs, 1).reservation()) {
                 assertNotNull(reservation, "the expired individual must release its sole capacity slot");
-                try (var handoff = state.commitRouteGroup(List.of(item), List.of(reservation),
+                try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(item), List.of(reservation),
                         generation.tryAcquireHandoff())) {
                     assertNotNull(handoff);
                 }

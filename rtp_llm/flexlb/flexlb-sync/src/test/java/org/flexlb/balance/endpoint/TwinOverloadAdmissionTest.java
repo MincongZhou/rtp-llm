@@ -204,8 +204,9 @@ class TwinOverloadAdmissionTest {
         PrefillState.ReservationResult<PrefillState.BatchReservation> acquisition =
                 endpoint.reserveBatch(items.getFirst(), batchId, limit);
         assertEquals(PrefillState.CapacityStatus.ACQUIRED, acquisition.status());
+        PrefillState state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
         try (PrefillState.BatchReservation reservation = acquisition.reservation();
-             PrefillState.CommittedHandoff ignored = reservation.commit(items, 300_000L)) {
+             PrefillState.CommittedHandoff ignored = EndpointTestSupport.commitBatch(state, reservation, items, 300_000L)) {
             // Releasing the handoff closes only the generation pin, not engine work.
         }
     }

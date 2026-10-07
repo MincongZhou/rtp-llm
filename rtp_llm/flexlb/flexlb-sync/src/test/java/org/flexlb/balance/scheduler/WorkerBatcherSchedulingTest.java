@@ -66,6 +66,19 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
+    @Test
+    void projectionConstraintsRequireTheSharedOwnershipLock() {
+        WorkerBatcher runtime = runningRuntime(singleConfig(), mock(PrefillEndpoint.class), mock(DeliveryStrategy.class));
+        assertThrows(IllegalStateException.class, runtime::projectionConstraintsLocked);
+        var lock = WorkerBatcherTestSupport.state(runtime).ownershipLock();
+        lock.lock();
+        try {
+            assertEquals(1, runtime.projectionConstraintsLocked().maxRequests());
+        } finally {
+            lock.unlock();
+        }
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = { false, true })
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
@@ -233,7 +246,7 @@ class WorkerBatcherSchedulingTest {
         var state = WorkerBatcherTestSupport.state(runtime);
         state.ownershipLock().lock();
         try {
-            assertTrue(state.enqueueActiveUnderLock(request, 0L));
+            assertTrue(state.enqueueActiveLocked(request, 0L));
         } finally {
             state.ownershipLock().unlock();
         }
@@ -274,7 +287,7 @@ class WorkerBatcherSchedulingTest {
         when(strategy.prepare(any(), any(), any())).thenReturn(transaction);
         when(transaction.items()).thenReturn(List.of(selected));
         var capture = mock(org.flexlb.balance.endpoint.PrefillState.WorkCapture.class);
-        when(transaction.commitUnderLock()).thenReturn(capture);
+        when(transaction.commitLocked()).thenReturn(capture);
         RuntimeException failure = new IllegalStateException("committed delivery failure");
         RuntimeException abortFailure = new IllegalStateException("abort failure");
         when(capture.materialize()).thenAnswer(ignored -> {
@@ -298,7 +311,7 @@ class WorkerBatcherSchedulingTest {
         } else {
             deliver.run();
         }
-        verify(transaction, times(1)).commitUnderLock();
+        verify(transaction, times(1)).commitLocked();
         verify(transaction, beforeHandoff ? never() : times(1)).handoff(anyString(), anyInt(), any());
         verify(transaction, times(1)).abort(failure);
         verify(transaction, times(1)).close();

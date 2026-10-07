@@ -24,7 +24,7 @@ public final class DeliverySettlementTestSupport {
     public void enqueue(RequestRoute item) {
         lock.lock();
         try {
-            assertTrue(prefill.enqueueActiveUnderLock(item, Long.MAX_VALUE));
+            assertTrue(prefill.enqueueActiveLocked(item, Long.MAX_VALUE));
         } finally {
             lock.unlock();
         }
@@ -39,7 +39,7 @@ public final class DeliverySettlementTestSupport {
         lock.lock();
         try {
             for (RequestRoute item : items) {
-                assertTrue(prefill.enqueueActiveUnderLock(item, Long.MAX_VALUE));
+                assertTrue(prefill.enqueueActiveLocked(item, Long.MAX_VALUE));
             }
         } finally {
             lock.unlock();
@@ -47,7 +47,7 @@ public final class DeliverySettlementTestSupport {
         try (var reservation = prefill.reserveBatch(items.getFirst(), batchId, 2,
                 generation.tryAcquireHandoff()).reservation()) {
             assertNotNull(reservation);
-            try (var handoff = reservation.commit(items, 100L)) {
+            try (var handoff = EndpointTestSupport.commitBatch(prefill, reservation, items, 100L)) {
                 assertNotNull(handoff);
             }
         }

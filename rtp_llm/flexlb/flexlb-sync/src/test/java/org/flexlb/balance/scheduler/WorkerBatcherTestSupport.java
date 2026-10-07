@@ -42,7 +42,7 @@ public final class WorkerBatcherTestSupport {
             }
 
             @Override
-            public PrefillState.WorkCapture commitUnderLock() {
+            public PrefillState.WorkCapture commitLocked() {
                 throw new IllegalStateException(
                         "boundary-only preparation cannot commit");
             }

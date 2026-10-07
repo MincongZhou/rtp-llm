@@ -1,5 +1,8 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.PrefillState;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -225,7 +228,7 @@ class QueuedBatchDeliveryTest {
         });
         try (var transaction = strategy.prepare(List.of(item), new FormulaPredictor("100"), OptionalLong.empty());
              var contender = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-            var preceding = transaction.commitUnderLock().materialize();
+            var preceding = commit(transaction).materialize();
             transaction.handoff("blocked-rpc", 0, preceding);
             releaseExecutor.countDown();
             try {
@@ -248,7 +251,7 @@ class QueuedBatchDeliveryTest {
     void unresolvedCommittedDeliveryIsAbortedWithoutAnOriginalFailure() throws Exception {
         RequestRoute item = item(1L);
         try (var transaction = strategy.prepare(List.of(item), new FormulaPredictor("100"), OptionalLong.empty())) {
-            transaction.commitUnderLock();
+            commit(transaction);
             transaction.abort(null);
             transaction.abort(null);
         }
@@ -269,7 +272,7 @@ class QueuedBatchDeliveryTest {
         doThrow(rejection).when(submission).submit(any());
         var rejectingStrategy = new BatchDeliveryStrategy(() -> org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted(submission), () -> 201L, mock(BatchSchedulerReporter.class));
         try (var transaction = rejectingStrategy.prepare(List.of(item), new FormulaPredictor("100"), OptionalLong.empty())) {
-            var preceding = transaction.commitUnderLock().materialize();
+            var preceding = commit(transaction).materialize();
             assertSame(rejection, assertThrows(java.util.concurrent.RejectedExecutionException.class,
                     () -> transaction.handoff("rejected", 0, preceding)));
             transaction.abort(rejection);
@@ -387,10 +390,20 @@ class QueuedBatchDeliveryTest {
         return item;
     }
 
+    private PrefillState.WorkCapture commit(DeliveryStrategy.Transaction transaction) {
+        var lock = ledger.prefill.ownershipLock();
+        lock.lock();
+        try {
+            return transaction.commitLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private void submit(List<RequestRoute> items) {
         try (var transaction = strategy.prepare(items, new FormulaPredictor("100 * batchSize"), OptionalLong.empty())) {
             assertEquals(items, transaction.items());
-            var preceding = transaction.commitUnderLock().materialize();
+            var preceding = commit(transaction).materialize();
             transaction.handoff("queued-race", 0, preceding);
         }
     }

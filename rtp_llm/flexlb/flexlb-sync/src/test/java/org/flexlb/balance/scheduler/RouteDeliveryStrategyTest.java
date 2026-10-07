@@ -49,7 +49,7 @@ class RouteDeliveryStrategyTest {
             assertTrue(transaction.items().isEmpty());
             assertSame(item, transaction.blockedItem());
             assertEquals(CapacityBoundary.Status.FAILED, transaction.blockedResult().status());
-            assertThrows(IllegalStateException.class, transaction::commitUnderLock);
+            assertThrows(IllegalStateException.class, transaction::commitLocked);
         }
         org.mockito.Mockito.verifyNoInteractions(requests);
     }
@@ -115,7 +115,7 @@ class RouteDeliveryStrategyTest {
         var cleanup = new IllegalStateException("first member cleanup failed");
         try (var transaction = fixture.strategy.prepare(List.of(first, sibling),
                 DeliveryStrategyTestSupport.EVALUATOR, OptionalLong.empty())) {
-            transaction.commitUnderLock();
+            transaction.commitLocked();
             Throwable failure = assertThrows(NullPointerException.class,
                     () -> transaction.handoff("invalid-work", 0, null));
             if (cleanupFails) {
@@ -393,7 +393,7 @@ class RouteDeliveryStrategyTest {
                 fixture.telemetry.routes());
         verify(first.prefillEp()).prepareRoute(first, 90L);
         verify(second.prefillEp()).prepareRoute(second, 90L);
-        verify(fixture.capabilities.routeCommit()).commit(
+        verify(fixture.capabilities.routeCommit()).commitLocked(
                 org.mockito.ArgumentMatchers.eq(List.of(first, second)),
                 org.mockito.ArgumentMatchers.eq(List.of(
                         fixture.capabilities.routeReservation(first),

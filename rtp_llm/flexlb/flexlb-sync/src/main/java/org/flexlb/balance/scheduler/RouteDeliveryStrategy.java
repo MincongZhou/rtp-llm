@@ -220,11 +220,11 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         @Override public CapacityBoundary blockedResult() { return blockedResult; }
 
         @Override
-        public synchronized PrefillState.WorkCapture commitUnderLock() {
+        public synchronized PrefillState.WorkCapture commitLocked() {
             requirePhase(Phase.PREPARED);
             try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
                 if (routeCommit == null) { throw PrefillAdmissionResources.retired("Prefill", items.getFirst()); }
-                var handoff = routeCommit.commit(items, reservations);
+                var handoff = routeCommit.commitLocked(items, reservations);
                 committed = handoff;
                 phase = Phase.COMMITTED;
                 return handoff.precedingWork();

@@ -57,7 +57,7 @@ class BatchDeliveryStrategyTest {
         assertEquals(List.of(first, second), telemetry.dispatched());
         assertEquals(83L, telemetry.predictedMs());
         assertEquals(3, telemetry.remainingQueueDepth());
-        verify(fixture.capabilities.batchReservation()).commit(
+        verify(fixture.capabilities.batchReservation()).commitLocked(
                 org.mockito.ArgumentMatchers.eq(List.of(first, second)),
                 org.mockito.ArgumentMatchers.eq(83L));
         verify(fixture.capabilities.permit(first)).dispatch();
@@ -80,7 +80,7 @@ class BatchDeliveryStrategyTest {
         assertEquals(200L, fixture.submission.command().predictedMs());
         assertEquals(200L, fixture.telemetry.batches()
                 .getFirst().predictedMs());
-        verify(fixture.capabilities.batchReservation()).commit(
+        verify(fixture.capabilities.batchReservation()).commitLocked(
                 org.mockito.ArgumentMatchers.eq(List.of(first, second)),
                 org.mockito.ArgumentMatchers.eq(200L));
     }
@@ -119,7 +119,7 @@ class BatchDeliveryStrategyTest {
         var transaction = strategy.prepare(List.of(fixture.item(1L)),
                 DeliveryStrategyTestSupport.EVALUATOR, OptionalLong.empty());
 
-        assertThrows(IllegalStateException.class, transaction::commitUnderLock);
+        assertThrows(IllegalStateException.class, transaction::commitLocked);
         transaction.close();
         assertEquals(CapacityBoundary.Status.FAILED, transaction.blockedResult().status());
         assertSame(primary, transaction.blockedResult().cause());
@@ -388,7 +388,7 @@ class BatchDeliveryStrategyTest {
 
         try (var transaction = strategy.prepare(List.of(first, second),
                 DeliveryStrategyTestSupport.EVALUATOR, OptionalLong.of(20L))) {
-            var preceding = transaction.commitUnderLock().materialize();
+            var preceding = transaction.commitLocked().materialize();
             if (submitRejected) {
                 assertSame(cause, assertThrows(IllegalStateException.class,
                         () -> transaction.handoff("rejected", 0, preceding)));
