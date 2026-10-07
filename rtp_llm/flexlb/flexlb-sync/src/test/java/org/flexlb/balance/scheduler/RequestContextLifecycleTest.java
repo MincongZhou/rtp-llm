@@ -859,6 +859,21 @@ class RequestContextLifecycleTest {
         lifecycle.onQueuedItemControl(registered.item());
         lifecycle.onQueueOfferFailure(registered.item(), new IllegalStateException("late queue failure"));
         lifecycle.onQueuedItemPreempted(registered.item(), registered.item());
+        BalanceContext current = lifecycle.findRequestContext(703L);
+        RequestState oldState = old.snapshot();
+        RequestState currentState = current.snapshot();
+        lifecycle.onPrefillStatus(old, registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL,
+                org.flexlb.balance.endpoint.PrefillState.PrefillRequestStatus.active(registered.item()));
+        lifecycle.onPrefillStatus(old, registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL,
+                org.flexlb.balance.endpoint.PrefillState.PrefillRequestStatus.terminal(registered.item(),
+                        org.flexlb.balance.endpoint.PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L));
+        lifecycle.onDecodeStatus(old, registered.item().decodeEp(),
+                DecodeResources.DecodeRequestStatus.active(registered.item().decodeReservation()));
+        lifecycle.onDecodeStatus(old, registered.item().decodeEp(),
+                DecodeResources.DecodeRequestStatus.terminal(registered.item().decodeReservation(), 0L));
+        lifecycle.runtime.continuations().awaitIdle();
+        assertEquals(oldState, old.snapshot(), "late Worker status must not update the archived Context");
+        assertEquals(currentState, current.snapshot(), "late Worker status must not update the reused ID");
         assertFalse(replacement.isDone());
         assertEquals(RequestState.Phase.QUEUED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(703L, 0L).state());
     }

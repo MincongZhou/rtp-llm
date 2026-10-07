@@ -22,6 +22,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.SchedulingTestConfig.freezeInputs;
@@ -99,6 +100,31 @@ class RequestInactivityTest {
             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).timer().close();
             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).closeRequestExecutors();
         }
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RoleType.class, names = {"PREFILL", "DECODE"})
+    void activeStatusCancelsObsoleteVisibilityTimerWithoutEndingResourceTracking(RoleType source) throws Exception {
+        acknowledgeDelivery();
+        var deadline = requestContext.decisionDeadline();
+        assertNotNull(deadline);
+        ScheduledFuture<?> scheduled = (ScheduledFuture<?>)
+                org.springframework.test.util.ReflectionTestUtils.getField(deadline, "scheduled");
+        assertNotNull(scheduled);
+        assertFalse(scheduled.isCancelled());
+        if (source == RoleType.PREFILL) {
+            registry.onPrefillStatus(requestContext, prefill, RoleType.PREFILL,
+                    PrefillState.PrefillRequestStatus.active(item));
+        } else {
+            registry.onDecodeStatus(requestContext, decode,
+                    DecodeResources.DecodeRequestStatus.active(item.decodeReservation()));
+        }
+        registry.runtime.continuations().awaitIdle();
+        assertTrue(scheduled.isCancelled(), "engine evidence must cancel the obsolete scheduled callback");
+        assertNull(requestContext.decisionDeadline());
+        requestContext.onDecisionVisibilityDeadline(deadline);
+        assertLiveAndCharged();
+        assertTrue(item.future().join().isSuccess());
     }
 
     @ParameterizedTest
