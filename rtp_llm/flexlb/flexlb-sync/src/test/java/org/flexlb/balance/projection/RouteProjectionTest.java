@@ -1,13 +1,12 @@
 package org.flexlb.balance.projection;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
-import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
-import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -24,6 +23,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Contract tests for the canonical route-projection value boundary. */
 class RouteProjectionTest {
+
+    @Test
+    void runningWorkRetainsSaturationWhenClockDifferenceWraps() {
+        WorkSnapshot snapshot = new WorkSnapshot(Long.MIN_VALUE,
+                List.of(new WorkSnapshot.RequestWork(1L, WorkSnapshot.Phase.ENGINE_RUNNING, Long.MAX_VALUE)),
+                List.of(), 0L);
+
+        assertEquals(Long.MAX_VALUE, snapshot.knownRemainingWorkMsAt(Long.MAX_VALUE));
+        assertEquals(Long.MAX_VALUE, snapshot.totalRemainingWorkMsAt(Long.MAX_VALUE).orElseThrow());
+    }
 
     @Test
     void emptyFixedWindowMatchesTheGenericPlannerWithoutBuildingAGroup() {

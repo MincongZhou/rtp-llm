@@ -1,6 +1,5 @@
 package org.flexlb.interceptor;
 
-import com.google.common.base.CaseFormat;
 import io.grpc.Context;
 import io.grpc.Contexts;
 import io.grpc.ForwardingServerCall;
@@ -108,7 +107,15 @@ public final class GrpcTraceInterceptor implements ServerInterceptor {
         String methodName = separator >= 0
                 ? fullMethodName.substring(separator + 1)
                 : fullMethodName;
-        return "rtp_llm.flexlb." + CaseFormat.UPPER_CAMEL.to(CaseFormat.LOWER_UNDERSCORE, methodName);
+        StringBuilder snakeName = new StringBuilder(methodName.length() + 8);
+        for (int i = 0; i < methodName.length(); ++i) {
+            char character = methodName.charAt(i);
+            if (Character.isUpperCase(character) && i > 0) {
+                snakeName.append('_');
+            }
+            snakeName.append(Character.toLowerCase(character));
+        }
+        return "rtp_llm.flexlb." + snakeName;
     }
 
     /** Records the terminating status the handler passes to close(). */

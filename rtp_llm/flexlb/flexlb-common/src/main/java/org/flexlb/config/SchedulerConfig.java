@@ -1,6 +1,5 @@
 package org.flexlb.config;
 
-import com.google.common.math.LongMath;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -30,6 +29,8 @@ public final class SchedulerConfig {
     }
 
     public long resolveExpiresAtMs(long admissionTimeMs) {
-        return LongMath.saturatedAdd(admissionTimeMs, queueTimeoutMs);
+        return admissionTimeMs > Long.MAX_VALUE - queueTimeoutMs
+                ? Long.MAX_VALUE
+                : admissionTimeMs + queueTimeoutMs;
     }
 }

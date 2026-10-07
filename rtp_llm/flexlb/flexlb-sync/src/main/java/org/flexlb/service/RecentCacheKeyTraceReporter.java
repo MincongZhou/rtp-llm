@@ -1,6 +1,5 @@
 package org.flexlb.service;
 
-import com.google.common.math.LongMath;
 import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.balance.scheduler.RequestRequirements;
 import org.flexlb.cache.core.RecentCacheKeyWindow;
@@ -101,7 +100,11 @@ public class RecentCacheKeyTraceReporter {
         if (hitKeyCount <= 0L || inputTokens <= 0L || cacheKeyBlockSize <= 0L) {
             return 0L;
         }
-        return Math.min(inputTokens, LongMath.saturatedMultiply(hitKeyCount, cacheKeyBlockSize));
+        long hitTokens = hitKeyCount * cacheKeyBlockSize;
+        if (hitTokens < 0L) {
+            return inputTokens;
+        }
+        return Math.min(inputTokens, hitTokens);
     }
 
     @PostConstruct

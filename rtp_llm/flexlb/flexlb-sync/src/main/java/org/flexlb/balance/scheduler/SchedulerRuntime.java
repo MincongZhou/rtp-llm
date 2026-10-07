@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import com.google.common.math.LongMath;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -143,10 +142,15 @@ public final class SchedulerRuntime {
         long ttlMs = config.loadBalanceConfig().getWorkerRegistry().getHealth().getStatusStaleAfterMs();
         long nowMs = clock.getAsLong();
         Throwable failure = Failures.run(null,
-                () -> requests.expireTerminalRecords(LongMath.saturatedSubtract(nowMs, ttlMs)));
+                () -> requests.expireTerminalRecords(subtractSaturated(nowMs, ttlMs)));
         failure = Failures.run(failure,
                 () -> endpoints.evictExpiredOrphans(ttlMs, requests::retainsIdentity));
         Failures.rethrow(failure, "expiration maintenance failed");
+    }
+
+    private static long subtractSaturated(long value, long decrement) {
+        try { return Math.subtractExact(value, decrement); }
+        catch (ArithmeticException underflow) { return Long.MIN_VALUE; }
     }
 
     @Scheduled(fixedRateString = "${report.interval.ms:2000}")
@@ -223,8 +227,8 @@ public final class SchedulerRuntime {
 
     void closeRequestExecutors() {
         Throwable failure = null;
-        failure = Failures.run(failure, continuations::close);
-        failure = Failures.run(failure, responseCompletions::close);
+        try { continuations.close(); } catch (Throwable cause) { failure = cause; }
+        try { responseCompletions.close(); } catch (Throwable cause) { failure = Failures.append(failure, cause); }
         cleanupExecutor.shutdown();
         boolean interrupted = false;
         while (!cleanupExecutor.isTerminated()) {
@@ -271,7 +275,11 @@ public final class SchedulerRuntime {
         };
         Throwable firstFailure = null;
         for (Runnable step : steps) {
-            firstFailure = Failures.run(firstFailure, step);
+            try { step.run(); }
+            catch (Throwable failure) {
+                if (firstFailure == null) { firstFailure = failure; }
+                else if (failure != firstFailure) { firstFailure.addSuppressed(failure); }
+            }
         }
         if (requests.liveRequestCount() != 0) {
             firstFailure = Failures.append(firstFailure,
