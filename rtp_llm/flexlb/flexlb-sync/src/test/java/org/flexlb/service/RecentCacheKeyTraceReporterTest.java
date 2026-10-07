@@ -181,6 +181,25 @@ class RecentCacheKeyTraceReporterTest {
         inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(60_000L, 256L, 256L);
     }
 
+    @Test
+    void overflowingHitTokenProductIsCappedByRequestInput() throws Exception {
+        for (long blockSize : new long[] {Long.MAX_VALUE, 1L << 62, (1L << 62) + 1}) {
+            CacheMetricsReporter metrics = mock(CacheMetricsReporter.class);
+            RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
+            inject(reporter, "recentCacheKeyWindow", smallWindow());
+            inject(reporter, "cacheMetricsReporter", metrics);
+            List<Long> keys = List.of(11L, 22L, 33L, 44L);
+            reporter.report(context(new FlexlbConfig(), keys, 1024L, blockSize));
+            reporter.report(context(new FlexlbConfig(), keys, 1024L, blockSize));
+
+            verify(metrics).reportRecentCacheKeyHitMetrics(60_000L, 1024L, 1024L);
+            org.mockito.ArgumentCaptor<CacheHitTheoryStats.Snapshot> captor =
+                    org.mockito.ArgumentCaptor.forClass(CacheHitTheoryStats.Snapshot.class);
+            verify(metrics, org.mockito.Mockito.times(2)).reportTheoryCacheHitMetrics(captor.capture());
+            assertEquals(1024L, captor.getAllValues().get(1).getRequestHitCount());
+        }
+    }
+
     private static void inject(Object target, String fieldName, Object value) throws Exception {
         Field field = RecentCacheKeyTraceReporter.class.getDeclaredField(fieldName);
         field.setAccessible(true);
