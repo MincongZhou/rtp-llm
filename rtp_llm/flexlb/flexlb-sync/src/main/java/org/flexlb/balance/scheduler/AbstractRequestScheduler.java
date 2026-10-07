@@ -203,22 +203,22 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    /** Endpoint accounting is committed before these exact facts enter request transitions. */
+    /** Endpoint accounting is committed before these request statuses enter request transitions. */
     public void onPrefillStatus(PrefillEndpoint source, RoleType role,
-                                List<PrefillState.WorkerStatusFact> facts) {
-        forEachEndpointFact("Prefill status", facts, fact -> {
-            BalanceContext context = findRequestContext(fact.item().requestId());
+                                List<PrefillState.PrefillRequestStatus> requestStatuses) {
+        forEachEndpointUpdate("Prefill status", requestStatuses, requestStatus -> {
+            BalanceContext context = findRequestContext(requestStatus.route().requestId());
             if (context != null) {
-                submitContinuation(context, context.acceptPrefillStatus(source, role, fact, System.currentTimeMillis()));
+                submitContinuation(context, context.acceptPrefillStatus(source, role, requestStatus, System.currentTimeMillis()));
             }
         });
     }
 
-    public void onDecodeStatus(DecodeEndpoint source, List<DecodeResources.WorkerStatusFact> facts) {
-        forEachEndpointFact("Decode status", facts, fact -> {
-            BalanceContext context = findRequestContext(fact.reservation().requestId());
+    public void onDecodeStatus(DecodeEndpoint source, List<DecodeResources.DecodeRequestStatus> requestStatuses) {
+        forEachEndpointUpdate("Decode status", requestStatuses, requestStatus -> {
+            BalanceContext context = findRequestContext(requestStatus.reservation().requestId());
             if (context != null) {
-                submitContinuation(context, context.acceptDecodeStatus(source, fact, System.currentTimeMillis()));
+                submitContinuation(context, context.acceptDecodeStatus(source, requestStatus, System.currentTimeMillis()));
             }
         });
     }
@@ -229,15 +229,15 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    /** One malformed fact or callback must not strand the other committed endpoint facts. */
-    private static <T> void forEachEndpointFact(String event, List<T> facts, Consumer<T> accept) {
-        if (facts == null) {
+    /** One malformed update or callback must not strand the other committed endpoint updates. */
+    private static <T> void forEachEndpointUpdate(String event, List<T> updates, Consumer<T> accept) {
+        if (updates == null) {
             return;
         }
         try {
-            for (T fact : facts) {
+            for (T update : updates) {
                 try {
-                    accept.accept(fact);
+                    accept.accept(update);
                 } catch (Throwable failure) {
                     logEndpointFailure(event, failure);
                 }
@@ -251,7 +251,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         try {
             Logger.error("Endpoint event isolated: event={}", event, failure);
         } catch (Throwable ignored) {
-            // Diagnostics cannot prevent the remaining facts from being reduced.
+            // Diagnostics cannot prevent the remaining updates from being processed.
         }
     }
 
@@ -259,7 +259,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         if (source == null) {
             return;
         }
-        forEachEndpointFact("Prefill retirement", items, exact -> {
+        forEachEndpointUpdate("Prefill retirement", items, exact -> {
             BalanceContext context = findRequestContext(exact.requestId());
             if (context != null) {
                 DeliveryClaim delivery = context.delivery();
@@ -274,14 +274,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         if (source == null) {
             return;
         }
-        forEachEndpointFact("Decode retirement", reservations, exact -> {
+        forEachEndpointUpdate("Decode retirement", reservations, exact -> {
             BalanceContext context = findRequestContext(exact.requestId());
             if (context != null) {
                 DeliveryClaim delivery = context.delivery();
                 if (delivery != null && Objects.equals(delivery.item.decodeReservation(), exact)) { delivery.observeRetirement(source); }
                 Runnable work;
                 synchronized (context) {
-                    work = context.ownsDecodeFactLocked(source, exact)
+                    work = context.ownsDecodeReservationLocked(source, exact)
                             ? context.processRequestEndLocked(context.route(), DeferredTerminal.decodeGenerationRetired(
                                     "Decode endpoint generation retired: generation=" + exact.endpointGenerationId()))
                             : null;
@@ -758,7 +758,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     private Runnable acceptPrefillRetirement(BalanceContext ctx, PrefillEndpoint source, RequestRoute exact) {
         String detail = "Prefill endpoint generation retired: " + source.ipPort() + "#" + source.getStatus().getGenerationId();
         synchronized (ctx) {
-            if (ctx.hasCleanup() && ctx.ownsPrefillFactLocked(source, exact)) {
+            if (ctx.hasCleanup() && ctx.ownsPrefillRouteLocked(source, exact)) {
                 ctx.recordCleanupSettlement(true, false, false);
                 return () -> resumeCleanup(ctx);
             }
@@ -1281,7 +1281,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 }
 
 /**
- * Endpoint that emitted the terminal fact; Decode facts follow its ledger update.
+ * Endpoint that published the terminal request status; Decode statuses follow its ledger update.
  */
 enum WorkerTerminalSource {
     PREFILL_ENDPOINT, DECODE_ENDPOINT

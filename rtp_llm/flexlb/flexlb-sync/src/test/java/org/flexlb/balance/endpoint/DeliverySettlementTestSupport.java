@@ -56,7 +56,7 @@ public final class DeliverySettlementTestSupport {
         }
     }
 
-    public List<PrefillState.WorkerStatusFact> finish(long batchId, RequestRoute item) {
+    public List<PrefillState.PrefillRequestStatus> finish(long batchId, RequestRoute item) {
         TaskInfo finished = new TaskInfo();
         finished.setRequestId(item.requestId());
         finished.setBatchId(batchId);
@@ -67,7 +67,7 @@ public final class DeliverySettlementTestSupport {
         var observation = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
                 .freezeStatusResponse(response);
         var result = EndpointTestSupport.reconcile(prefill, observation, ignored -> 100L);
-        return result.schedulerFacts();
+        return result.requestStatuses();
     }
 
     public static void queueDecode(DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {

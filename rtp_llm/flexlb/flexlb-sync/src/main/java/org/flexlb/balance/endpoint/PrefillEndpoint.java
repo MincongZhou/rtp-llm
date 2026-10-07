@@ -495,10 +495,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
         PrefillState.StatusReconciliation reconciliation = reduceStatus(ws, observation, prepared);
-        List<PrefillState.WorkerStatusFact> facts =
-                reconciliation.schedulerFacts();
-        return () -> facts.forEach(fact -> fact.item().ctx().scheduler().onPrefillStatus(
-                this, observation.role(), List.of(fact)));
+        List<PrefillState.PrefillRequestStatus> requestStatuses =
+                reconciliation.requestStatuses();
+        return () -> requestStatuses.forEach(requestStatus -> requestStatus.route().ctx().scheduler().onPrefillStatus(
+                this, observation.role(), List.of(requestStatus)));
     }
 
     @Override
@@ -507,10 +507,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
             WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         PrefillState.StatusReconciliation reconciliation = reduceStatus(ws, observation, null);
-        if (!reconciliation.schedulerFacts().isEmpty()
+        if (!reconciliation.requestStatuses().isEmpty()
                 || !reconciliation.batchCompletions().isEmpty()) {
             throw new IllegalStateException(
-                    "Private Prefill candidate produced locally-owned status facts");
+                    "Private Prefill candidate produced locally-owned request statuses");
         }
         return () -> { };
     }
@@ -585,8 +585,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         if (reconciliation.schedulingInputsChanged()) {
             signalSchedulingInputsChanged();
         }
-        return () -> reconciliation.schedulerFacts().forEach(fact -> fact.item().ctx().scheduler().onPrefillStatus(
-                this, observation.role(), List.of(fact)));
+        return () -> reconciliation.requestStatuses().forEach(requestStatus -> requestStatus.route().ctx().scheduler().onPrefillStatus(
+                this, observation.role(), List.of(requestStatus)));
     }
 
     private void reportBatchCompletionsNoFail(

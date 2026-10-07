@@ -971,10 +971,10 @@ class PrefillStateSnapshotTest {
             throw new AssertionError("completed and unchanged batches need no new prediction");
         });
 
-        assertEquals(4, outcome.schedulerFacts().size());
-        assertEquals(List.of(1L, 2L), outcome.schedulerFacts().stream()
-                .filter(fact -> fact.kind() == PrefillState.WorkerStatusFact.Kind.COMPLETED)
-                .map(fact -> fact.item().requestId()).sorted().toList());
+        assertEquals(4, outcome.requestStatuses().size());
+        assertEquals(List.of(1L, 2L), outcome.requestStatuses().stream()
+                .filter(requestStatus -> requestStatus.kind() == PrefillState.PrefillRequestStatus.Kind.COMPLETED)
+                .map(requestStatus -> requestStatus.route().requestId()).sorted().toList());
         assertEquals(1, outcome.batchCompletions().size());
         var completion = outcome.batchCompletions().getFirst();
         assertEquals(10L, completion.batchId());
@@ -1047,7 +1047,7 @@ class PrefillStateSnapshotTest {
         assertFalse(EndpointTestSupport.releaseRequest(state, first), "old item cannot settle the replacement");
         var stale = reconcile(Map.of("1", task(1, null, 0L, 300L)), Map.of(), noRepacking);
         assertTrue(stale.batchCompletions().isEmpty(), "old batch proof cannot settle the new batch");
-        assertTrue(stale.schedulerFacts().isEmpty());
+        assertTrue(stale.requestStatuses().isEmpty());
         assertEquals(1, state.captureQueueCounters().batchSlots());
 
         TaskInfo terminal = task(1, null, 0L, 100L);
@@ -1084,7 +1084,7 @@ class PrefillStateSnapshotTest {
         clock.addAndGet(20L);
         var result = reconcile(Map.of(), active, noRepacking);
         var after = capture();
-        assertEquals(1, result.schedulerFacts().size(), "activity must still reach the request owner");
+        assertEquals(1, result.requestStatuses().size(), "activity must still reach the request owner");
         assertFalse(result.capacityReleased());
         assertEquals(before.version(), after.version());
         assertSame(before.work(), after.work());

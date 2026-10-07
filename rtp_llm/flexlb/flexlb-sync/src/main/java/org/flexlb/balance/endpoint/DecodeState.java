@@ -14,7 +14,7 @@ import org.flexlb.balance.endpoint.DecodeResources.PreemptionUpdate;
 import org.flexlb.balance.endpoint.DecodeResources.ReleaseReason;
 import org.flexlb.balance.endpoint.DecodeResources.ReservationHandle;
 import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
-import org.flexlb.balance.endpoint.DecodeResources.WorkerStatusFact;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.TaskPhase;
@@ -901,7 +901,7 @@ final class DecodeState {
         }
     }
 
-    // Calibration: apply one observation and produce immutable request facts.
+    // Calibration: apply one observation and produce request statuses.
 
     ReentrantLock ownershipLock() { return admissionLock; }
 
@@ -909,8 +909,8 @@ final class DecodeState {
         if (!admissionLock.isHeldByCurrentThread()) { throw new IllegalStateException("Decode calibration requires ownershipLock"); }
         if (observation.owner() != status) { throw new IllegalArgumentException("Status belongs to another Decode generation"); }
         DecodeRoutingView before = routingViewLocked();
-        List<WorkerStatusFact> facts = doCalibrate(observation.engine(), observation.finishedTasks());
-        return new CalibrationResult(List.copyOf(facts), before);
+        List<DecodeRequestStatus> requestStatuses = doCalibrate(observation.engine(), observation.finishedTasks());
+        return new CalibrationResult(List.copyOf(requestStatuses), before);
     }
 
     void initialize(WorkerStatus.StatusObservation observation) {
@@ -920,19 +920,19 @@ final class DecodeState {
         admissionLock.lock();
         try {
             if (!doCalibrate(observation.engine(), observation.finishedTasks()).isEmpty()) {
-                throw new IllegalStateException("Private Decode candidate produced locally-owned status facts");
+                throw new IllegalStateException("Private Decode candidate produced locally-owned request statuses");
             }
         } finally {
             admissionLock.unlock();
         }
     }
 
-    List<WorkerStatusFact> observeHeartbeat(WorkerStatus.StatusObservation observation) {
+    List<DecodeRequestStatus> observeHeartbeat(WorkerStatus.StatusObservation observation) {
         if (observation.owner() != status) {
             throw new IllegalArgumentException(
                     "Status observation belongs to another Decode generation");
         }
-        List<WorkerStatusFact> facts = new ArrayList<>(
+        List<DecodeRequestStatus> requestStatuses = new ArrayList<>(
                 observation.runningTasks().size());
         admissionLock.lock();
         try {
@@ -941,21 +941,21 @@ final class DecodeState {
                 ReservationHandle active = workerStatusHandleLocked(
                         task.requestId());
                 if (active != null) {
-                    facts.add(task.phase() == TaskPhase.KV_ALLOCATED || task.phase() == TaskPhase.RUNNING
-                            ? WorkerStatusFact.allocated(active) : WorkerStatusFact.active(active));
+                    requestStatuses.add(task.phase() == TaskPhase.KV_ALLOCATED || task.phase() == TaskPhase.RUNNING
+                            ? DecodeRequestStatus.allocated(active) : DecodeRequestStatus.active(active));
                 }
             }
         } finally {
             admissionLock.unlock();
         }
-        return List.copyOf(facts);
+        return List.copyOf(requestStatuses);
     }
 
-    private List<WorkerStatusFact> doCalibrate(
+    private List<DecodeRequestStatus> doCalibrate(
             WorkerStatus.EngineObservation engine,
             Map<String, WorkerStatus.TaskObservation> finishedTasks) {
         admissionVersion++;
-        List<WorkerStatusFact> facts = new ArrayList<>();
+        List<DecodeRequestStatus> requestStatuses = new ArrayList<>();
 
         // Build one authoritative Decode view. Claimed victims that merely
         // disappear are held synthetically. An explicit Decode finished task
@@ -1004,8 +1004,8 @@ final class DecodeState {
             }
             ReservationHandle active = workerStatusHandleLocked(requestId);
             if (active != null) {
-                facts.add(task.phase() == TaskPhase.KV_ALLOCATED || task.phase() == TaskPhase.RUNNING
-                            ? WorkerStatusFact.allocated(active) : WorkerStatusFact.active(active));
+                requestStatuses.add(task.phase() == TaskPhase.KV_ALLOCATED || task.phase() == TaskPhase.RUNNING
+                            ? DecodeRequestStatus.allocated(active) : DecodeRequestStatus.active(active));
             }
         }
 
@@ -1024,7 +1024,7 @@ final class DecodeState {
             if (claim != null) {
                 if (terminal != null
                         && settlePriorityClaimTerminalLocked(terminal, claim)) {
-                    facts.add(WorkerStatusFact.terminal(
+                    requestStatuses.add(DecodeRequestStatus.terminal(
                             terminal, task.errorCode()));
                 } else {
                     logger.error(
@@ -1035,7 +1035,7 @@ final class DecodeState {
                 continue;
             }
             if (terminal != null) {
-                facts.add(WorkerStatusFact.terminal(
+                requestStatuses.add(DecodeRequestStatus.terminal(
                         terminal, task.errorCode()));
                 settleAuthoritativeTerminalLocked(terminal);
             } else {
@@ -1066,7 +1066,7 @@ final class DecodeState {
         }
         this.confirmedEngineOwnedCount = confirmedCount;
 
-        return facts;
+        return requestStatuses;
     }
 
     private void trackConfirmed(
@@ -1112,7 +1112,7 @@ final class DecodeState {
                 || after.realKvUsed() < before.realKvUsed();
     }
 
-    record CalibrationResult(List<WorkerStatusFact> facts, DecodeRoutingView before) { }
+    record CalibrationResult(List<DecodeRequestStatus> requestStatuses, DecodeRoutingView before) { }
 
     // Generation cleanup: drain resources and expire orphan/history records.
 

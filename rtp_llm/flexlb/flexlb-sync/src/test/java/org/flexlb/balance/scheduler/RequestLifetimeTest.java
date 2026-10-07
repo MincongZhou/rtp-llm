@@ -354,9 +354,9 @@ class RequestLifetimeTest {
             }
             AbstractRequestScheduler projector = registry;
             if (evidenceSource == RoleType.PREFILL) {
-                projector.onPrefillStatus(prefill, RoleType.PREFILL, List.of(PrefillState.WorkerStatusFact.active(item)));
+                projector.onPrefillStatus(prefill, RoleType.PREFILL, List.of(PrefillState.PrefillRequestStatus.active(item)));
             } else {
-                projector.onDecodeStatus(decode, List.of(DecodeResources.WorkerStatusFact.active(reservation)));
+                projector.onDecodeStatus(decode, List.of(DecodeResources.DecodeRequestStatus.active(reservation)));
             }
             if (!ackBeforeEvidence) {
                 assertFalse(future.isDone(), "Engine activity cannot create an EnqueueBatch ACK");
@@ -515,7 +515,7 @@ class RequestLifetimeTest {
                 assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.requestContext, "consumeInactivityDeadlineLocked", invocation.getArgument(1, ExpirationTimer.InactivityDeadline.class)));
                 if (checks.incrementAndGet() == 1) {
                     // A matching status wins after the old timer fired but before cancellation.
-                    fixture.requestContext.acceptPrefillStatus(fixture.item.prefillEp(), RoleType.PREFILL, PrefillState.WorkerStatusFact.active(fixture.item), start + 50L);
+                    fixture.requestContext.acceptPrefillStatus(fixture.item.prefillEp(), RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(fixture.item), start + 50L);
                     assertFalse(RequestProtocolTestSupport.<Boolean>inspect(fixture.scheduler, fixture.requestContext, "requestInactiveLocked", invocation.getArgument(2, Long.class)));
                     now.set(start + 150L);
                 } else {
@@ -548,7 +548,7 @@ class RequestLifetimeTest {
             long oldDeadline = fixture.requestContext.decisionDeadlineAtMs().orElseThrow();
             var oldTimer = mock(ExpirationTimer.DecisionDeadline.class);
             when(oldTimer.deadlineAtMs()).thenReturn(oldDeadline);
-            fixture.requestContext.acceptPrefillStatus(fixture.item.prefillEp(), RoleType.PREFILL, PrefillState.WorkerStatusFact.terminal(fixture.item, PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L), oldDeadline + 100L);
+            fixture.requestContext.acceptPrefillStatus(fixture.item.prefillEp(), RoleType.PREFILL, PrefillState.PrefillRequestStatus.terminal(fixture.item, PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L), oldDeadline + 100L);
             assertFalse(fixture.requestContext.installDecisionDeadline(oldTimer));
             var handoffTimer = mock(ExpirationTimer.DecisionDeadline.class);
             when(handoffTimer.deadlineAtMs()).thenReturn(fixture.requestContext.decisionDeadlineAtMs().orElseThrow());
@@ -601,7 +601,7 @@ class RequestLifetimeTest {
     }
 
     private static void observePrefillAt(Fixture fixture, boolean completed, long nowMs) {
-        fixture.requestContext.acceptPrefillStatus(fixture.item.prefillEp(), RoleType.PREFILL, completed ? PrefillState.WorkerStatusFact.terminal(fixture.item, PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L) : PrefillState.WorkerStatusFact.active(fixture.item), nowMs);
+        fixture.requestContext.acceptPrefillStatus(fixture.item.prefillEp(), RoleType.PREFILL, completed ? PrefillState.PrefillRequestStatus.terminal(fixture.item, PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L) : PrefillState.PrefillRequestStatus.active(fixture.item), nowMs);
     }
 
     private static Fixture fixture(boolean separateDecode) {
@@ -630,7 +630,7 @@ class RequestLifetimeTest {
     }
 
     private static Runnable observePrefill(AbstractRequestScheduler scheduler, BalanceContext requestContext, RequestRoute item, boolean completed) {
-        return requestContext.acceptPrefillStatus(item.prefillEp(), RoleType.PREFILL, completed ? PrefillState.WorkerStatusFact.terminal(item, PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L) : PrefillState.WorkerStatusFact.active(item), System.currentTimeMillis());
+        return requestContext.acceptPrefillStatus(item.prefillEp(), RoleType.PREFILL, completed ? PrefillState.PrefillRequestStatus.terminal(item, PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L) : PrefillState.PrefillRequestStatus.active(item), System.currentTimeMillis());
     }
 
     private static void startPrediction(AbstractRequestScheduler requestOwner, BalanceContext requestContext) {

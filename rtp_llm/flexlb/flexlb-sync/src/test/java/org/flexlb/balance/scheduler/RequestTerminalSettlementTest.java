@@ -123,7 +123,7 @@ class RequestTerminalSettlementTest {
         sender.complete(DeliveryResult.uncertain(new IllegalStateException("reply lost")));
         PreemptionRegistration claim = f.requestContext().tryInstallPreemption(RESERVATION, 4L, "victim");
         assertTrue(f.scheduler().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
-        RequestProtocolTestSupport.observeDecode(f.scheduler(), f.requestContext(), f.item().decodeEp(), DecodeResources.WorkerStatusFact.terminal(RESERVATION, 0L));
+        RequestProtocolTestSupport.observeDecode(f.scheduler(), f.requestContext(), f.item().decodeEp(), DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 0L));
         verify(f.item().decodeEp(), never()).reconcilePreemptionResources(anyLong(), argThat(update -> update.kind() == DecodeResources.PreemptionUpdate.Kind.FINISHED));
         f.scheduler().runtime.continuations().awaitIdle();
         assertTrue((f.requestContext().stage() == BalanceContext.RequestStage.FINISHED));
@@ -189,7 +189,7 @@ class RequestTerminalSettlementTest {
             assertFalse(claim.terminalObservation().toCompletableFuture().isDone());
             return null;
         }).when(f.item().decodeEp()).publishCapacityRelease();
-        var failed = PrefillState.WorkerStatusFact.terminal(f.item(), PrefillState.WorkerStatusFact.Kind.FAILED, 9L);
+        var failed = PrefillState.PrefillRequestStatus.terminal(f.item(), PrefillState.PrefillRequestStatus.Kind.FAILED, 9L);
         RequestProtocolTestSupport.observePrefill(f.scheduler(), f.requestContext(), f.item().prefillEp(), RoleType.PREFILL, failed);
         assertFalse((f.requestContext().stage() == BalanceContext.RequestStage.FINISHED));
         assertFalse(claim.isFinished());
@@ -224,10 +224,10 @@ class RequestTerminalSettlementTest {
             return null;
         }).when(f.item().decodeEp()).publishCapacityRelease();
 
-        var fact = priorityCanceled ? PrefillState.WorkerStatusFact.terminal(f.item(),
-                PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED, 0L)
-                : PrefillState.WorkerStatusFact.active(f.item());
-        RequestProtocolTestSupport.observePrefill(f.scheduler(), f.requestContext(), f.item().prefillEp(), RoleType.PREFILL, fact);
+        var requestStatus = priorityCanceled ? PrefillState.PrefillRequestStatus.terminal(f.item(),
+                PrefillState.PrefillRequestStatus.Kind.PRIORITY_CANCELED, 0L)
+                : PrefillState.PrefillRequestStatus.active(f.item());
+        RequestProtocolTestSupport.observePrefill(f.scheduler(), f.requestContext(), f.item().prefillEp(), RoleType.PREFILL, requestStatus);
 
         verify(f.item().decodeEp()).reconcilePreemptionResources(31L, update);
         verify(f.item().decodeEp()).publishCapacityRelease();
@@ -267,7 +267,7 @@ class RequestTerminalSettlementTest {
                 "finished context preserves the original cancellation fact");
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, () -> delivery.complete(DeliveryResult.delivered()));
         assertFalse(f.scheduler().completePreemption(claim, "late Cancel ACK"));
-        RequestProtocolTestSupport.observeDecode(f.scheduler(), requestContext, f.item().decodeEp(), DecodeResources.WorkerStatusFact.terminal(RESERVATION, 0L));
+        RequestProtocolTestSupport.observeDecode(f.scheduler(), requestContext, f.item().decodeEp(), DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 0L));
         RequestProtocolTestSupport.expireInactivity(f.scheduler(), requestContext, inactivity, Long.MAX_VALUE);
         assertEquals(ended, requestContext.snapshot());
         verify(f.item().decodeEp()).release(RESERVATION, DecodeResources.ReleaseReason.NOT_SENT);
@@ -299,7 +299,7 @@ class RequestTerminalSettlementTest {
             f.scheduler().runtime.continuations().awaitIdle();
         } else {
             RequestProtocolTestSupport.observeDecode(f.scheduler(), f.requestContext(), f.item().decodeEp(),
-                    DecodeResources.WorkerStatusFact.terminal(RESERVATION, 0L));
+                    DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 0L));
         }
         assertFalse((f.requestContext().stage() == BalanceContext.RequestStage.FINISHED));
         assertFalse(f.requestContext().future().isDone());
@@ -327,7 +327,7 @@ class RequestTerminalSettlementTest {
             return DecodeResources.ReservationReleaseResult.RELEASED;
         }).when(f.item().decodeEp()).release(RESERVATION, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
         assertTrue(delivery.tryStartSend());
-        RequestProtocolTestSupport.observeDecode(f.scheduler(), requestContext, f.item().decodeEp(), DecodeResources.WorkerStatusFact.terminal(RESERVATION, 42L));
+        RequestProtocolTestSupport.observeDecode(f.scheduler(), requestContext, f.item().decodeEp(), DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 42L));
         assertEquals(RequestState.Phase.FAILED, requestContext.snapshot().state());
         delivery.complete(DeliveryResult.delivered());
         f.scheduler().runtime.continuations().awaitIdle();

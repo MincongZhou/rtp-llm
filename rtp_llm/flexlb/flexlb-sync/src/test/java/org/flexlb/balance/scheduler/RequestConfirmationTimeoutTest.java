@@ -159,8 +159,8 @@ class RequestConfirmationTimeoutTest {
                 assertTrue(acquired.permit().release());
                 decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             }
-            RequestProtocolTestSupport.observePrefill(requests, prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
-            RequestProtocolTestSupport.observeDecode(requests, decode, DecodeResources.WorkerStatusFact.active(reservation));
+            RequestProtocolTestSupport.observePrefill(requests, prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item));
+            RequestProtocolTestSupport.observeDecode(requests, decode, DecodeResources.DecodeRequestStatus.active(reservation));
             assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).getRequestState(REQUEST_ID, 0L).state());
             SchedulerTestSupport.runtime(requests).continuations().awaitIdle();
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).liveRequestCount());

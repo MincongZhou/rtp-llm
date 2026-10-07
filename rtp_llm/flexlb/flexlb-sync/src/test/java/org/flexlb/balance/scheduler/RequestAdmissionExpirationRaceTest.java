@@ -232,9 +232,9 @@ class RequestAdmissionExpirationRaceTest {
                             "the fired deadline stays disarmed until the admission is completed");
                 }
                 RequestProtocolTestSupport.observeDecode(registry, decode,
-                        DecodeResources.WorkerStatusFact.active(reservation));
+                        DecodeResources.DecodeRequestStatus.active(reservation));
                 synchronized (requestContext) {
-                    requestContext.acceptDecodeStatus(decode, DecodeResources.WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
+                    requestContext.acceptDecodeStatus(decode, DecodeResources.DecodeRequestStatus.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
                 }
             }
 

@@ -40,7 +40,7 @@ class DecodeEndpointTest {
 
     @ParameterizedTest
     @EnumSource(TaskPhase.class)
-    void activeFactsPreserveExactOwnershipWhileLedgerKeepsResourcePhase(TaskPhase phase) {
+    void activeRequestStatusesPreserveExactOwnershipWhileLedgerKeepsResourcePhase(TaskPhase phase) {
         var sink = EndpointTestSupport.noopEventSink();
         endpoint = new DecodeEndpoint(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(sink));
         var reservation = reserve(100L, 500L, 500L);
@@ -53,9 +53,9 @@ class DecodeEndpointTest {
 
         EndpointTestSupport.applyStatus(endpoint, response).run();
         boolean allocated = phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING;
-        var fact = allocated ? DecodeResources.WorkerStatusFact.allocated(reservation)
-                : DecodeResources.WorkerStatusFact.active(reservation);
-        verify(sink).onDecodeStatus(endpoint, List.of(fact));
+        var requestStatus = allocated ? DecodeResources.DecodeRequestStatus.allocated(reservation)
+                : DecodeResources.DecodeRequestStatus.active(reservation);
+        verify(sink).onDecodeStatus(endpoint, List.of(requestStatus));
         assertEquals(allocated, endpoint.isAcceptedByEngine(reservation));
         assertEquals(allocated ? 0 : 1, endpoint.getInflightCount());
         assertEquals(phase == TaskPhase.RUNNING ? DecodeTaskPhase.RUNNING
@@ -63,14 +63,14 @@ class DecodeEndpointTest {
                 endpoint.resourceSnapshot().requests().get(100L).phase());
 
         endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response)).run();
-        verify(sink, times(2)).onDecodeStatus(endpoint, List.of(fact));
+        verify(sink, times(2)).onDecodeStatus(endpoint, List.of(requestStatus));
         assertEquals(allocated, endpoint.isAcceptedByEngine(reservation));
 
         WorkerStatusResponse finished = new WorkerStatusResponse();
         finished.setFinishedTaskInfo(Map.of("100", task(100L)));
         EndpointTestSupport.applyStatus(endpoint, finished).run();
         verify(sink).onDecodeStatus(endpoint,
-                List.of(DecodeResources.WorkerStatusFact.terminal(reservation, 0L)));
+                List.of(DecodeResources.DecodeRequestStatus.terminal(reservation, 0L)));
         assertFalse(endpoint.resourceSnapshot().requests().containsKey(100L));
         assertEquals(0, endpoint.getInflightCount());
     }

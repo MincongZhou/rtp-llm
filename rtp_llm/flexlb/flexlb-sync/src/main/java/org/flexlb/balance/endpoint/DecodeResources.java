@@ -90,31 +90,32 @@ public final class DecodeResources {
         boolean releasesCapacity() { return kind != Kind.CANCEL_HANDED_OFF; }
     }
 
-    public record WorkerStatusFact(
+    /** Request status matched to its exact Decode reservation, published after ledger reconciliation. */
+    public record DecodeRequestStatus(
             Kind kind,
             ReservationHandle reservation,
             long errorCode,
             boolean allocationObserved) {
-        public WorkerStatusFact {
+        public DecodeRequestStatus {
             java.util.Objects.requireNonNull(kind, "kind");
             java.util.Objects.requireNonNull(reservation, "reservation");
             if (kind != Kind.TERMINAL && errorCode != 0L) {
                 throw new IllegalArgumentException(
-                        "only a terminal Decode fact may carry an error code");
+                        "only a terminal Decode request status may carry an error code");
             }
         }
 
-        public static WorkerStatusFact active(ReservationHandle reservation) {
-            return new WorkerStatusFact(Kind.ACTIVE, reservation, 0L, false);
+        public static DecodeRequestStatus active(ReservationHandle reservation) {
+            return new DecodeRequestStatus(Kind.ACTIVE, reservation, 0L, false);
         }
 
-        public static WorkerStatusFact allocated(ReservationHandle reservation) {
-            return new WorkerStatusFact(Kind.ACTIVE, reservation, 0L, true);
+        public static DecodeRequestStatus allocated(ReservationHandle reservation) {
+            return new DecodeRequestStatus(Kind.ACTIVE, reservation, 0L, true);
         }
 
-        public static WorkerStatusFact terminal(
+        public static DecodeRequestStatus terminal(
                 ReservationHandle reservation, long errorCode) {
-            return new WorkerStatusFact(Kind.TERMINAL, reservation, errorCode, false);
+            return new DecodeRequestStatus(Kind.TERMINAL, reservation, errorCode, false);
         }
 
         public enum Kind {

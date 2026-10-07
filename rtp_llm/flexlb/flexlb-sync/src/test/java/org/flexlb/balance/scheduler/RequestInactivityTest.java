@@ -126,9 +126,9 @@ class RequestInactivityTest {
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
 
         // A delayed status or timer callback cannot reopen or double-release this generation.
-        RequestProtocolTestSupport.observePrefill(registry, prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
-        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeResources.WorkerStatusFact.active(item.decodeReservation()));
-        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeResources.WorkerStatusFact.terminal(item.decodeReservation(), 0L));
+        RequestProtocolTestSupport.observePrefill(registry, prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item));
+        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeResources.DecodeRequestStatus.active(item.decodeReservation()));
+        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeResources.DecodeRequestStatus.terminal(item.decodeReservation(), 0L));
         RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, lastStatusAt + 2L * TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
     }
@@ -214,11 +214,11 @@ class RequestInactivityTest {
         long lateStatusAt = registeredAtMs + 2L * TIMEOUT_MS;
         synchronized (requestContext) {
             Runnable observation = switch (source) {
-                case PREFILL_ENDPOINT -> requestContext.acceptPrefillStatus(mock(PrefillEndpoint.class), RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item), lateStatusAt);
-                case PREFILL_ITEM -> requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(item.ctx()), item.routeResponse(), item.prefill(), null, prefill, decode, item.decodeReservation(), registeredAtMs)), lateStatusAt);
-                case DECODE_ENDPOINT -> requestContext.acceptDecodeStatus(RequestProtocolTestSupport.decodeEndpoint(), DecodeResources.WorkerStatusFact.active(item.decodeReservation()), lateStatusAt);
-                case DECODE_GENERATION -> requestContext.acceptDecodeStatus(decode, DecodeResources.WorkerStatusFact.active(new DecodeResources.ReservationHandle(2L, REQUEST_ID, 1L)), lateStatusAt);
-                case DECODE_RESERVATION -> requestContext.acceptDecodeStatus(decode, DecodeResources.WorkerStatusFact.active(new DecodeResources.ReservationHandle(1L, REQUEST_ID, 2L)), lateStatusAt);
+                case PREFILL_ENDPOINT -> requestContext.acceptPrefillStatus(mock(PrefillEndpoint.class), RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item), lateStatusAt);
+                case PREFILL_ITEM -> requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(item.ctx()), item.routeResponse(), item.prefill(), null, prefill, decode, item.decodeReservation(), registeredAtMs)), lateStatusAt);
+                case DECODE_ENDPOINT -> requestContext.acceptDecodeStatus(RequestProtocolTestSupport.decodeEndpoint(), DecodeResources.DecodeRequestStatus.active(item.decodeReservation()), lateStatusAt);
+                case DECODE_GENERATION -> requestContext.acceptDecodeStatus(decode, DecodeResources.DecodeRequestStatus.active(new DecodeResources.ReservationHandle(2L, REQUEST_ID, 1L)), lateStatusAt);
+                case DECODE_RESERVATION -> requestContext.acceptDecodeStatus(decode, DecodeResources.DecodeRequestStatus.active(new DecodeResources.ReservationHandle(1L, REQUEST_ID, 2L)), lateStatusAt);
             };
             org.junit.jupiter.api.Assertions.assertNull(observation);
             assertTrue(RequestProtocolTestSupport.<Boolean>inspect(registry, requestContext, "requestInactiveLocked", lateStatusAt));
@@ -248,9 +248,9 @@ class RequestInactivityTest {
     private void observeActive(RoleType source, long nowMs) {
         synchronized (requestContext) {
             if (source == RoleType.PREFILL) {
-                requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item), nowMs);
+                requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item), nowMs);
             } else {
-                requestContext.acceptDecodeStatus(decode, DecodeResources.WorkerStatusFact.active(item.decodeReservation()), nowMs);
+                requestContext.acceptDecodeStatus(decode, DecodeResources.DecodeRequestStatus.active(item.decodeReservation()), nowMs);
             }
         }
     }

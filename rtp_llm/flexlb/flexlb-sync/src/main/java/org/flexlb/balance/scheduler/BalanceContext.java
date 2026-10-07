@@ -519,13 +519,13 @@ public class BalanceContext {
         }
     }
 
-    boolean ownsPrefillFactLocked(PrefillEndpoint source, RequestRoute expected) {
-        this.requireContextLock("Prefill fact ownership lookup");
+    boolean ownsPrefillRouteLocked(PrefillEndpoint source, RequestRoute expected) {
+        this.requireContextLock("Prefill route ownership lookup");
         return this.ownsResourceTrackingLocked() && this.route == expected && expected.prefillEp() == source;
     }
 
-    boolean ownsDecodeFactLocked(DecodeEndpoint source, DecodeResources.ReservationHandle reservation) {
-        this.requireContextLock("Decode fact ownership lookup");
+    boolean ownsDecodeReservationLocked(DecodeEndpoint source, DecodeResources.ReservationHandle reservation) {
+        this.requireContextLock("Decode reservation ownership lookup");
         return this.ownsResourceTrackingLocked() && this.route != null && this.route.decodeEp() == source && reservation.equals(this.route.decodeReservation());
     }
 
@@ -1073,10 +1073,10 @@ public class BalanceContext {
             publishSettlement();
         }
 
-        void observeDecodeSettlement(DecodeEndpoint source, DecodeResources.WorkerStatusFact fact) {
+        void observeDecodeSettlement(DecodeEndpoint source, DecodeResources.DecodeRequestStatus requestStatus) {
             synchronized (owner) {
-                if (source != item.decodeEp() || !Objects.equals(fact.reservation(), item.decodeReservation())
-                        || fact.kind() != DecodeResources.WorkerStatusFact.Kind.TERMINAL) { return; }
+                if (source != item.decodeEp() || !Objects.equals(requestStatus.reservation(), item.decodeReservation())
+                        || requestStatus.kind() != DecodeResources.DecodeRequestStatus.Kind.TERMINAL) { return; }
                 decodeReleaseProven = true;
                 executionFinished = true;
             }
@@ -1871,18 +1871,18 @@ public class BalanceContext {
     }
 
     Runnable acceptPrefillStatus(PrefillEndpoint source, RoleType role,
-                                 PrefillState.WorkerStatusFact fact, long nowMs) {
+                                 PrefillState.PrefillRequestStatus requestStatus, long nowMs) {
         Runnable work;
         DecisionDeadline obsolete;
         boolean resume;
         RequestRoute routeToCancel;
         synchronized (this) {
-            if (!this.ownsPrefillFactLocked(source, fact.item())) {
+            if (!this.ownsPrefillRouteLocked(source, requestStatus.route())) {
                 return null;
             }
             PreemptionRegistration previous = this.preemption();
             boolean cleaning = this.hasCleanup();
-            work = applyPrefillStatusLocked(role, fact, nowMs);
+            work = applyPrefillStatusLocked(role, requestStatus, nowMs);
             obsolete = cleaning ? null : this.detachObsoleteDecisionDeadlineLocked();
             resume = previous != null && this.preemption() == null && this.hasCleanup() && work == null;
             routeToCancel = previous == null ? null : pendingWorkerQueueCancellationLocked();
@@ -1899,20 +1899,20 @@ public class BalanceContext {
         };
     }
 
-    private Runnable applyPrefillStatusLocked(RoleType role, PrefillState.WorkerStatusFact fact, long nowMs) {
-        this.requireContextLock("Prefill fact reduction");
+    private Runnable applyPrefillStatusLocked(RoleType role, PrefillState.PrefillRequestStatus requestStatus, long nowMs) {
+        this.requireContextLock("Prefill request status reduction");
         this.observeWorker(nowMs);
         boolean cleaning = this.hasCleanup();
-        if (cleaning && fact.kind() != PrefillState.WorkerStatusFact.Kind.ACTIVE) {
+        if (cleaning && requestStatus.kind() != PrefillState.PrefillRequestStatus.Kind.ACTIVE) {
             this.recordCleanupSettlement(true, false, false);
             PreemptionRegistration claim = this.preemption();
-            if (fact.kind() != PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED
+            if (requestStatus.kind() != PrefillState.PrefillRequestStatus.Kind.PRIORITY_CANCELED
                     || claim == null || claim.isFinished()) {
                 return () -> scheduler.resumeCleanup(this);
             }
         }
         DecodeEndpoint capacityRelease = null;
-        Runnable transition = switch(fact.kind()) {
+        Runnable transition = switch(requestStatus.kind()) {
             case ACTIVE ->
                 {
                     if (cleanup == null && !prefillObserved && !decodeAccepted && prefillCompletedAtMs == 0L) {
@@ -1922,9 +1922,9 @@ public class BalanceContext {
 
                     PreemptionRegistration claim = this.preemption();
                     if (claim != null && claim.isNotFound()) {
-                        DecodeEndpoint decode = fact.item().decodeEp();
+                        DecodeEndpoint decode = requestStatus.route().decodeEp();
                         if (decode == null || decode.reconcilePreemptionResources(claim.attemptToken(),
-                                DecodeResources.PreemptionUpdate.active(fact.item().decodeReservation()))) {
+                                DecodeResources.PreemptionUpdate.active(requestStatus.route().decodeReservation()))) {
                             this.detachPreemptionOwnerLocked(claim);
                             capacityRelease = decode;
                             yield cleaning ? () -> scheduler.resumeCleanup(this) : null;
@@ -1943,16 +1943,16 @@ public class BalanceContext {
                         }
                     }
 
-                    yield role == RoleType.PDFUSION ? this.processRequestEndLocked(fact.item(), DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, true, fact.errorCode())) : null;
+                    yield role == RoleType.PDFUSION ? this.processRequestEndLocked(requestStatus.route(), DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, true, requestStatus.errorCode())) : null;
                 }
             case FAILED ->
-                this.processRequestEndLocked(fact.item(), DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, false, fact.errorCode()));
+                this.processRequestEndLocked(requestStatus.route(), DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, false, requestStatus.errorCode()));
             case PRIORITY_CANCELED -> {
                 PreemptionRegistration claim = this.preemption();
-                DecodeEndpoint decode = fact.item().decodeEp();
-                if (claim == null || !claim.canAcceptPriorityTerminal() || decode == null || fact.item().decodeReservation() == null
+                DecodeEndpoint decode = requestStatus.route().decodeEp();
+                if (claim == null || !claim.canAcceptPriorityTerminal() || decode == null || requestStatus.route().decodeReservation() == null
                         || !decode.reconcilePreemptionResources(claim.attemptToken(),
-                                DecodeResources.PreemptionUpdate.canceled(fact.item().decodeReservation()))) {
+                                DecodeResources.PreemptionUpdate.canceled(requestStatus.route().decodeReservation()))) {
                     yield null;
                 }
                 capacityRelease = decode;
@@ -1966,36 +1966,36 @@ public class BalanceContext {
         return () -> {
             Throwable failure = Failures.run(null, source::publishCapacityRelease);
             failure = Failures.run(failure, transition);
-            Failures.rethrow(failure, "Prefill fact continuation failed");
+            Failures.rethrow(failure, "Prefill request status continuation failed");
         };
     }
 
-    Runnable acceptDecodeStatus(DecodeEndpoint source, DecodeResources.WorkerStatusFact fact, long nowMs) {
+    Runnable acceptDecodeStatus(DecodeEndpoint source, DecodeResources.DecodeRequestStatus requestStatus, long nowMs) {
         Runnable work = null;
         DecisionDeadline obsolete = null;
         boolean capacityChanged = false;
         synchronized (this) {
-            if (!this.ownsDecodeFactLocked(source, fact.reservation())) {
+            if (!this.ownsDecodeReservationLocked(source, requestStatus.reservation())) {
                 return null;
             }
             this.observeWorker(nowMs);
-            if (fact.kind() == DecodeResources.WorkerStatusFact.Kind.TERMINAL) {
+            if (requestStatus.kind() == DecodeResources.DecodeRequestStatus.Kind.TERMINAL) {
                 if (!this.hasCleanup()) {
                     setDecisionDeadlineLocked(OptionalLong.empty());
                     decodeAccepted = true;
                 }
                 work = this.processRequestEndLocked(this.route(), DeferredTerminal.worker(
-                        WorkerTerminalSource.DECODE_ENDPOINT, fact.errorCode() == 0L, fact.errorCode()));
+                        WorkerTerminalSource.DECODE_ENDPOINT, requestStatus.errorCode() == 0L, requestStatus.errorCode()));
                 obsolete = this.detachObsoleteDecisionDeadlineLocked();
             } else {
                 // Membership and allocation remain separate facts. Only allocation reconciles a NOT_FOUND claim.
                 if (!this.hasCleanup()) { obsolete = this.markDecodeAcceptedLocked(); }
                 PreemptionRegistration claim = this.preemption();
-                if (fact.allocationObserved() && claim != null && claim.isNotFound()) {
+                if (requestStatus.allocationObserved() && claim != null && claim.isNotFound()) {
                     DeferredTerminal terminal = claim.pendingTerminal();
                     capacityChanged = source.reconcilePreemptionResources(claim.attemptToken(), terminal == null
-                            ? DecodeResources.PreemptionUpdate.active(fact.reservation())
-                            : DecodeResources.PreemptionUpdate.finished(fact.reservation()));
+                            ? DecodeResources.PreemptionUpdate.active(requestStatus.reservation())
+                            : DecodeResources.PreemptionUpdate.finished(requestStatus.reservation()));
                     if (capacityChanged) {
                         if (this.hasCleanup()) {
                             if (terminal != null) {
@@ -2029,10 +2029,10 @@ public class BalanceContext {
             Throwable notificationFailure = publishCapacity ? Failures.run(null, source::publishCapacityRelease) : null;
             try {
                 DeliveryClaim delivery = this.delivery();
-                if (delivery != null) { delivery.observeDecodeSettlement(source, fact); }
+                if (delivery != null) { delivery.observeDecodeSettlement(source, requestStatus); }
                 scheduler.executeEngineEffects(this, effect, deadline);
             } catch (Throwable failure) {
-                throw Failures.propagate(Failures.append(failure, notificationFailure), "Decode fact continuation failed");
+                throw Failures.propagate(Failures.append(failure, notificationFailure), "Decode request status continuation failed");
             }
             Failures.rethrow(notificationFailure, "Decode capacity publication failed");
         };
@@ -2090,7 +2090,7 @@ public class BalanceContext {
 
     TerminalAction claimPrefillRetirementLocked(PendingPrefillRetirement pending) {
         this.requireContextLock("Prefill retirement");
-        if (pending == null || !this.ownsPrefillFactLocked(pending.source(), pending.item()) || this.decodeAccepted() || this.preemption() != null || this.deliveryClaimKind().isClaimed()) {
+        if (pending == null || !this.ownsPrefillRouteLocked(pending.source(), pending.item()) || this.decodeAccepted() || this.preemption() != null || this.deliveryClaimKind().isClaimed()) {
             return null;
         }
         if (this.admission() != null) {

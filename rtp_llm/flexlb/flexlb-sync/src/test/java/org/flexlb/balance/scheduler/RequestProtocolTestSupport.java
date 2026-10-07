@@ -172,24 +172,24 @@ final class RequestProtocolTestSupport {
     }
 
     static void observePrefill(AbstractRequestScheduler scheduler, PrefillEndpoint source,
-            RoleType role, PrefillState.WorkerStatusFact fact) {
-        observePrefill(scheduler, scheduler.findRequestContext(fact.item().requestId()), source, role, fact);
+            RoleType role, PrefillState.PrefillRequestStatus requestStatus) {
+        observePrefill(scheduler, scheduler.findRequestContext(requestStatus.route().requestId()), source, role, requestStatus);
     }
 
     static void observePrefill(AbstractRequestScheduler scheduler, BalanceContext context,
             PrefillEndpoint source, RoleType role,
-            PrefillState.WorkerStatusFact fact) {
-        if (context != null) { run(context.acceptPrefillStatus(source, role, fact, System.currentTimeMillis())); }
+            PrefillState.PrefillRequestStatus requestStatus) {
+        if (context != null) { run(context.acceptPrefillStatus(source, role, requestStatus, System.currentTimeMillis())); }
     }
 
     static void observeDecode(AbstractRequestScheduler scheduler, DecodeEndpoint source,
-            DecodeResources.WorkerStatusFact fact) {
-        observeDecode(scheduler, scheduler.findRequestContext(fact.reservation().requestId()), source, fact);
+            DecodeResources.DecodeRequestStatus requestStatus) {
+        observeDecode(scheduler, scheduler.findRequestContext(requestStatus.reservation().requestId()), source, requestStatus);
     }
 
     static void observeDecode(AbstractRequestScheduler scheduler, BalanceContext context,
-            DecodeEndpoint source, DecodeResources.WorkerStatusFact fact) {
-        if (context != null) { run(context.acceptDecodeStatus(source, fact, System.currentTimeMillis())); }
+            DecodeEndpoint source, DecodeResources.DecodeRequestStatus requestStatus) {
+        if (context != null) { run(context.acceptDecodeStatus(source, requestStatus, System.currentTimeMillis())); }
     }
 
     static void expireInactivity(AbstractRequestScheduler scheduler, BalanceContext context,

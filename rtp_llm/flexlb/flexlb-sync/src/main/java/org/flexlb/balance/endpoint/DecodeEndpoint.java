@@ -8,7 +8,7 @@ import org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitTransferS
 import org.flexlb.balance.endpoint.DecodeResources.DispatchOutcome;
 import org.flexlb.balance.endpoint.DecodeResources.PreemptionBeginResult;
 import org.flexlb.balance.endpoint.DecodeResources.PreemptionUpdate;
-import org.flexlb.balance.endpoint.DecodeResources.WorkerStatusFact;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestStatus;
 import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionSummary;
@@ -41,10 +41,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     // Construction
 
-    private void notifyWorkerFacts(List<WorkerStatusFact> facts) {
-        for (WorkerStatusFact fact : facts) {
-            var context = requests.findActive(fact.reservation().requestId());
-            if (context != null) { context.scheduler().onDecodeStatus(this, List.of(fact)); }
+    private void notifyRequestStatuses(List<DecodeRequestStatus> requestStatuses) {
+        for (DecodeRequestStatus requestStatus : requestStatuses) {
+            var context = requests.findActive(requestStatus.reservation().requestId());
+            if (context != null) { context.scheduler().onDecodeStatus(this, List.of(requestStatus)); }
         }
     }
 
@@ -271,7 +271,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         } finally { lock.unlock(); }
         notifyEngineDispatchCapacityListeners();
         if (capacityImproved) { signalPlacementCapacityChanged(); }
-        return () -> notifyWorkerFacts(result.facts());
+        return () -> notifyRequestStatuses(result.requestStatuses());
     }
 
     public Runnable initializeFromPreparedStatus(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
@@ -282,8 +282,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public Runnable observeStatusHeartbeat(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
-        List<WorkerStatusFact> facts = state.observeHeartbeat(observation);
-        return () -> notifyWorkerFacts(facts);
+        List<DecodeRequestStatus> requestStatuses = state.observeHeartbeat(observation);
+        return () -> notifyRequestStatuses(requestStatuses);
     }
 
     // Read-only resource and capacity views.

@@ -506,8 +506,8 @@ class RequestDeliveryLockContractTest {
         BalanceContext original = lifecycle.findRequestContext(207L);
 
         lifecycle.onPrefillStatus(endpoint, RoleType.PDFUSION,
-                List.of(PrefillState.WorkerStatusFact.terminal(
-                        registered.item(), PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)));
+                List.of(PrefillState.PrefillRequestStatus.terminal(
+                        registered.item(), PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L)));
         Response terminal = registered.future().get(5L, TimeUnit.SECONDS);
         assertTrue(terminal.isSuccess());
         assertEquals(RequestState.Phase.COMPLETED, original.snapshot().state());
@@ -546,7 +546,7 @@ class RequestDeliveryLockContractTest {
                 null, decode, reservation, System.currentTimeMillis());
         bind(lifecycle, new Registered(item, future));
         if (acceptanceBeforeClaim) {
-            RequestProtocolTestSupport.observeDecode(lifecycle, decode, DecodeResources.WorkerStatusFact.active(reservation));
+            RequestProtocolTestSupport.observeDecode(lifecycle, decode, DecodeResources.DecodeRequestStatus.active(reservation));
         }
         DeliveryClaim claim = batch
                 ? RequestProtocolTestSupport.claimBatchWithoutPrediction(lifecycle, item, 704L, () -> true)

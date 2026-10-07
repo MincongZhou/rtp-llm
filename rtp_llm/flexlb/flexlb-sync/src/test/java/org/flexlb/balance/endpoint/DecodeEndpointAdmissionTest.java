@@ -768,14 +768,14 @@ class DecodeEndpointAdmissionTest {
         EndpointTestSupport.applyStatus(endpoint, response).run();
 
         @SuppressWarnings("unchecked")
-        ArgumentCaptor<List<DecodeResources.WorkerStatusFact>> facts =
+        ArgumentCaptor<List<DecodeResources.DecodeRequestStatus>> requestStatuses =
                 ArgumentCaptor.forClass(List.class);
         verify(events).onDecodeStatus(
-                org.mockito.Mockito.eq(endpoint), facts.capture());
-        assertEquals(1, facts.getValue().size());
-        DecodeResources.WorkerStatusFact active = facts.getValue().getFirst();
-        assertEquals(DecodeResources.WorkerStatusFact.Kind.ACTIVE, active.kind());
-        assertEquals(reservation, active.reservation());
+                org.mockito.Mockito.eq(endpoint), requestStatuses.capture());
+        assertEquals(1, requestStatuses.getValue().size());
+        DecodeResources.DecodeRequestStatus activeStatus = requestStatuses.getValue().getFirst();
+        assertEquals(DecodeResources.DecodeRequestStatus.Kind.ACTIVE, activeStatus.kind());
+        assertEquals(reservation, activeStatus.reservation());
         assertEquals(reservation, EndpointTestSupport.decodeReservation(endpoint, 1L));
     }
 

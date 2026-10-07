@@ -163,7 +163,7 @@ class QueuedBatchDeliveryTest {
             assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).getRequestState(2L, 0L).deliveryClaimKind());
             reply.complete(ack(2L));
             assertTrue(second.future().get(5, TimeUnit.SECONDS).isSuccess());
-            ledger.finish(201L, second).forEach(fact -> RequestProtocolTestSupport.observePrefill(registry, prefill, RoleType.PREFILL, fact));
+            ledger.finish(201L, second).forEach(requestStatus -> RequestProtocolTestSupport.observePrefill(registry, prefill, RoleType.PREFILL, requestStatus));
             DeliverySettlementTestSupport.decodeStatus(decode, 2L, true);
         }
         // Repeated terminal events cannot subtract the other member or leak a batch permit.
@@ -346,7 +346,7 @@ class QueuedBatchDeliveryTest {
             reply.complete(ack.build());
             for (RequestRoute item : survivors) {
                 assertTrue(item.future().get(5, TimeUnit.SECONDS).isSuccess());
-                ledger.finish(201L, item).forEach(fact -> RequestProtocolTestSupport.observePrefill(registry, prefill, RoleType.PREFILL, fact));
+                ledger.finish(201L, item).forEach(requestStatus -> RequestProtocolTestSupport.observePrefill(registry, prefill, RoleType.PREFILL, requestStatus));
                 DeliverySettlementTestSupport.decodeStatus(decode, item.requestId(), true);
             }
         }

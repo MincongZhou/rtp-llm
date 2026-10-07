@@ -62,30 +62,31 @@ public final class PrefillState {
         }
     }
 
-    public record WorkerStatusFact(
-            RequestRoute item,
+    /** Request status matched to its exact Prefill route, published after ledger reconciliation. */
+    public record PrefillRequestStatus(
+            RequestRoute route,
             Kind kind,
             long errorCode) {
-        public WorkerStatusFact {
-            Objects.requireNonNull(item, "item");
+        public PrefillRequestStatus {
+            Objects.requireNonNull(route, "route");
             Objects.requireNonNull(kind, "kind");
             if (kind == Kind.ACTIVE && errorCode != 0L) {
                 throw new IllegalArgumentException(
-                        "an active Prefill fact cannot carry an error code");
+                        "an active Prefill request status cannot carry an error code");
             }
         }
 
-        public static WorkerStatusFact active(RequestRoute item) {
-            return new WorkerStatusFact(item, Kind.ACTIVE, 0L);
+        public static PrefillRequestStatus active(RequestRoute route) {
+            return new PrefillRequestStatus(route, Kind.ACTIVE, 0L);
         }
 
-        public static WorkerStatusFact terminal(
-                RequestRoute item, Kind kind, long errorCode) {
+        public static PrefillRequestStatus terminal(
+                RequestRoute route, Kind kind, long errorCode) {
             if (kind == Kind.ACTIVE) {
                 throw new IllegalArgumentException(
-                        "terminal Prefill fact requires a terminal kind");
+                        "terminal Prefill request status requires a terminal kind");
             }
-            return new WorkerStatusFact(item, kind, errorCode);
+            return new PrefillRequestStatus(route, kind, errorCode);
         }
 
         public enum Kind {
@@ -97,11 +98,11 @@ public final class PrefillState {
     }
 
     public record StatusReconciliation(
-            List<WorkerStatusFact> schedulerFacts,
+            List<PrefillRequestStatus> requestStatuses,
             List<BatchCompletion> batchCompletions,
             boolean capacityReleased) {
         public StatusReconciliation {
-            schedulerFacts = List.copyOf(schedulerFacts);
+            requestStatuses = List.copyOf(requestStatuses);
             batchCompletions = List.copyOf(batchCompletions);
         }
     }
@@ -1060,20 +1061,20 @@ public final class PrefillState {
         } finally { lock.unlock(); }
     }
 
-    public record HeartbeatReconciliation(List<WorkerStatusFact> schedulerFacts,
+    public record HeartbeatReconciliation(List<PrefillRequestStatus> requestStatuses,
                                           boolean schedulingInputsChanged, boolean capacityReleased) {
         public HeartbeatReconciliation {
-            schedulerFacts = List.copyOf(schedulerFacts);
+            requestStatuses = List.copyOf(requestStatuses);
         }
     }
 
     public HeartbeatReconciliation reconcileHeartbeat(WorkerStatus.StatusObservation observation) {
-        List<WorkerStatusFact> facts = new ArrayList<>(observation.runningTasks().size());
+        List<PrefillRequestStatus> requestStatuses = new ArrayList<>(observation.runningTasks().size());
         boolean capacityReleased = false;
         boolean schedulingInputsChanged;
         lock.lock();
         try {
-            ActiveObservation active = prepareActiveObservationsLocked(observation.engine(), Map.of(), facts);
+            ActiveObservation active = prepareActiveObservationsLocked(observation.engine(), Map.of(), requestStatuses);
             capacityReleased = active.unknownRequests < unknownEngineRequestCount;
             schedulingInputsChanged = applyActiveObservationsLocked(active, clock.getAsLong());
             if (schedulingInputsChanged) {
@@ -1083,7 +1084,7 @@ public final class PrefillState {
         } finally {
             lock.unlock();
         }
-        return new HeartbeatReconciliation(facts, schedulingInputsChanged, capacityReleased);
+        return new HeartbeatReconciliation(requestStatuses, schedulingInputsChanged, capacityReleased);
     }
 
     private record ActiveObservation(long unknownRequests,
@@ -1140,7 +1141,7 @@ public final class PrefillState {
     private ActiveObservation prepareActiveObservationsLocked(
             WorkerStatus.EngineObservation engine,
             Map<Long, TerminalObservation> terminals,
-            List<WorkerStatusFact> activeFacts) {
+            List<PrefillRequestStatus> activeRequestStatuses) {
         requireLock();
         IdentityHashMap<RequestEntry, Phase> individualPhases = new IdentityHashMap<>();
         IdentityHashMap<BatchWork, Phase> batchPhases = new IdentityHashMap<>();
@@ -1160,7 +1161,7 @@ public final class PrefillState {
             if (!task.isPriorityCancelOverlayOnly()) {
                 knownObserved.add(task.requestId());
                 if (!entry.isActive()) {
-                    activeFacts.add(WorkerStatusFact.active(entry.item));
+                    activeRequestStatuses.add(PrefillRequestStatus.active(entry.item));
                 }
             }
             if (entry.isActive()) {
@@ -1189,15 +1190,15 @@ public final class PrefillState {
         requireLock();
         long nowMs = clock.getAsLong();
         var terminals = terminalObservationsLocked(observation.finishedTasks());
-        List<WorkerStatusFact> facts = new ArrayList<>(terminals.size()
+        List<PrefillRequestStatus> requestStatuses = new ArrayList<>(terminals.size()
                 + observation.engine().runningTaskList().size());
         Set<BatchWork> changedBatches = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (TerminalObservation terminal : terminals.values()) {
-            WorkerStatusFact fact = terminalFact(terminal.owner, terminal);
-            if (fact != null) { facts.add(fact); }
+            PrefillRequestStatus requestStatus = terminalRequestStatus(terminal.owner, terminal);
+            if (requestStatus != null) { requestStatuses.add(requestStatus); }
             if (terminal.owner.batchWork != null) { changedBatches.add(terminal.owner.batchWork); }
         }
-        ActiveObservation active = prepareActiveObservationsLocked(observation.engine(), terminals, facts);
+        ActiveObservation active = prepareActiveObservationsLocked(observation.engine(), terminals, requestStatuses);
         Map<BatchWork, BatchOutcome> batches = new IdentityHashMap<>();
         Map<Long, List<RequestRoute>> predictionInputs = new HashMap<>();
         List<BatchCompletion> completions = new ArrayList<>(changedBatches.size());
@@ -1228,7 +1229,7 @@ public final class PrefillState {
             }
         }
         return new StatusReduction(this, mutationVersion, nowMs, terminals, active, batches,
-                predictionInputs, new StatusReconciliation(facts, completions, false));
+                predictionInputs, new StatusReconciliation(requestStatuses, completions, false));
     }
 
     /** Null means the out-of-lock prediction was invalidated; no fact has changed. */
@@ -1245,7 +1246,7 @@ public final class PrefillState {
         // Allocate the result before the first ownership mutation.
         boolean capacityReleased = !reduction.terminals.isEmpty()
                 || reduction.active.unknownRequests < unknownEngineRequestCount;
-        var result = new StatusReconciliation(reduction.result.schedulerFacts(),
+        var result = new StatusReconciliation(reduction.result.requestStatuses(),
                 reduction.result.batchCompletions(), capacityReleased);
         for (var change : reduction.batches.entrySet()) {
             BatchWork batch = change.getKey();
@@ -1532,22 +1533,22 @@ public final class PrefillState {
         return terminals;
     }
 
-    private static WorkerStatusFact terminalFact(
+    private static PrefillRequestStatus terminalRequestStatus(
             RequestEntry entry,
             TerminalObservation terminal) {
         if (entry == null || entry.isActive()
                 || !terminal.workerObserved) {
             return null;
         }
-        WorkerStatusFact.Kind kind = terminal.errorCode == 0L
-                ? WorkerStatusFact.Kind.COMPLETED
+        PrefillRequestStatus.Kind kind = terminal.errorCode == 0L
+                ? PrefillRequestStatus.Kind.COMPLETED
                 : terminal.preemptionProgress
                         == PriorityPreemptionProgress.CANCELED
                     && terminal.errorCode
                             == StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()
-                ? WorkerStatusFact.Kind.PRIORITY_CANCELED
-                : WorkerStatusFact.Kind.FAILED;
-        return WorkerStatusFact.terminal(
+                ? PrefillRequestStatus.Kind.PRIORITY_CANCELED
+                : PrefillRequestStatus.Kind.FAILED;
+        return PrefillRequestStatus.terminal(
                 entry.item, kind, terminal.errorCode);
     }
 
