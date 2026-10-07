@@ -67,7 +67,7 @@ final class MockLruBlockCache {
 
     MockLruBlockCache(int totalBlocks, double reserveRatio) {
         this.totalBlocks = Math.max(0, totalBlocks);
-        this.reserveRatio = Math.max(0, Math.min(0.5, reserveRatio));
+        this.reserveRatio = Math.clamp(reserveRatio, 0.0, 0.5);
         this.blocks = new LinkedHashMap<>(16, 0.75f, true);
     }
 

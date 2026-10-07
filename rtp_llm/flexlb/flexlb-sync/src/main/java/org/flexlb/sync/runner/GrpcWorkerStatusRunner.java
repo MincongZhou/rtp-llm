@@ -1,6 +1,5 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.util.Failures;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
@@ -10,6 +9,7 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.util.Failures;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,6 +17,7 @@ import org.slf4j.LoggerFactory;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
@@ -33,7 +34,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final EndpointRegistry endpointRegistry;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
-    private final long createTimeUs = System.nanoTime() / 1000;
+    private final long createTimeUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
@@ -69,7 +70,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         boolean asyncInitiated = false;
         try {
             logger.debug("GrpcWorkerStatusRunner run for {}", ipPort);
-            long startTime = System.nanoTime() / 1000;
+            long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
 
             long latestFinishedTaskVersion = workerStatus.appliedStatusCursor()
                     .latestFinishedTaskVersion();
@@ -323,14 +324,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                 != org.flexlb.enums.TaskPhase.RUNNING).count(),
                 runningTasks.size(),
                 workerStatus.appliedStatusCursor().statusVersion(),
-                System.nanoTime() / 1000 - startTime);
+                TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - startTime);
     }
 
     private void handleException(Throwable ex) {
         log("gRPC worker status check failed, msg=" + ex.getMessage());
         // Report specific error based on exception type
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
-            logger.debug("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
+            logger.debug("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - createTimeUs);
             engineHealthReporter.reportStatusCheckerFail(
                     modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, roleType);
         } else {
@@ -345,7 +346,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.getSite(),
                 ipPort,
                 modelName,
-                System.nanoTime() / 1000 - createTimeUs,
+                TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - createTimeUs,
                 msg);
     }
 }

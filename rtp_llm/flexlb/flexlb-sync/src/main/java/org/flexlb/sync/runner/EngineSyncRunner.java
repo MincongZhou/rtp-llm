@@ -22,6 +22,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -100,12 +101,12 @@ public class EngineSyncRunner implements Runnable {
     public void run() {
         logger.debug("EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
         try {
-            long startTimeInUs = System.nanoTime() / 1000;
+            long startTimeInUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
             List<WorkerHost> latestEngineWorkerList = workerAddressService.getEngineWorkerList(modelName, roleType);
             logger.debug("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
             engineHealthReporter.reportServiceDiscoveryResult(modelName, latestEngineWorkerList.size(), roleType.toString());
             if (latestEngineWorkerList.isEmpty()) {
-                logger.debug("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
+                logger.debug("get engine worker list is empty, cost={}μs, model={}", TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - startTimeInUs, modelName);
             }
             Map<String, WorkerStatus> cachedWorkerStatuses =
                     endpointRegistry.statusSnapshot(roleType);
@@ -309,7 +310,7 @@ public class EngineSyncRunner implements Runnable {
                 return;
             }
             WorkerStatus.PollHealth health = workerStatus.pollHealth();
-            if (System.nanoTime() / 1000
+            if (TimeUnit.NANOSECONDS.toMicros(System.nanoTime())
                     - health.lastSuccessfulPollUs()
                     <= statusStaleAfterUs) {
                 return;

@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
@@ -10,12 +11,12 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
@@ -34,7 +35,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
     private final DynamicCacheIntervalService cacheIntervalService;
-    private final long startTime = System.nanoTime() / 1000;
+    private final long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
     private final String id = IdUtils.fastUuid();
     private final boolean debug;
     private final long requestTimeoutMs;
@@ -95,7 +96,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 return; // The synchronous scope still owns the poll lease.
             }
 
-            long startTime = System.nanoTime() / 1000;
+            long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
             long currentCacheVersion = getCurrentCacheVersion();
 
             PollCompletion.attach(pollLease, callbackExecutor, "Cache status", ipPort,
@@ -208,7 +209,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 cacheStatus.getCacheKeySize(),
                 cacheStatus.getAvailableKvCache(),
                 cacheStatus.getTotalKvCache(),
-                (System.nanoTime() / 1000) - startTime,
+                (TimeUnit.NANOSECONDS.toMicros(System.nanoTime())) - startTime,
                 cacheIntervalService.getCurrentIntervalMs());
     }
 
@@ -238,7 +239,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 workerStatus.getSite(),
                 ipPort,
                 modelName,
-                (System.nanoTime() / 1000) - startTime,
+                (TimeUnit.NANOSECONDS.toMicros(System.nanoTime())) - startTime,
                 msg, failure);
     }
 

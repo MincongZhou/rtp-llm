@@ -1,13 +1,13 @@
 package org.flexlb.service;
 
-import org.flexlb.config.FlexlbConfig;
-
+import com.google.common.math.LongMath;
 import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.balance.scheduler.RequestRequirements;
 import org.flexlb.cache.core.RecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -101,11 +101,7 @@ public class RecentCacheKeyTraceReporter {
         if (hitKeyCount <= 0L || inputTokens <= 0L || cacheKeyBlockSize <= 0L) {
             return 0L;
         }
-        long hitTokens = hitKeyCount * cacheKeyBlockSize;
-        if (hitTokens < 0L) {
-            return inputTokens;
-        }
-        return Math.min(inputTokens, hitTokens);
+        return Math.min(inputTokens, LongMath.saturatedMultiply(hitKeyCount, cacheKeyBlockSize));
     }
 
     @PostConstruct

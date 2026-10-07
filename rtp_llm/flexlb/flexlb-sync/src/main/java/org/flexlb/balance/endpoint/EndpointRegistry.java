@@ -1,26 +1,28 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.util.Failures;
-import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.scheduler.RequestRepository;
-import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.QueueExecutionSettings;
+import org.flexlb.balance.scheduler.RequestRepository;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.AbstractList;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -667,15 +669,14 @@ public class EndpointRegistry {
     }
 
     private Throwable closeEndpointGenerations() {
-        IdentityHashMap<WorkerEndpoint, Boolean> seen =
-                new IdentityHashMap<>();
+        Set<WorkerEndpoint> seen = Collections.newSetFromMap(new IdentityHashMap<>());
         List<WorkerEndpoint> endpoints = new ArrayList<>();
         Throwable failure = null;
         for (Map<String, WorkerEndpoint> roleEndpoints
                 : endpointsByRole.values()) {
             try {
                 for (WorkerEndpoint endpoint : roleEndpoints.values()) {
-                    if (seen.put(endpoint, Boolean.TRUE) == null) {
+                    if (seen.add(endpoint)) {
                         endpoints.add(endpoint);
                     }
                 }
@@ -764,7 +765,6 @@ public class EndpointRegistry {
                     role, endpoint, evicted, ttlMs);
         }
     }
-
 
     /** Immutable point-in-time view of discovered generations for one role. */
     public Map<String, WorkerStatus> statusSnapshot(RoleType role) {

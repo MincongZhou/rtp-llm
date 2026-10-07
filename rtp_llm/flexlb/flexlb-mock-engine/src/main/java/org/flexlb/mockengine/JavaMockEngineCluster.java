@@ -10,8 +10,8 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
@@ -5221,8 +5221,7 @@ public final class JavaMockEngineCluster {
                 }
                 List<Double> sorted = new ArrayList<>(values);
                 sorted.sort(Double::compareTo);
-                int idx = Math.max(0, Math.min(sorted.size() - 1,
-                        (int) Math.ceil(0.99 * sorted.size()) - 1));
+                int idx = Math.clamp((int) Math.ceil(0.99 * sorted.size()) - 1, 0, sorted.size() - 1);
                 return sorted.get(idx);
             }
         }
@@ -5543,7 +5542,7 @@ public final class JavaMockEngineCluster {
         }
 
         private static int percentileIndex(int size, double quantile) {
-            return Math.max(0, Math.min(size - 1, (int) Math.ceil(quantile * size) - 1));
+            return Math.clamp((int) Math.ceil(quantile * size) - 1, 0, size - 1);
         }
 
         /** Decode completions since the previous stats sample, with execution-time summary. */

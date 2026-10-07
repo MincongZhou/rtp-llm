@@ -1,5 +1,6 @@
 package org.flexlb.balance.eviction;
 
+import com.google.common.math.LongMath;
 import org.flexlb.enums.DecodeTaskPhase;
 
 /**
@@ -36,22 +37,13 @@ public final class PriorityCostFunction {
 
     /** Rank 0..4 of a normalized priority (30..70), clamped for safety. */
     public static int rank(int priority) {
-        return Math.max(
-                MIN_PRIORITY_RANK,
-                Math.min(
-                        MAX_PRIORITY_RANK,
-                        (priority - PRIORITY_RANK_BASE)
-                                / PRIORITY_POINTS_PER_RANK));
+        return Math.clamp((priority - PRIORITY_RANK_BASE) / PRIORITY_POINTS_PER_RANK,
+                MIN_PRIORITY_RANK, MAX_PRIORITY_RANK);
     }
 
     /** Single-value victim cost: 1024^rank. */
     public static long f(int priority) {
-        long cost = 1;
-        int rank = rank(priority);
-        for (int i = 0; i < rank; i++) {
-            cost *= COST_RADIX;
-        }
-        return cost;
+        return LongMath.pow(COST_RADIX, rank(priority));
     }
 
     /**
@@ -69,10 +61,7 @@ public final class PriorityCostFunction {
 
     /** KV bucket of a reservation: ceil(kvTokens / 1024) (design doc 12.3). */
     public static long kvBucket(long kvTokens) {
-        long nonNegativeTokens = Math.max(0, kvTokens);
-        return nonNegativeTokens == 0
-                ? 0
-                : 1 + (nonNegativeTokens - 1) / KV_TOKENS_PER_COST_BUCKET;
+        return Math.ceilDiv(Math.max(0L, kvTokens), KV_TOKENS_PER_COST_BUCKET);
     }
 
     /**

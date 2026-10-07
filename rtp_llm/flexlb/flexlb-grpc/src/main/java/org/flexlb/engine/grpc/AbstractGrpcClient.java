@@ -231,17 +231,17 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         public Invoker(String channelKey, ManagedChannel channel) {
             this.channelKey = channelKey;
             this.channel = channel;
-            long currentTime = System.nanoTime() / 1000;
+            long currentTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
             this.createTime = currentTime;
             this.expireTime = 0;
         }
 
         public void markExpired() {
-            this.expireTime = System.nanoTime() / 1000;
+            this.expireTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         }
 
         public long getConnectionDuration() {
-            return expireTime > 0 ? expireTime - createTime : System.nanoTime() / 1000 - createTime;
+            return expireTime > 0 ? expireTime - createTime : TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - createTime;
         }
 
         public void shutdown() {

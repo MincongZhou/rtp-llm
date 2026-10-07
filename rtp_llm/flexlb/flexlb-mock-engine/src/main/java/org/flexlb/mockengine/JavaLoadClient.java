@@ -332,7 +332,7 @@ public final class JavaLoadClient {
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
-                        Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        TimeUnit.NANOSECONDS.sleep(sleepNanos);
                     }
                 } else if (currentSpeed > 0 && record.tsMs > 0) {
                     long loopOffsetMs = (long) loopIdx * traceSpanMs;
@@ -340,7 +340,7 @@ public final class JavaLoadClient {
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
-                        Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        TimeUnit.NANOSECONDS.sleep(sleepNanos);
                     }
                 }
 
@@ -489,7 +489,7 @@ public final class JavaLoadClient {
             try {
                 // Sleep is capped by the remaining deadline budget so the final
                 // sweep cannot overshoot the deadline by a full interval.
-                Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                TimeUnit.NANOSECONDS.sleep(sleepNanos);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
@@ -1111,8 +1111,7 @@ public final class JavaLoadClient {
     }
 
     private FlexlbServiceGrpc.FlexlbServiceBlockingStub nextScheduleStub() {
-        int idx = scheduleStubRR.getAndIncrement() % config.nChannels;
-        return scheduleStubs[Math.floorMod(idx, config.nChannels)];
+        return scheduleStubs[Math.floorMod(scheduleStubRR.getAndIncrement(), config.nChannels)];
     }
 
     private ManagedChannel getEngineChannel(String target) {

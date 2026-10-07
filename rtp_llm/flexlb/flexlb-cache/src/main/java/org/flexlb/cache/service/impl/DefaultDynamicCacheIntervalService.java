@@ -45,7 +45,7 @@ public class DefaultDynamicCacheIntervalService implements DynamicCacheIntervalS
         this.minIntervalMs = config.getMinRefreshIntervalMs();
         this.maxIntervalMs = config.getMaxRefreshIntervalMs();
         this.currentIntervalMs = new AtomicLong(
-                Math.max(minIntervalMs, Math.min(maxIntervalMs, DEFAULT_INTERVAL_MS)));
+                Math.clamp(DEFAULT_INTERVAL_MS, minIntervalMs, maxIntervalMs));
 
         log.info("DefaultDynamicIntervalManager initialized - target:{}, min:{}ms, max:{}ms, current:{}ms",
                 targetDiffSize, minIntervalMs, maxIntervalMs, currentIntervalMs.get());
@@ -117,7 +117,7 @@ public class DefaultDynamicCacheIntervalService implements DynamicCacheIntervalS
             }
 
             // Apply bounds
-            newInterval = Math.max(minIntervalMs, Math.min(maxIntervalMs, newInterval));
+            newInterval = Math.clamp(newInterval, minIntervalMs, maxIntervalMs);
 
             if (newInterval != currentInterval) {
                 currentIntervalMs.set(newInterval);

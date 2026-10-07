@@ -8,6 +8,7 @@ import org.flexlb.enums.TaskPhase;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
@@ -308,7 +309,7 @@ public class WorkerStatus {
         committedStatus = new AtomicReference<>(new CommittedWorkerStatus(
                 initialStatus,
                 new AppliedStatusCursor(-1L, -1L)));
-        long discoveredAtUs = System.nanoTime() / 1000;
+        long discoveredAtUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         pollHealth = new AtomicReference<>(new PollHealth(
                 discoveredAtUs, 0L, 0L, false));
     }
@@ -477,7 +478,7 @@ public class WorkerStatus {
     public PollHealth recordSuccessfulPoll(boolean reportedAlive) {
         requireGenerationLock();
         requireActiveGeneration();
-        long nowUs = System.nanoTime() / 1000;
+        long nowUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         return pollHealth.updateAndGet(current -> new PollHealth(
                 nowUs,
                 nowUs - current.lastSuccessfulPollUs(),
@@ -636,7 +637,7 @@ public class WorkerStatus {
     }
 
     public long recordSuccessfulCachePoll() {
-        long nowUs = System.nanoTime() / 1000;
+        long nowUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         long previousUs = cacheLastUpdateTime.getAndSet(nowUs);
         return previousUs <= 0L ? 0L : Math.max(0L, nowUs - previousUs);
     }

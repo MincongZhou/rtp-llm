@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Periodically evicts workers that have stopped sending WorkerStatus reports
@@ -63,7 +64,7 @@ public class ExpirationCleaner {
                     try {
                         if (endpointRegistry.isCurrentStatus(role, item.getKey(), status)
                                 && status.isActiveGeneration()
-                                && System.nanoTime() / 1000 > status.pollHealth().lastSuccessfulPollUs() + workerTimeoutUs) {
+                                && TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) > status.pollHealth().lastSuccessfulPollUs() + workerTimeoutUs) {
                             retirements.add(endpointRegistry.beginRetirement(role, item.getKey(), status));
                         }
                     } finally {

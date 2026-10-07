@@ -5,6 +5,7 @@ import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -28,12 +29,11 @@ public final class PlacementAvailability {
     private final AtomicLong sequence = new AtomicLong();
     private final ConcurrentMap<PlacementKey, Long> lastChanged =
             new ConcurrentHashMap<>();
-    private final ConcurrentMap<Listener, Boolean> listeners =
-            new ConcurrentHashMap<>();
+    private final Set<Listener> listeners = ConcurrentHashMap.newKeySet();
 
     void addListener(Listener candidate) {
         Objects.requireNonNull(candidate, "listener");
-        listeners.put(candidate, Boolean.TRUE);
+        listeners.add(candidate);
     }
 
     void removeListener(Listener candidate) {
@@ -58,7 +58,7 @@ public final class PlacementAvailability {
         // One physical capacity edge produces one callback. The exact key is
         // sufficient for group/role waiters through their relevance match and
         // avoids three global-lock acquisitions for every endpoint release.
-        for (Listener listener : listeners.keySet()) {
+        for (Listener listener : listeners) {
             try {
                 listener.onAvailabilityChanged(key);
             } catch (Throwable failure) {

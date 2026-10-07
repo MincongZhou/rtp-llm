@@ -1,5 +1,6 @@
 package org.flexlb.cache.core;
 
+import com.google.common.math.IntMath;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ConfigService;
@@ -165,7 +166,7 @@ public class RecentCacheKeyWindow {
     }
 
     private void addEntry(long timestampMs, int start, int length) {
-        int tail = ringIndex(entryHead + entrySize);
+        int tail = Math.floorMod(entryHead + entrySize, maxCacheKeys);
         entryTimestampMs[tail] = timestampMs;
         entryStart[tail] = start;
         entryLength[tail] = length;
@@ -174,7 +175,7 @@ public class RecentCacheKeyWindow {
 
     private void appendKey(long cacheKey) {
         cacheKeyRing[keyTail] = cacheKey;
-        keyTail = ringIndex(keyTail + 1);
+        keyTail = Math.floorMod(keyTail + 1, maxCacheKeys);
         keySize++;
     }
 
@@ -185,10 +186,10 @@ public class RecentCacheKeyWindow {
         int start = entryStart[entryHead];
         int length = entryLength[entryHead];
         for (int i = 0; i < length; i++) {
-            decrementCount(cacheKeyRing[ringIndex(start + i)]);
+            decrementCount(cacheKeyRing[Math.floorMod(start + i, maxCacheKeys)]);
         }
         keySize -= length;
-        entryHead = ringIndex(entryHead + 1);
+        entryHead = Math.floorMod(entryHead + 1, maxCacheKeys);
         entrySize--;
         return true;
     }
@@ -313,16 +314,7 @@ public class RecentCacheKeyWindow {
 
     private static int hashTableCapacityFor(int maxCacheKeys) {
         long needed = Math.max(MIN_HASH_TABLE_SIZE, (long) Math.ceil(maxCacheKeys / HASH_LOAD_FACTOR));
-        int capacity = MIN_HASH_TABLE_SIZE;
-        while (capacity < needed && capacity < (1 << 30)) {
-            capacity <<= 1;
-        }
-        return capacity;
-    }
-
-    private int ringIndex(int index) {
-        int result = index % maxCacheKeys;
-        return result >= 0 ? result : result + maxCacheKeys;
+        return IntMath.ceilingPowerOfTwo(Math.clamp(needed, MIN_HASH_TABLE_SIZE, 1 << 30));
     }
 
     private static int hashIndex(long value, int mask) {

@@ -288,16 +288,9 @@ public class CostBasedPrefillStrategy {
     }
 
     private static double normalizedHitRate(double configuredRate) {
-        if (Double.isNaN(configuredRate)
-                || configuredRate == Double.POSITIVE_INFINITY) {
-            return RoutingConfig.PERCENTAGE_SCALE;
-        }
-        if (configuredRate == Double.NEGATIVE_INFINITY) {
-            return 0.0;
-        }
-        return Math.min(
-                RoutingConfig.PERCENTAGE_SCALE,
-                Math.max(0.0, configuredRate));
+        return Double.isNaN(configuredRate)
+                ? RoutingConfig.PERCENTAGE_SCALE
+                : Math.clamp(configuredRate, 0.0, RoutingConfig.PERCENTAGE_SCALE);
     }
 
     private int selectBaselineCandidate(PrefillCandidateSet survivors, long minimumTtftMs,
