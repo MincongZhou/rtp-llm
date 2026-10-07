@@ -52,9 +52,10 @@ class DecodeEndpointTest {
         response.setAvailableKvCacheTokens(10000L);
 
         EndpointTestSupport.applyStatus(endpoint, response).run();
-        var fact = DecodeEndpoint.WorkerStatusFact.active(reservation);
-        verify(sink).onDecodeStatus(endpoint, List.of(fact));
         boolean allocated = phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING;
+        var fact = allocated ? DecodeEndpoint.WorkerStatusFact.allocated(reservation)
+                : DecodeEndpoint.WorkerStatusFact.active(reservation);
+        verify(sink).onDecodeStatus(endpoint, List.of(fact));
         assertEquals(allocated, endpoint.isAcceptedByEngine(reservation));
         assertEquals(allocated ? 0 : 1, endpoint.getInflightCount());
         assertEquals(phase == TaskPhase.RUNNING ? DecodeTaskPhase.RUNNING

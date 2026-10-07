@@ -17,13 +17,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.lang.management.ManagementFactory;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongPredicate;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
@@ -36,7 +34,6 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -293,7 +290,7 @@ class EndpointCleanupOwnershipTest {
             Supplier<T> acquire, Runnable assertOldLedger) throws Exception {
         CountDownLatch checkedAbsent = new CountDownLatch(1);
         CountDownLatch registered = new CountDownLatch(1);
-        AtomicReference<Thread> acquirer = new AtomicReference<>();
+        CountDownLatch swept = new CountDownLatch(1);
         AtomicInteger queries = new AtomicInteger();
         var executor = Executors.newFixedThreadPool(2, task -> {
             Thread thread = new Thread(task, "cleanup-registration-race");
@@ -301,7 +298,8 @@ class EndpointCleanupOwnershipTest {
             return thread;
         });
         try {
-            var cleanup = executor.submit(() -> sweep.applyAsInt(requestId -> {
+            var cleanup = executor.submit(() -> {
+                try { return sweep.applyAsInt(requestId -> {
                 assertEquals(id, requestId);
                 boolean retain = org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).retainsIdentity(requestId);
                 assertFalse(retain);
@@ -309,17 +307,16 @@ class EndpointCleanupOwnershipTest {
                 assertOldLedger.run();
                 checkedAbsent.countDown();
                 await(registered);
-                // Do not unblock cleanup until the new generation has actually
-                // attempted resource acquisition and is waiting on this lock.
-                awaitEndpointLockWait(acquirer.get(), Thread.currentThread());
-                assertOldLedger.run();
+                // The retention check runs outside State's lock. Exact identities and current
+                // resource facts fence replacement acquisition when cleanup resumes.
                 return retain;
-            }));
+                }); } finally { swept.countDown(); }
+            });
             var replacement = executor.submit(() -> {
                 await(checkedAbsent);
                 registry.register(RequestProtocolTestSupport.context(config, id), StrategyErrorType.BATCH_SLO_EXPIRED);
-                acquirer.set(Thread.currentThread());
                 registered.countDown();
+                await(swept);
                 return acquire.get();
             });
             int evicted = cleanup.get(10, TimeUnit.SECONDS);
@@ -341,16 +338,4 @@ class EndpointCleanupOwnershipTest {
         }
     }
 
-    private static void awaitEndpointLockWait(Thread acquirer, Thread cleaner) {
-        var threads = ManagementFactory.getThreadMXBean();
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (System.nanoTime() < deadline) {
-            var info = threads.getThreadInfo(acquirer.threadId());
-            if (info != null && info.getLockOwnerId() == cleaner.threadId()) {
-                return;
-            }
-            Thread.yield();
-        }
-        fail("new resource acquisition did not wait for the cleanup thread's endpoint lock");
-    }
 }

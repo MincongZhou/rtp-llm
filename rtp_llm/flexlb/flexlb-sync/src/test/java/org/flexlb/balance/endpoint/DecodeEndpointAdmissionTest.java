@@ -77,7 +77,7 @@ class DecodeEndpointAdmissionTest {
 
         DecodeEndpoint.DecodeRequestView entry = reserved().get(1L);
         assertEquals(70, entry.priority());
-        assertEquals(DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN, entry.phase());
+        assertEquals(DecodeTaskPhase.LOCAL_RESERVED, entry.phase());
     }
 
     // ==================== reserve / release bump the admission version ====================
@@ -582,31 +582,14 @@ class DecodeEndpointAdmissionTest {
         reserve(requestId, 100, 110, 50);
         markQueued(requestId);
         DecodeEndpoint.DecodeRequestView reservation = reserved().get(requestId);
-
         DecodeEndpoint.EngineDispatchPermit first = acquirePermit(requestId, 1);
         assertEquals(TRANSFERRED, first.dispatch());
-        assertFalse(endpoint.resourceSnapshot().isQueued(requestId));
-        assertEquals(1, endpoint.routingView().engineLoad());
-
-        markQueued(requestId);
-        assertReservationIdentity(reservation, reserved().get(requestId),
-                "the second dispatch round must reuse the same reservation");
-        DecodeEndpoint.EngineDispatchPermit second = acquirePermit(requestId, 1);
-        assertEquals(TRANSFERRED, second.dispatch());
-        assertFalse(endpoint.resourceSnapshot().isQueued(requestId));
-        assertEquals(1, endpoint.routingView().engineLoad());
-        long versionBeforeStaleRelease = endpoint.routingView().admissionVersion();
-
-        assertFalse(first.release(),
-                "an older committed round must not change the current dispatch round");
+        try (var pin = endpoint.tryPinGeneration()) {
+            assertFalse(endpoint.markQueued(pin, reservations.get(requestId)),
+                    "handoff cannot be undone by republishing queue membership");
+        }
+        assertFalse(first.release());
         assertReservationIdentity(reservation, reserved().get(requestId));
-        assertFalse(endpoint.resourceSnapshot().isQueued(requestId));
-        assertEquals(1, endpoint.routingView().engineLoad(),
-                "the stale token must not release current engine ownership");
-        assertEquals(versionBeforeStaleRelease, endpoint.routingView().admissionVersion());
-
-        assertFalse(second.release(),
-                "the current committed round is also irreversible through its permit");
         assertFalse(endpoint.resourceSnapshot().isQueued(requestId));
         assertEquals(1, endpoint.routingView().engineLoad());
     }
@@ -629,11 +612,10 @@ class DecodeEndpointAdmissionTest {
         assertEquals(TRANSFERRED, permit.dispatch());
         long versionBeforeSecondRound = endpoint.routingView().admissionVersion();
 
-        markQueued(requestId);
-        assertEquals(versionBeforeSecondRound + 1, endpoint.routingView().admissionVersion());
-        markQueued(requestId);
-        assertEquals(versionBeforeSecondRound + 1, endpoint.routingView().admissionVersion(),
-                "repeating the second-round queued mark must also be a no-op");
+        try (var pin = endpoint.tryPinGeneration()) {
+            assertFalse(endpoint.markQueued(pin, reservations.get(requestId)));
+        }
+        assertEquals(versionBeforeSecondRound, endpoint.routingView().admissionVersion());
     }
 
     @Test

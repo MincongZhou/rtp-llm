@@ -24,6 +24,52 @@ public final class EndpointTestSupport {
     private EndpointTestSupport() {
     }
 
+    static int evictPrefill(PrefillState state, long ttlMs, java.util.function.LongPredicate retained) {
+        var candidates = new java.util.HashSet<RequestRoute>();
+        for (RequestRoute route : state.cleanupCandidates()) {
+            if (!retained.test(route.requestId())) { candidates.add(route); }
+        }
+        return state.evictExpiredInflight(ttlMs, candidates);
+    }
+
+    static DecodeState.CleanupResult evictDecode(DecodeState state, long ttlMs,
+                                                java.util.function.LongPredicate retained) {
+        var candidates = state.cleanupCandidates();
+        candidates.keySet().removeIf(retained::test);
+        return state.evictExpiredRequests(ttlMs, candidates);
+    }
+
+    static boolean handoffPreemption(DecodeEndpoint endpoint, long token) {
+        var victims = endpoint.resourceSnapshot().requests().values().stream()
+                .filter(DecodeEndpoint.DecodeRequestView::claimedForPreemption).toList();
+        return !victims.isEmpty() && victims.stream().allMatch(victim -> endpoint.updatePreemption(token,
+                DecodeEndpoint.PreemptionUpdate.handedOff(new DecodeEndpoint.ReservationHandle(
+                        endpoint.getStatus().getGenerationId(), victim.requestId(), victim.reservationToken()))));
+    }
+
+    static boolean handoffPreemption(DecodeState state, long token) {
+        var victims = state.resourceSnapshot().requests().values().stream()
+                .filter(DecodeEndpoint.DecodeRequestView::claimedForPreemption).toList();
+        return !victims.isEmpty() && victims.stream().allMatch(victim -> state.updatePreemption(token,
+                DecodeEndpoint.PreemptionUpdate.handedOff(new DecodeEndpoint.ReservationHandle(
+                        state.routingView().generationId(), victim.requestId(), victim.reservationToken()))));
+    }
+
+    static PrefillState.StatusReconciliation reconcile(PrefillState state,
+            WorkerStatus.StatusObservation observation,
+            java.util.function.ToLongFunction<List<RequestRoute>> predictor) {
+        var lock = state.ownershipLock();
+        lock.lock();
+        PrefillState.StatusReduction reduction;
+        try { reduction = state.prepareStatusLocked(observation); }
+        finally { lock.unlock(); }
+        var predictions = new java.util.HashMap<Long, Long>();
+        reduction.predictionInputs().forEach((batchId, members) -> predictions.put(batchId, predictor.applyAsLong(members)));
+        lock.lock();
+        try { return java.util.Objects.requireNonNull(state.commitStatusLocked(reduction, predictions)); }
+        finally { lock.unlock(); }
+    }
+
     static PrefillState.CommittedHandoff commitBatch(
             PrefillState state, PrefillState.BatchReservation reservation,
             List<RequestRoute> items, long predictedMs) {

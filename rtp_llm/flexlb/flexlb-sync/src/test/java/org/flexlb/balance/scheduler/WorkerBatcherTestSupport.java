@@ -69,10 +69,7 @@ public final class WorkerBatcherTestSupport {
         var runtime = new AtomicReference<WorkerBatcher>();
         var index = PrefillActiveIndex.ordered(16, config.isPriorityOrdering()
                 ? WorkerBatcher.PRIORITY_QUEUE_ORDER : WorkerBatcher.FIFO_QUEUE_ORDER);
-        var state = new PrefillState(new ReentrantLock(), index, () -> {
-            runtime.get().signalDeliveryCapacityAvailable();
-            endpoint.signalPlacementCapacityChanged();
-        });
+        var state = new PrefillState(new ReentrantLock(), index);
         var worker = org.mockito.Mockito.mock(WorkerBatcher.class, org.mockito.Mockito.withSettings()
                 .useConstructor(key, endpoint, QueueExecutionSettings.capture(config), delivery, state)
                 .defaultAnswer(org.mockito.Mockito.CALLS_REAL_METHODS));
@@ -81,6 +78,8 @@ public final class WorkerBatcherTestSupport {
             if (route.ctx().scheduler() == null) { route.ctx().bindScheduler(scheduler); }
             return call.callRealMethod();
         }).when(worker).offer(org.mockito.ArgumentMatchers.any());
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "runtime", worker);
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "prefillState", state);
         runtime.set(worker);
         return runtime.get();
     }

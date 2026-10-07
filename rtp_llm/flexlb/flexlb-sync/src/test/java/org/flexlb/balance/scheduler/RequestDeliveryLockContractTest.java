@@ -80,6 +80,10 @@ class RequestDeliveryLockContractTest {
     @Test
     void firstBatchMemberPreparesAtomicallyAgainstConcurrentCancellation() throws Exception {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        org.mockito.Mockito.doAnswer(invocation -> {
+                ((PrefillState.Reservation) invocation.getArgument(0)).close();
+                return null;
+            }).when(endpoint).rollbackReservation(org.mockito.ArgumentMatchers.any());
         Registered registered = registerItem(809L, endpoint);
         bind(lifecycle, registered);
         var reservation = mock(PrefillState.BatchReservation.class);
@@ -474,6 +478,10 @@ class RequestDeliveryLockContractTest {
     @Test
     void terminalEngineEvidenceMakesLateDeliveryCallbacksHarmless() throws Exception {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        org.mockito.Mockito.doAnswer(invocation -> {
+                ((PrefillState.Reservation) invocation.getArgument(0)).close();
+                return null;
+            }).when(endpoint).rollbackReservation(org.mockito.ArgumentMatchers.any());
         Registered registered = registerItem(207L, endpoint);
         bind(lifecycle, registered);
         DeliveryClaim claim = RequestProtocolTestSupport.claimBatch(

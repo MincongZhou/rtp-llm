@@ -213,7 +213,10 @@ public final class WorkerBatcher {
         this.settings = Objects.requireNonNull(settings);
         this.prefillState = Objects.requireNonNull(prefillState, "prefillState");
         this.queueLock = prefillState.ownershipLock();
-        this.capacityAvailableSignal = prefillState.capacityAvailableSignal();
+        this.capacityAvailableSignal = () -> {
+            signalDeliveryCapacityAvailable();
+            prefillEndpoint.signalPlacementCapacityChanged();
+        };
         this.stateChanged = queueLock.newCondition();
         this.grouping = settings.grouping() == DecisionPolicyConfig.Type.SINGLE ? GroupingPolicy.SINGLE : GroupingPolicy.FIXED_WINDOW;
         this.deliveryStrategy = Objects.requireNonNull(
@@ -229,6 +232,9 @@ public final class WorkerBatcher {
                         "WorkerBatcher[{}] thread died unexpectedly", key, failure))
                 .unstarted(this::runLoop);
     }
+
+    /** The permanently bound wake identity used by this generation's capacity source. */
+    public Runnable capacityAvailableSignal() { return capacityAvailableSignal; }
 
     public synchronized void start() {
         if (runtimeState != RuntimeState.NEW) {
@@ -310,7 +316,8 @@ public final class WorkerBatcher {
         BatcherCycleResult blocked = capacityBlockedHead;
         if (blocked == null
                 || !prefillState.queueWaitCurrentLocked(blocked.request(), 0L, 0L,
-                        blocked.unavailable().availability(), now())) {
+                        true, now())
+                || blocked.unavailable().availability().isAvailable()) {
             return null;
         }
         return new AdmissionBlock(
@@ -420,6 +427,7 @@ public final class WorkerBatcher {
                 if (item == null) {
                     break;
                 }
+                cleanupFailure = Failures.run(cleanupFailure, capacityAvailableSignal);
                 try {
                     item.ctx().scheduler().onQueueOfferFailure(item, terminalFailure);
                     if (!acknowledgeStoppedItem(item)) {
@@ -856,8 +864,8 @@ public final class WorkerBatcher {
                     waiting == null ? null : waiting.request(),
                     waiting == null ? 0L : waiting.queueVersion(),
                     waiting == null ? 0L : waiting.schedulingInputVersion(),
-                    capacityWait ? waiting.unavailable().availability() : null,
-                    now())) {
+                    capacityWait, now())
+                    && (!capacityWait || !waiting.unavailable().availability().isAvailable())) {
                 if (waiting == null) {
                     setCapacityBlockedHeadLocked(null);
                 }

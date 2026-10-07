@@ -1,7 +1,6 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.RoutingConfig;
@@ -291,9 +290,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public boolean updatePreemption(long attemptToken, PreemptionUpdate update) {
-        boolean changed = state.updatePreemption(attemptToken, update);
+        boolean changed = reconcilePreemptionResources(attemptToken, update);
         if (changed && update.releasesCapacity()) { publishCapacityRelease(); }
         return changed;
+    }
+
+    /** Change exact resource ownership without callbacks; Context publishes the resulting capacity edge after unlocking. */
+    public boolean reconcilePreemptionResources(long attemptToken, PreemptionUpdate update) {
+        return state.updatePreemption(attemptToken, update);
     }
 
     public ReservationHandle commitPreemption(long attemptToken) {
@@ -317,40 +321,20 @@ public class DecodeEndpoint extends WorkerEndpoint {
         ATTEMPT_ALREADY_EXISTS
     }
 
-    public record PreemptionUpdate(Kind kind, long requestId, ReservationHandle reservation,
-                                   PreemptionCancelPhase phase) {
-        public enum Kind { CANCEL_SENDING, CANCEL_REPLY, CANCELED, REQUEST_FENCED, ACTIVE, FINISHED }
+    /** The caller has resolved request protocol; this operation changes only exact resource ownership. */
+    public record PreemptionUpdate(Kind kind, ReservationHandle reservation) {
+        public enum Kind { CANCEL_HANDED_OFF, CANCELED, REQUEST_FENCED, ACTIVE, FINISHED }
 
         public PreemptionUpdate {
             java.util.Objects.requireNonNull(kind, "kind");
-            if (kind == Kind.CANCEL_REPLY) {
-                if (phase != PreemptionCancelPhase.CANCEL_REQUESTED
-                        && phase != PreemptionCancelPhase.NOT_FOUND_STALE
-                        && phase != PreemptionCancelPhase.CANCEL_UNKNOWN) {
-                    throw new IllegalArgumentException("Expected a Cancel reply phase");
-                }
-            } else if (phase != null) {
-                throw new IllegalArgumentException("Only a Cancel reply carries a phase");
-            }
-            if (kind != Kind.CANCEL_REPLY && kind != Kind.CANCEL_SENDING) {
-                java.util.Objects.requireNonNull(reservation, "reservation");
-                if (requestId != reservation.requestId()) { throw new IllegalArgumentException("Victim identity mismatch"); }
-            } else if (reservation != null) {
-                throw new IllegalArgumentException("Cancel progress does not carry a reservation");
-            }
+            java.util.Objects.requireNonNull(reservation, "reservation");
         }
-        public static PreemptionUpdate cancelSending() { return new PreemptionUpdate(Kind.CANCEL_SENDING, 0, null, null); }
-        public static PreemptionUpdate cancelReply(long requestId, PreemptionCancelPhase phase) {
-            return new PreemptionUpdate(Kind.CANCEL_REPLY, requestId, null, phase);
-        }
-        public static PreemptionUpdate canceled(ReservationHandle victim) { return victim(Kind.CANCELED, victim); }
-        public static PreemptionUpdate fenced(ReservationHandle victim) { return victim(Kind.REQUEST_FENCED, victim); }
-        public static PreemptionUpdate active(ReservationHandle victim) { return victim(Kind.ACTIVE, victim); }
-        public static PreemptionUpdate finished(ReservationHandle victim) { return victim(Kind.FINISHED, victim); }
-        private static PreemptionUpdate victim(Kind kind, ReservationHandle victim) {
-            return new PreemptionUpdate(kind, victim.requestId(), victim, null);
-        }
-        boolean releasesCapacity() { return kind != Kind.CANCEL_SENDING && kind != Kind.CANCEL_REPLY; }
+        public static PreemptionUpdate handedOff(ReservationHandle victim) { return new PreemptionUpdate(Kind.CANCEL_HANDED_OFF, victim); }
+        public static PreemptionUpdate canceled(ReservationHandle victim) { return new PreemptionUpdate(Kind.CANCELED, victim); }
+        public static PreemptionUpdate fenced(ReservationHandle victim) { return new PreemptionUpdate(Kind.REQUEST_FENCED, victim); }
+        public static PreemptionUpdate active(ReservationHandle victim) { return new PreemptionUpdate(Kind.ACTIVE, victim); }
+        public static PreemptionUpdate finished(ReservationHandle victim) { return new PreemptionUpdate(Kind.FINISHED, victim); }
+        boolean releasesCapacity() { return kind != Kind.CANCEL_HANDED_OFF; }
     }
 
     // Calibration: publish facts only after the resource transaction returns.
@@ -359,14 +343,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
         requireStatusGeneration(ws);
         if (!prepared.observation().alive()) { beginRetirement(); }
         DecodeState.CalibrationResult result;
+        boolean capacityImproved;
+        var lock = state.ownershipLock();
+        lock.lock();
         try {
-            result = state.calibrate(prepared);
+            result = state.calibrateLocked(prepared.observation());
+            ws.publishPreparedStatus(prepared);
+            capacityImproved = DecodeState.placementCapacityImproved(result.before(), state.routingView());
         } catch (RuntimeException | Error failure) {
             beginRetirement();
             throw failure;
-        }
+        } finally { lock.unlock(); }
         notifyEngineDispatchCapacityListeners();
-        if (result.capacityImproved()) { signalPlacementCapacityChanged(); }
+        if (capacityImproved) { signalPlacementCapacityChanged(); }
         return () -> notifyWorkerFacts(result.facts());
     }
 
@@ -385,7 +374,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public record WorkerStatusFact(
             Kind kind,
             ReservationHandle reservation,
-            long errorCode) {
+            long errorCode,
+            boolean allocationObserved) {
         public WorkerStatusFact {
             java.util.Objects.requireNonNull(kind, "kind");
             java.util.Objects.requireNonNull(reservation, "reservation");
@@ -396,12 +386,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         public static WorkerStatusFact active(ReservationHandle reservation) {
-            return new WorkerStatusFact(Kind.ACTIVE, reservation, 0L);
+            return new WorkerStatusFact(Kind.ACTIVE, reservation, 0L, false);
+        }
+
+        public static WorkerStatusFact allocated(ReservationHandle reservation) {
+            return new WorkerStatusFact(Kind.ACTIVE, reservation, 0L, true);
         }
 
         public static WorkerStatusFact terminal(
                 ReservationHandle reservation, long errorCode) {
-            return new WorkerStatusFact(Kind.TERMINAL, reservation, errorCode);
+            return new WorkerStatusFact(Kind.TERMINAL, reservation, errorCode, false);
         }
 
         public enum Kind {
@@ -641,7 +635,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public int evictExpiredRequests(long ttlMs, LongPredicate retainForSchedulerCleanup) {
-        DecodeState.CleanupResult result = state.evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
+        var orphanCandidates = state.cleanupCandidates();
+        orphanCandidates.keySet().removeIf(retainForSchedulerCleanup::test);
+        DecodeState.CleanupResult result = state.evictExpiredRequests(ttlMs, orphanCandidates);
         if (result.capacityReleased()) { publishCapacityRelease(); }
         return result.expiredReservations();
     }
@@ -658,7 +654,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         reporter.reportDecodeAdmission(ipPort(), resourceSnapshot());
     }
 
-    private void publishCapacityRelease() {
+    public void publishCapacityRelease() {
         notifyEngineDispatchCapacityListeners();
         signalPlacementCapacityChanged();
     }

@@ -811,53 +811,64 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return cancelRequest(ctx, expectedBatchId, reason, null);
     }
 
-    /** A timer supplies its exact capability; the API supplies an expected batch identity. */
+    /** Records the first cancellation, then asks the resource owner to settle the request. */
     private RequestState cancelRequest(BalanceContext ctx, long expectedBatchId, CancelReason reason,
                                        RequestDeadline deadline) {
         Objects.requireNonNull(reason, "reason");
         TerminalAction action = null;
         RequestState result;
-        boolean accepted;
         RequestRoute routeToCancel;
         synchronized (ctx) {
+            // Validate the cancellation target: exact timer, or expected batch (0 means any batch).
             if (deadline != null) {
-                if (!ctx.consumeRequestDeadline(deadline)) { return null; }
-                if (!ctx.isOpen()) {
-                            return null;
+                if (!ctx.consumeRequestDeadline(deadline) || !ctx.isOpen()) {
+                    return null;
                 }
             } else if (expectedBatchId != 0L && ctx.batchId() != expectedBatchId) {
                 return null;
             }
+
+            // A scheduling timeout cannot cancel delivery, except while admission is still running.
+            // Only the exact scheduling timer can use that admission exception.
+            boolean deadlineDuringAdmission = deadline != null && ctx.admission() != null;
             if (reason == CancelReason.DEADLINE_EXCEEDED && ctx.deliveryClaimKind() != DeliveryClaimKind.NONE
-                    && (deadline == null || ctx.admission() == null)) {
+                    && !deadlineDuringAdmission) {
                 return deadline == null ? ctx.snapshot() : null;
             }
-            String message = deadline != null && ctx.admission() != null
+
+            // Repeated cancellation only reads the state; the first caller owns cancellation work.
+            String message = deadlineDuringAdmission
                     ? "request scheduling deadline exceeded during admission" : reason.getMessage();
-            accepted = ctx.recordCancellationLocked(reason, message);
-            routeToCancel = accepted ? ctx.pendingWorkerQueueCancellationLocked() : null;
-            boolean globalControl = ctx.queueOwner() != null
+            if (!ctx.recordCancellationLocked(reason, message)) {
+                return deadline == null ? ctx.snapshot() : null;
+            }
+
+            // Queued requests are settled by their queue owner. Otherwise try to settle now;
+            // an admission or delivery still in progress can defer that finalization.
+            routeToCancel = ctx.pendingWorkerQueueCancellationLocked();
+            boolean waitingInGlobalQueue = ctx.queueOwner() != null
                     && ctx.stage() == RequestStage.QUEUED && ctx.admission() == null;
-            if (accepted && routeToCancel == null && !globalControl) {
-                action = ctx.tryTerminateCancellationLocked(() -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
+            if (routeToCancel == null && !waitingInGlobalQueue) {
+                action = ctx.tryTerminateCancellationLocked(
+                        () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
             }
             result = deadline == null ? ctx.snapshot() : null;
         }
-        if (accepted) {
-            DeliveryClaim delivery = ctx.delivery();
-            if (delivery != null) {
-                delivery.abandon(reason);
-                if (action == null) {
-                    synchronized (ctx) {
-                        action = ctx.claimFinalizationLocked(null,
-                                TerminalOutcome.cancellation(reason, reason.getMessage()),
-                                Response.copyOf(ctx.cancellationResponse()), true,
-                                () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
-                    }
+
+        // Notify delivery and queue owners outside the context lock; publish completion last.
+        DeliveryClaim delivery = ctx.delivery();
+        if (delivery != null) {
+            delivery.abandon(reason);
+            if (action == null) {
+                synchronized (ctx) {
+                    action = ctx.claimFinalizationLocked(null,
+                            TerminalOutcome.cancellation(reason, reason.getMessage()),
+                            Response.copyOf(ctx.cancellationResponse()), true,
+                            () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
                 }
             }
         }
-        if (accepted) { onCancellationRecorded(ctx); }
+        onCancellationRecorded(ctx);
         if (routeToCancel != null) {
             scheduleWorkerQueueCancellation(ctx, routeToCancel);
         }

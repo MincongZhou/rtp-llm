@@ -18,7 +18,7 @@ public final class DeliverySettlementTestSupport {
     private final ReentrantLock lock = new ReentrantLock();
     public final PrefillState prefill = new PrefillState(lock,
             PrefillActiveIndex.ordered(4, Comparator.comparingLong(RequestRoute::requestId)),
-            System::currentTimeMillis, () -> { });
+            System::currentTimeMillis);
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
     public void enqueue(RequestRoute item) {
@@ -63,8 +63,7 @@ public final class DeliverySettlementTestSupport {
         response.setFinishedTaskInfo(Map.of(Long.toString(item.requestId()), finished));
         var observation = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
                 .freezeStatusResponse(response);
-        var result = prefill.reconcileWorkerStatus(observation, ignored -> 100L, () -> { }, () -> { });
-        assertNull(result.publicationFailure());
+        var result = EndpointTestSupport.reconcile(prefill, observation, ignored -> 100L);
         return result.schedulerFacts();
     }
 

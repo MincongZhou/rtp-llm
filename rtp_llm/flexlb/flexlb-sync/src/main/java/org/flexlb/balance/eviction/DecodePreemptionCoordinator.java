@@ -179,11 +179,6 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
                         "begin_" + begin.name().toLowerCase()));
             }
             capability.endpointBegun = true;
-            if (!command.endpoint().updatePreemption(token, DecodeEndpoint.PreemptionUpdate.cancelSending())) {
-                return CompletableFuture.completedFuture(capability.abort(
-                        true,
-                        "endpoint_cancel_linearization_failed"));
-            }
             for (ClaimedVictim owned : capability.claims) {
                 if (!owned.claim.scheduler().updatePreemption(owned.claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT)) {
                     return CompletableFuture.completedFuture(capability.abort(
@@ -246,10 +241,7 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
             switch (outcome) {
                 case ACCEPTED, REQUEST_FENCED -> {
                     boolean transitioned =
-                            command.endpoint().updatePreemption(
-                                    capability.token,
-                                    DecodeEndpoint.PreemptionUpdate.cancelReply(owned.requestId(), PreemptionCancelPhase.CANCEL_REQUESTED))
-                            && owned.claim.scheduler().updatePreemption(owned.claim, PreemptionCancelPhase.CANCEL_REQUESTED);
+                            owned.claim.scheduler().updatePreemption(owned.claim, PreemptionCancelPhase.CANCEL_REQUESTED);
                     if (transitioned) {
                         capability.transferred(owned);
                     } else {
@@ -258,9 +250,6 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
                     pendingTerminals.add(owned);
                 }
                 case NOT_FOUND -> {
-                    command.endpoint().updatePreemption(
-                            capability.token,
-                            DecodeEndpoint.PreemptionUpdate.cancelReply(owned.requestId(), PreemptionCancelPhase.NOT_FOUND_STALE));
                     owned.claim.scheduler().updatePreemption(owned.claim, PreemptionCancelPhase.NOT_FOUND_STALE);
                     capability.transferred(owned);
                     if (owned.disposition != ClaimDisposition.TERMINAL) {
@@ -406,6 +395,9 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
                         "Cancel outbound ownership changed request_id="
                                 + owned.requestId());
             }
+            // Install the conservative resource hold before RPC invocation. No ACK changes this fact.
+            if (!command.endpoint().updatePreemption(token,
+                    DecodeEndpoint.PreemptionUpdate.handedOff(owned.reservation))) { return false; }
             owned.disposition = ClaimDisposition.OUTBOUND;
             return true;
         }
@@ -444,9 +436,6 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
             if (owned.disposition != ClaimDisposition.OUTBOUND) {
                 return;
             }
-            command.endpoint().updatePreemption(
-                    token,
-                    DecodeEndpoint.PreemptionUpdate.cancelReply(owned.requestId(), PreemptionCancelPhase.CANCEL_UNKNOWN));
             owned.claim.scheduler().updatePreemption(owned.claim, PreemptionCancelPhase.CANCEL_UNKNOWN);
             transferred(owned);
         }

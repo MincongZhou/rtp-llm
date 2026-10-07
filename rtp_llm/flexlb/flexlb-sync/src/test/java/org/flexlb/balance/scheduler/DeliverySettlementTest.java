@@ -148,7 +148,7 @@ class DeliverySettlementTest {
             registry.onPrefillStatus(prefill, RoleType.PREFILL, ledger.finish(20L, member.item()));
             assertOccupancy(i == 15 ? 0 : 1, 15 - i);
         }
-        assertTrue(ledger.prefill.batchAvailability(2).isAvailable());
+        assertTrue(ledger.prefill.batchCapacityAvailable(2));
     }
 
     @Test
@@ -163,7 +163,7 @@ class DeliverySettlementTest {
             assertOccupancy(1, 1);
             cleaned(rejected);
             assertOccupancy(0, 0);
-            assertTrue(ledger.prefill.batchAvailability(1).isAvailable());
+            assertTrue(ledger.prefill.batchCapacityAvailable(1));
         }
     }
 

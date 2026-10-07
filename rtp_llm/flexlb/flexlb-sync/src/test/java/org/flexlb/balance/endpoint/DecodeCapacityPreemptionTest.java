@@ -37,7 +37,9 @@ class DecodeCapacityPreemptionTest {
         long expectedKvTokens = 250L;
         DecodeEndpoint.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserveUnqueued(pin, 1L, 100L, 200L, 30);
+            victim = endpoint.reserve(pin, 1L, 100L, 200L, 30, null);
+            assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                    endpoint.acquireDispatchPermit(victim, new DecodeEndpoint.AdmissionCapacity(0, 100L)).permit().dispatch());
             var reservation = endpoint.reserve(pin, 9L, hardKvTokens, expectedKvTokens, 70, null);
             assertNotNull(reservation);
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,

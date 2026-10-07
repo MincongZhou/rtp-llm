@@ -283,6 +283,62 @@ class PrefillEndpointTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Timeout(5)
+    void repackReusesPredictionAcrossUnrelatedQueueMutation() {
+        RequestRoute survivor = createRequestRoute(1L, 500L, 200L);
+        RequestRoute finished = createRequestRoute(2L, 300L, 100L);
+        registerBatch(endpoint, 1L, 100L, List.of(survivor, finished));
+        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+        PrefillTimePredictor.Evaluator evaluator = mock(PrefillTimePredictor.Evaluator.class);
+        org.mockito.Mockito.when(predictor.evaluator()).thenReturn(evaluator);
+        var state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
+        AtomicInteger predictions = new AtomicInteger();
+        org.mockito.Mockito.when(evaluator.predictBatchMs(org.mockito.ArgumentMatchers.any())).thenAnswer(call -> {
+            assertFalse(state.ownershipLock().isHeldByCurrentThread());
+            int n = predictions.incrementAndGet();
+            assertTrue(n <= 2, "unrelated mutations must not keep retrying prediction");
+            assertTrue(EndpointTestSupport.offer(endpoint, createRequestRoute(100L + n, 100L, 0L)));
+            return 55.0;
+        });
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "predictor", predictor);
+        reportRejectedBatchMember(endpoint, 1L, 2L);
+        assertEquals(1, predictions.get());
+        assertEquals(List.of(1L), endpoint.captureRouteProjectionInputs().work().batches().getFirst().requestIds());
+        assertTrue(endpoint.releaseCommittedItem(survivor));
+        assertEquals(0, endpoint.ownershipStats().batchCount());
+    }
+
+    @Test
+    void rollbackPublishesOnlyActualCapacityReleaseOutsideStateLock() {
+        var availability = mock(org.flexlb.balance.scheduler.PlacementAvailability.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "placementAvailability", availability);
+        var state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
+        AtomicInteger notifications = new AtomicInteger();
+        org.mockito.Mockito.doAnswer(call -> {
+            assertFalse(state.ownershipLock().isHeldByCurrentThread());
+            notifications.incrementAndGet();
+            return null;
+        }).when(availability).changed(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        var first = createRequestRoute(90L, 100L, 0L);
+        PrefillState.RouteReservation open;
+        try (var pin = endpoint.tryPinGeneration()) { open = endpoint.reserveUnqueuedRoute(pin, first, 10L).reservation(); }
+        endpoint.rollbackReservation(open);
+        endpoint.rollbackReservation(open);
+        assertEquals(1, notifications.get());
+        assertEquals(0L, endpoint.observedRequestCount());
+        var second = createRequestRoute(91L, 100L, 0L);
+        PrefillState.RouteReservation consumed;
+        try (var pin = endpoint.tryPinGeneration()) { consumed = endpoint.reserveUnqueuedRoute(pin, second, 10L).reservation(); }
+        try (var commit = endpoint.tryBeginRouteCommitAdmission();
+             var handoff = commit.commit(List.of(second), List.of(consumed))) {
+            endpoint.rollbackReservation(consumed);
+            assertEquals(1, notifications.get(), "successful admission releases no capacity");
+        }
+        assertTrue(endpoint.releaseCommittedItem(second));
+        assertEquals(2, notifications.get());
+    }
+
+    @Test
     void throwingRepackPredictorUsesDefaultFormula() throws Exception {
         RequestRoute survivor = createRequestRoute(1L, 500L, 200L);
         RequestRoute finished = createRequestRoute(2L, 300L, 100L);

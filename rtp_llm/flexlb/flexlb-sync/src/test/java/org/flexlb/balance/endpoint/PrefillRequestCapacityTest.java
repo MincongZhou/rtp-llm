@@ -28,7 +28,7 @@ import static org.mockito.Mockito.when;
 class PrefillRequestCapacityTest {
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillState state = new PrefillState(lock,
-            PrefillActiveIndex.ordered(16, Comparator.comparingLong(RequestRoute::requestId)), () -> { });
+            PrefillActiveIndex.ordered(16, Comparator.comparingLong(RequestRoute::requestId)));
 
     @Test
     void waitingPreparedAndCommittedRequestsShareOneCount() {
@@ -101,14 +101,14 @@ class PrefillRequestCapacityTest {
         var generation = new EndpointGenerationLifecycle(() -> { });
         var reservation = state.reserveBatch(first, 10L, 1, generation.tryAcquireHandoff()).reservation();
         try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(first, second), 0L)) { }
-        assertFalse(state.batchAvailability(1).isAvailable());
+        assertFalse(state.batchCapacityAvailable(1));
         assertTrue(enqueue(item(3), 0L));
         assertTrue(state.terminalizeCommittedItem(first));
         assertEquals(2L, state.observedRequestCount());
-        assertFalse(state.batchAvailability(1).isAvailable());
+        assertFalse(state.batchCapacityAvailable(1));
         assertTrue(state.terminalizeCommittedItem(second));
         assertEquals(1L, state.observedRequestCount());
-        assertTrue(state.batchAvailability(1).isAvailable());
+        assertTrue(state.batchCapacityAvailable(1));
     }
 
     @Test
@@ -207,7 +207,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void failedQueueInsertionDoesNotConsumePublishedCapacity() {
-        var direct = new PrefillState(lock, PrefillActiveIndex.disabled(), () -> { });
+        var direct = new PrefillState(lock, PrefillActiveIndex.disabled());
         lock.lock();
         try {
             assertThrows(IllegalStateException.class, () -> direct.enqueueActiveLocked(item(1), 1L));
@@ -226,11 +226,9 @@ class PrefillRequestCapacityTest {
         when(engine.waitingQueryLen()).thenReturn(2L);
         when(observation.engine()).thenReturn(engine);
         when(observation.finishedTasks()).thenReturn(Map.of());
-        var result = state.reconcileWorkerStatus(observation, unused -> 0L, () -> {
-            assertFalse(state.canAcceptRequest(2L));
-            assertTrue(state.canAcceptRequest(3L));
-        }, () -> { });
-        assertNull(result.publicationFailure());
+        var result = EndpointTestSupport.reconcile(state, observation, unused -> 0L);
+        assertFalse(state.canAcceptRequest(2L));
+        assertTrue(state.canAcceptRequest(3L));
         heartbeat(Map.of(), 1L);
         assertTrue(state.canAcceptRequest(2L));
     }

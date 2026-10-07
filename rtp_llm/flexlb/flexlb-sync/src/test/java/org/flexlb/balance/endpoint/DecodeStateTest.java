@@ -224,13 +224,13 @@ class DecodeStateTest {
         }
         assertFalse(state.hasOwnedResources(reservation));
         assertEquals(STALE, state.release(reservation, ReleaseReason.EXPIRED));
-        assertFalse(state.evictExpiredRequests(Long.MAX_VALUE, ignored -> false).capacityReleased());
+        assertFalse(EndpointTestSupport.evictDecode(state, Long.MAX_VALUE, ignored -> false).capacityReleased());
         calibrate(state, status, Map.of(), Map.of("1", task(1, TaskPhase.RUNNING)));
         var late = calibrate(state, status, Map.of("1", task(1, TaskPhase.RUNNING)), Map.of());
         assertTrue(late.facts().isEmpty());
         assertEquals(0, state.routingView().totalLoad());
 
-        assertTrue(state.evictExpiredRequests(-1L, ignored -> false).capacityReleased());
+        assertTrue(EndpointTestSupport.evictDecode(state, -1L, ignored -> false).capacityReleased());
         calibrate(state, status, Map.of("1", task(1, TaskPhase.RUNNING)), Map.of());
         assertEquals(1, state.routingView().totalLoad());
         assertFalse(state.hasOwnedResources(reservation), "expired history must not restore the old token");
@@ -243,7 +243,7 @@ class DecodeStateTest {
         var reservation = state.reserve(1, 100, 200, 50, true, CAPACITY);
         state.acquireDispatchPermit(reservation, CAPACITY);
 
-        var cleanup = state.evictExpiredRequests(-1L, requestId -> {
+        var cleanup = EndpointTestSupport.evictDecode(state, -1L, requestId -> {
             calibrate(state, status, Map.of("1", task(1, TaskPhase.RUNNING)), Map.of());
             return false;
         });
@@ -317,18 +317,15 @@ class DecodeStateTest {
         assertFalse(state.hasOwnedResources(regressed));
     }
 
-    @ParameterizedTest
-    @EnumSource(value = PreemptionCancelPhase.class,
-            names = {"CANCEL_REQUESTED", "NOT_FOUND_STALE", "CANCEL_UNKNOWN"})
-    void regressedClaimKeepsOneHoldAndExplicitFinishedWinsOverActiveSnapshot(PreemptionCancelPhase reply) {
+    @Test
+    void regressedClaimKeepsOneHoldAndExplicitFinishedWinsOverActiveSnapshot() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
         var victim = state.reserve(10, 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginPreemption(
                 1, java.util.List.of(victim), 11, 100, 200, 80, new AdmissionCapacity(1, 100)));
-        assertTrue(state.updatePreemption(1, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(state.updatePreemption(1, DecodeEndpoint.PreemptionUpdate.cancelReply(10, reply)));
+        assertTrue(EndpointTestSupport.handoffPreemption(state, 1));
         for (int i = 0; i < 2; i++) {
             calibrate(state, status, Map.of("10", task(10, TaskPhase.RECEIVED)), Map.of());
             assertEquals(2, state.routingView().engineCapacityUsed(), "one victim hold plus one incoming shadow");
@@ -371,7 +368,13 @@ class DecodeStateTest {
         response.setLatestFinishedVersion(status.appliedStatusCursor().latestFinishedTaskVersion() + 1);
         status.lock.lock();
         try {
-            return state.calibrate(status.prepareNewStatus(status.freezeStatusResponse(response)));
+            var prepared = status.prepareNewStatus(status.freezeStatusResponse(response));
+            state.ownershipLock().lock();
+            try {
+                var result = state.calibrateLocked(prepared.observation());
+                status.publishPreparedStatus(prepared);
+                return result;
+            } finally { state.ownershipLock().unlock(); }
         } finally {
             status.lock.unlock();
         }

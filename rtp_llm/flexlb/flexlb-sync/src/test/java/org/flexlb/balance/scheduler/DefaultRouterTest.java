@@ -473,6 +473,10 @@ class DefaultRouterTest {
 
     private static PrefillState.WorkCapture stubRouteCommit(PrefillEndpoint endpoint,
             org.flexlb.balance.projection.WorkSnapshot precedingWork) {
+        org.mockito.Mockito.doAnswer(invocation -> {
+                ((PrefillState.Reservation) invocation.getArgument(0)).close();
+                return null;
+            }).when(endpoint).rollbackReservation(org.mockito.ArgumentMatchers.any());
         var commit = mock(PrefillEndpoint.RouteCommitAdmission.class);
         var handoff = mock(PrefillState.CommittedHandoff.class);
         var capture = mock(PrefillState.WorkCapture.class);

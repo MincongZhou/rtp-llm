@@ -1889,7 +1889,7 @@ public class BalanceContext {
             case PRIORITY_CANCELED -> {
                 PreemptionRegistration claim = this.preemption();
                 DecodeEndpoint decode = fact.item().decodeEp();
-                if (claim == null || claim.isFinished() || decode == null || fact.item().decodeReservation() == null
+                if (claim == null || !claim.canAcceptPriorityTerminal() || decode == null || fact.item().decodeReservation() == null
                         || !decode.updatePreemption(claim.attemptToken(),
                                 DecodeEndpoint.PreemptionUpdate.canceled(fact.item().decodeReservation()))
                         // Capacity listeners may reenter the scheduler during the Decode update.
@@ -1906,6 +1906,7 @@ public class BalanceContext {
     Runnable acceptDecodeStatus(DecodeEndpoint source, DecodeEndpoint.WorkerStatusFact fact, long nowMs) {
         Runnable work = null;
         DecisionDeadline obsolete = null;
+        boolean capacityChanged = false;
         synchronized (this) {
             if (!this.ownsDecodeFactLocked(source, fact.reservation())) {
                 return null;
@@ -1919,17 +1920,52 @@ public class BalanceContext {
                 work = this.processRequestEndLocked(this.route(), DeferredTerminal.worker(
                         WorkerTerminalSource.DECODE_ENDPOINT, fact.errorCode() == 0L, fact.errorCode()));
                 obsolete = this.detachObsoleteDecisionDeadlineLocked();
-            } else if (!this.hasCleanup()) {
-                // Active membership proves Decode ownership, including before KV allocation.
-                obsolete = this.markDecodeAcceptedLocked();
+            } else {
+                // Membership and allocation remain separate facts. Only allocation reconciles a NOT_FOUND claim.
+                if (!this.hasCleanup()) { obsolete = this.markDecodeAcceptedLocked(); }
+                PreemptionRegistration claim = this.preemption();
+                if (fact.allocationObserved() && claim != null && claim.isNotFound()) {
+                    DeferredTerminal terminal = claim.pendingTerminal();
+                    capacityChanged = source.reconcilePreemptionResources(claim.attemptToken(), terminal == null
+                            ? DecodeEndpoint.PreemptionUpdate.active(fact.reservation())
+                            : DecodeEndpoint.PreemptionUpdate.finished(fact.reservation()));
+                    if (capacityChanged) {
+                        if (this.hasCleanup()) {
+                            if (terminal != null) {
+                                // Finalization retains this owner until the request's terminal observation is published.
+                                claim.tryFinish();
+                                this.recordCleanupSettlement(false, true, false);
+                            } else {
+                                this.detachPreemptionOwnerLocked(claim);
+                            }
+                            work = () -> scheduler.resumeCleanup(this);
+                        } else {
+                            this.detachPreemptionOwnerLocked(claim);
+                            if (terminal != null) {
+                                claim.tryFinish();
+                                work = scheduler.finalizationEffects(this.decideRequestEndLocked(terminal,
+                                        () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)), claim);
+                            } else if (claim.hasPendingDeliveryConfirmation()) {
+                                work = this.acknowledgeDeliveryLocked(claim);
+                            }
+                        }
+                    }
+                }
             }
         }
         Runnable effect = work;
         DecisionDeadline deadline = obsolete;
+        boolean publishCapacity = capacityChanged;
         return () -> {
-            DeliveryClaim delivery = this.delivery();
-            if (delivery != null) { delivery.observeDecodeSettlement(source, fact); }
-            scheduler.executeEngineEffects(this, effect, deadline);
+            Throwable notificationFailure = publishCapacity ? Failures.run(null, source::publishCapacityRelease) : null;
+            try {
+                DeliveryClaim delivery = this.delivery();
+                if (delivery != null) { delivery.observeDecodeSettlement(source, fact); }
+                scheduler.executeEngineEffects(this, effect, deadline);
+            } catch (Throwable failure) {
+                throw Failures.propagate(Failures.append(failure, notificationFailure), "Decode fact continuation failed");
+            }
+            Failures.rethrow(notificationFailure, "Decode capacity publication failed");
         };
     }
 

@@ -102,6 +102,8 @@ public final class PreemptionRegistration {
         return finished;
     }
 
+    boolean canAcceptPriorityTerminal() { return !finished && phase.acceptsPriorityTerminal(); }
+
     boolean canCompletePreemption() {
         return !finished && phase.acceptsRequestFenced();
     }

@@ -13,8 +13,10 @@ class PreemptionRegistrationTest {
     void acceptedCancelFollowsTheSingleLegalPath() {
         PreemptionRegistration registration = registration();
 
+        assertFalse(registration.canAcceptPriorityTerminal());
         assertTrue(registration.advanceTo(
                 PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+        assertTrue(registration.canAcceptPriorityTerminal());
         assertFalse(registration.advanceTo(
                 PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         assertTrue(registration.advanceTo(
@@ -30,6 +32,7 @@ class PreemptionRegistrationTest {
         assertTrue(registration.tryFinish());
         assertFalse(registration.tryFinish());
         assertTrue(registration.isFinished());
+        assertFalse(registration.canAcceptPriorityTerminal());
     }
 
     @Test

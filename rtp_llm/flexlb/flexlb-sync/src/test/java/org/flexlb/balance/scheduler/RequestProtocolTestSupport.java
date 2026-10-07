@@ -342,7 +342,10 @@ final class RequestProtocolTestSupport {
     static void awaitCondition(BooleanSupplier condition)
             throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+        while (System.nanoTime() < deadline) {
+            if (condition.getAsBoolean()) {
+                return;
+            }
             Thread.sleep(1L);
         }
         assertTrue(condition.getAsBoolean(), "condition did not become true");

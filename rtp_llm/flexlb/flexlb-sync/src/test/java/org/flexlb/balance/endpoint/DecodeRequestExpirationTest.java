@@ -121,8 +121,7 @@ class DecodeRequestExpirationTest {
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L), 9L, 100, 120, 70));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.NOT_FOUND_STALE)));
+        assertTrue(EndpointTestSupport.handoffPreemption(endpoint, 101L));
         updateStatus(Map.of(), Map.of(), 10_000);
         endpoint.abortPreemption(101L);
         assertEquals(1, endpoint.routingView().totalLoad());
@@ -177,8 +176,7 @@ class DecodeRequestExpirationTest {
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L),
                         9L, 100, 120, 70));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.NOT_FOUND_STALE)));
+        assertTrue(EndpointTestSupport.handoffPreemption(endpoint, 101L));
         endpoint.abortPreemption(101L);
 
         assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.finished(reservations.get(1L))));

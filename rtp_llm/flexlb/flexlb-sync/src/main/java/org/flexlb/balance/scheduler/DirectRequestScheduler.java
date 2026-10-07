@@ -108,7 +108,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                     PrefillAdmissionResources.closeCommitted(members, handoff);
                 }
             } finally {
-                if (reservationAttempt.reservation() != null) { reservationAttempt.reservation().close(); }
+                if (reservationAttempt.reservation() != null) { admission.prefillEndpoint().rollbackReservation(reservationAttempt.reservation()); }
             }
         }
     }

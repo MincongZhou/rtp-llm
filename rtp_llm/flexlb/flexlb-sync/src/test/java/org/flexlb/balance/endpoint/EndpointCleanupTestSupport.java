@@ -37,7 +37,7 @@ public final class EndpointCleanupTestSupport {
         private final ReentrantLock lock = new ReentrantLock();
         private final PrefillState state = new PrefillState(lock,
                 PrefillActiveIndex.ordered(4, Comparator.comparingLong(RequestRoute::requestId)),
-                clock::get, () -> { });
+                clock::get);
         private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
         public PrefillLedger(boolean batch) {
@@ -81,7 +81,7 @@ public final class EndpointCleanupTestSupport {
         }
 
         public int sweep(LongPredicate retain) {
-            return state.evictExpiredInflight(10L, retain);
+            return EndpointTestSupport.evictPrefill(state, 10L, retain);
         }
 
         public void assertOwned(Owner owner, long predictedMs) {
@@ -99,8 +99,8 @@ public final class EndpointCleanupTestSupport {
                 assertEquals(((PrefillState.BatchReservation) owner.reservation()).batchId(),
                         work.batches().getFirst().batchId());
                 // Check the actual admission gate, not just the derived batch count.
-                assertFalse(state.batchAvailability(1).isAvailable());
-                assertTrue(state.batchAvailability(2).isAvailable());
+                assertFalse(state.batchCapacityAvailable(1));
+                assertTrue(state.batchCapacityAvailable(2));
             } else {
                 assertTrue(work.batches().isEmpty());
                 assertEquals(List.of(owner.item().requestId()), work.requests().stream()
@@ -120,7 +120,7 @@ public final class EndpointCleanupTestSupport {
             assertTrue(state.committedSnapshot().requests().isEmpty());
             assertTrue(state.committedSnapshot().batches().isEmpty());
             assertEquals(0L, state.committedSnapshot().totalRemainingWorkMs().orElseThrow());
-            assertTrue(state.batchAvailability(1).isAvailable());
+            assertTrue(state.batchCapacityAvailable(1));
         }
     }
 }

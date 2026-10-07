@@ -132,7 +132,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0L;
         this.deliveryProjection = deliveryStrategy.projectionPolicy();
         this.projectionOrder = config.isPriorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
-        this.prefillState = new PrefillState(new ReentrantLock(), PrefillActiveIndex.disabled(), this::signalCapacityAvailable);
+        this.prefillState = new PrefillState(new ReentrantLock(), PrefillActiveIndex.disabled());
 
     }
 
@@ -273,7 +273,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
         signalSchedulingInputsChanged();
     }
 
-    private void signalCapacityAvailable() {
+    private void notifyCapacityAvailable() {
+        try { signalCapacityAvailable(); }
+        catch (Throwable failure) {
+            try { logger.error("Prefill capacity notification failed", failure); }
+            catch (Throwable ignored) { }
+        }
+    }
+
+    public void signalCapacityAvailable() {
         if (runtime != null) { runtime.signalDeliveryCapacityAvailable(); }
         signalPlacementCapacityChanged();
     }
@@ -319,6 +327,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         try {
             PrefillState.Retirement retirement =
                     prefillState.retireGenerationOwnership();
+            for (var handoff : retirement.orphanedHandoffs()) {
+                retirementFailure = Failures.append(retirementFailure, Failures.close(handoff));
+            }
             if (!retirement.ownedItems().isEmpty()) {
                 try {
                     for (RequestRoute route : retirement.ownedItems()) {
@@ -347,6 +358,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             retirementFailure = Failures.append(
                     retirementFailure, committedRetirementFailure);
         }
+        notifyCapacityAvailable();
         Failures.rethrow(retirementFailure, "Prefill endpoint retirement failed");
     }
 
@@ -399,7 +411,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public CapacityBoundary.Availability batchAdmissionAvailability(
             int maximumInflightBatches) {
-        return prefillState.batchAvailability(maximumInflightBatches);
+        if (maximumInflightBatches <= 0) { throw new IllegalArgumentException("maximumInflightBatches must be positive"); }
+        return new CapacityBoundary.Availability() {
+            @Override public boolean isAvailable() { return prefillState.batchCapacityAvailable(maximumInflightBatches); }
+            @Override public void addListener(Runnable listener) {
+                if (runtime == null || listener != runtime.capacityAvailableSignal()) { throw new IllegalArgumentException("Expected this generation's worker wake signal"); }
+            }
+            @Override public void removeListener(Runnable listener) { }
+        };
     }
 
     /**
@@ -446,7 +465,22 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Exact counterpart cleanup; stale item generations are a no-op.
      */
     public boolean releaseCommittedItem(RequestRoute exactItem) {
-        return prefillState.terminalizeCommittedItem(exactItem);
+        boolean released = prefillState.terminalizeCommittedItem(exactItem);
+        if (released) { notifyCapacityAvailable(); }
+        return released;
+    }
+
+    /** Preparation rollback belongs to its workflow owner; wake only after cleanup and outside State's lock. */
+    public void rollbackReservation(PrefillState.Reservation reservation) {
+        if (reservation == null) { return; }
+        var rollback = prefillState.rollbackPreparation(reservation);
+        try {
+            if (rollback.generationHandoff() != null) {
+                Failures.rethrow(Failures.close(rollback.generationHandoff()), "Prefill preparation cleanup failed");
+            }
+        } finally {
+            if (rollback.released()) { notifyCapacityAvailable(); }
+        }
     }
 
     /**
@@ -468,20 +502,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
-        PrefillState.StatusReconciliation reconciliation =
-                prefillState.reconcileWorkerStatus(
-                        observation,
-                        this::predictRepackedBatchMs,
-                        () -> {
-                            if (!observation.alive()) {
-                                beginRetirement();
-                            }
-                            signalSchedulingInputsChanged();
-                            ws.publishPreparedStatus(prepared);
-                        },
-                        this::beginRetirement);
-        reportBatchCompletionsNoFail(reconciliation.batchCompletions());
-        Failures.rethrow(reconciliation.publicationFailure(), "Prefill status publication failed");
+        PrefillState.StatusReconciliation reconciliation = reduceStatus(ws, observation, prepared);
         List<PrefillState.WorkerStatusFact> facts =
                 reconciliation.schedulerFacts();
         return () -> facts.forEach(fact -> fact.item().ctx().scheduler().onPrefillStatus(
@@ -493,19 +514,64 @@ public class PrefillEndpoint extends WorkerEndpoint {
             WorkerStatus ws,
             WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
-        PrefillState.StatusReconciliation reconciliation =
-                prefillState.reconcileWorkerStatus(
-                        observation,
-                        this::predictRepackedBatchMs,
-                        this::signalSchedulingInputsChanged,
-                        this::beginRetirement);
+        PrefillState.StatusReconciliation reconciliation = reduceStatus(ws, observation, null);
         if (!reconciliation.schedulerFacts().isEmpty()
                 || !reconciliation.batchCompletions().isEmpty()) {
             throw new IllegalStateException(
                     "Private Prefill candidate produced locally-owned status facts");
         }
-        Failures.rethrow(reconciliation.publicationFailure(), "Prefill status publication failed");
         return () -> { };
+    }
+
+    /** Keep ordinary reduction/publication in one lock; predict a shrunk batch outside it. */
+    private PrefillState.StatusReconciliation reduceStatus(WorkerStatus ws,
+            WorkerStatus.StatusObservation observation, WorkerStatus.PreparedStatus prepared) {
+        var lock = prefillState.ownershipLock();
+        PrefillState.StatusReduction reduction = null;
+        PrefillState.StatusReconciliation result = null;
+        Map<Long, Long> predictions = Map.of();
+        try {
+            while (result == null) {
+                lock.lock();
+                try {
+                    if (reduction == null) { reduction = prefillState.prepareStatusLocked(observation); }
+                    else if (!predictions.isEmpty()) {
+                        // Rebase resource facts after prediction. Unrelated queue mutations do not
+                        // invalidate a prediction for the same exact surviving batch members.
+                        var current = prefillState.prepareStatusLocked(observation);
+                        if (!current.predictionInputs().equals(reduction.predictionInputs())) { predictions = Map.of(); }
+                        reduction = current;
+                    }
+                    if (reduction.predictionInputs().isEmpty() || !predictions.isEmpty()) {
+                        result = prefillState.commitStatusLocked(reduction, predictions);
+                        if (result == null) { throw new IllegalStateException("Locked Prefill reduction changed during commit"); }
+                        if (prepared != null && !observation.alive()) { beginRetirement(); }
+                        signalSchedulingInputsChanged();
+                        if (prepared != null) { ws.publishPreparedStatus(prepared); }
+                    }
+                } catch (Throwable failure) {
+                    beginRetirement();
+                    throw failure;
+                } finally {
+                    lock.unlock();
+                }
+                if (result == null) {
+                    predictions = new java.util.HashMap<>();
+                    for (var batch : reduction.predictionInputs().entrySet()) {
+                        predictions.put(batch.getKey(), predictRepackedBatchMs(batch.getValue()));
+                    }
+                }
+            }
+            return result;
+        } catch (Throwable failure) {
+            beginRetirement();
+            throw Failures.propagate(failure, "Prefill status reduction/publication failed");
+        } finally {
+            if (result != null) {
+                reportBatchCompletionsNoFail(result.batchCompletions());
+                if (result.capacityReleased()) { notifyCapacityAvailable(); }
+            }
+        }
     }
 
     @Override
@@ -519,6 +585,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
         PrefillState.HeartbeatReconciliation reconciliation =
                 prefillState.reconcileHeartbeat(observation);
+        if (reconciliation.capacityReleased()) { notifyCapacityAvailable(); }
         if (reconciliation.schedulingInputsChanged()) {
             signalSchedulingInputsChanged();
         }
@@ -575,7 +642,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public int evictExpiredInflight(long ttlMs,
                                     LongPredicate retainForSchedulerCleanup) {
-        return prefillState.evictExpiredInflight(ttlMs, retainForSchedulerCleanup);
+        var orphanCandidates = new java.util.HashSet<RequestRoute>();
+        for (RequestRoute route : prefillState.cleanupCandidates()) {
+            if (!retainForSchedulerCleanup.test(route.requestId())) { orphanCandidates.add(route); }
+        }
+        int released = prefillState.evictExpiredInflight(ttlMs, orphanCandidates);
+        if (released > 0) { notifyCapacityAvailable(); }
+        return released;
     }
 
     @Override

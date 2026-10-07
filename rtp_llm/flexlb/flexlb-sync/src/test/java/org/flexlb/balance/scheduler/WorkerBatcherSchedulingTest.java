@@ -232,6 +232,26 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
+    @Test
+    void stopStillTerminatesEveryRequestWhenCapacityNotificationFails() {
+        FlexlbConfig config = singleConfig();
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
+        WorkerBatcher runtime = WorkerBatcherTestSupport.create("stop-notification-failure", endpoint, config,
+                new EventDrivenBlock(), events);
+        RequestRoute request = item(config, endpoint, 915L, 50, System.currentTimeMillis());
+        request.ctx().bindScheduler(events);
+        var state = WorkerBatcherTestSupport.state(runtime);
+        state.ownershipLock().lock();
+        try { assertTrue(state.enqueueActiveLocked(request, 0L)); }
+        finally { state.ownershipLock().unlock(); }
+        var failure = new IllegalStateException("capacity notification failed");
+        doThrow(failure).when(endpoint).signalPlacementCapacityChanged();
+        assertSame(failure, runtime.stopAndAwait());
+        verify(events).onQueueOfferFailure(org.mockito.ArgumentMatchers.same(request), org.mockito.ArgumentMatchers.any());
+        assertTrue(state.retireGenerationOwnership().ownedItems().isEmpty());
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = { false, true })
     void removedRequestIsNotifiedEvenWhenCapacitySignalFails(boolean expired) {

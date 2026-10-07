@@ -15,7 +15,7 @@ public final class PrefillCleanupDeadlockFixture {
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillState state = new PrefillState(lock,
             PrefillActiveIndex.ordered(4, Comparator.comparingLong(RequestRoute::requestId)),
-            clock::get, () -> { });
+            clock::get);
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
     private final RequestRoute next;
 
@@ -44,12 +44,12 @@ public final class PrefillCleanupDeadlockFixture {
     }
 
     public void sweepBatches(LongPredicate retain) {
-        assertEquals(0, state.evictExpiredInflight(10L, retain));
+        assertEquals(0, EndpointTestSupport.evictPrefill(state, 10L, retain));
         assertEquals(1, state.stats().batchCount());
     }
 
     public void sweepIndividuals(LongPredicate retain) {
-        assertEquals(0, state.evictExpiredInflight(10L, retain));
+        assertEquals(0, EndpointTestSupport.evictPrefill(state, 10L, retain));
         assertEquals(1, state.stats().individuallyOwnedRequests());
     }
 

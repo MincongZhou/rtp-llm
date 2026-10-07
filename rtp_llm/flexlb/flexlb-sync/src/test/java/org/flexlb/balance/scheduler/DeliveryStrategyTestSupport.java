@@ -233,6 +233,10 @@ public final class DeliveryStrategyTestSupport {
 
         private PrefillState.ReservationResult<PrefillState.BatchReservation>
                 reserveBatch() {
+            org.mockito.Mockito.doAnswer(invocation -> {
+                ((PrefillState.Reservation) invocation.getArgument(0)).close();
+                return null;
+            }).when(prefill).rollbackReservation(org.mockito.ArgumentMatchers.any());
             batchReservation = Mockito.mock(PrefillState.BatchReservation.class);
             Mockito.when(batchReservation.commitLocked(
                             Mockito.anyList(), Mockito.anyLong()))

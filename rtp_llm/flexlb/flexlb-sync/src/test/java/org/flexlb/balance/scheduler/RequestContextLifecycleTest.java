@@ -856,6 +856,76 @@ class RequestContextLifecycleTest {
         assertEquals(RequestState.Phase.QUEUED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(703L, 0L).state());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void decodeAllocationReconcilesOnlyNotFoundProtocol(boolean acceptedCancel) {
+        Registered registered = registerItem(706L);
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        var delivery = RequestProtocolTestSupport.claimBatch(lifecycle, registered.item(), 17L, () -> true);
+        assertNotNull(delivery);
+        delivery.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
+        lifecycle.runtime.continuations().awaitIdle();
+        var claim = lifecycle.tryClaim(706L, 1L, 20L, "victim").orElseThrow();
+        assertTrue(lifecycle.updatePreemption(claim, org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+        assertTrue(lifecycle.updatePreemption(claim, acceptedCancel
+                ? org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_REQUESTED
+                : org.flexlb.balance.preemption.PreemptionCancelPhase.NOT_FOUND_STALE));
+        var source = registered.item().decodeEp();
+        when(source.reconcilePreemptionResources(org.mockito.ArgumentMatchers.eq(20L), org.mockito.ArgumentMatchers.any())).thenReturn(true);
+        org.mockito.Mockito.doAnswer(call -> {
+            assertFalse(Thread.holdsLock(registered.item().ctx()));
+            return null;
+        }).when(source).publishCapacityRelease();
+        lifecycle.onDecodeStatus(source, List.of(DecodeEndpoint.WorkerStatusFact.allocated(registered.item().decodeReservation())));
+        lifecycle.runtime.continuations().awaitIdle();
+        assertSame(acceptedCancel ? claim : null, registered.item().ctx().preemption());
+        if (acceptedCancel) {
+            verify(source, org.mockito.Mockito.never()).reconcilePreemptionResources(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any());
+        } else {
+            verify(source).reconcilePreemptionResources(20L, DecodeEndpoint.PreemptionUpdate.active(registered.item().decodeReservation()));
+            verify(source).publishCapacityRelease();
+        }
+    }
+
+    @Test
+    void decodeAllocationSettlesCleanupAfterRetainedTerminalAndNotFound() {
+        Registered registered = registerItem(707L);
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        var delivery = RequestProtocolTestSupport.claimBatch(lifecycle, registered.item(), 17L, () -> true);
+        delivery.complete(org.flexlb.balance.delivery.DeliveryResult.delivered());
+        lifecycle.runtime.continuations().awaitIdle();
+        var context = registered.item().ctx();
+        var claim = lifecycle.tryClaim(707L, 1L, 21L, "victim").orElseThrow();
+        assertTrue(lifecycle.updatePreemption(claim, org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+        delivery.observeWorkerCompletion(registered.item());
+        BalanceContext.SelectedResponse response;
+        synchronized (context) {
+            context.retainPreemptionTerminalLocked(claim, DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, true, 0L));
+            response = context.selectDeliveryFailureLocked(registered.item(), org.flexlb.balance.delivery.DeliveryResult.Status.UNCERTAIN,
+                    "delivery abandoned while cancellation was pending",
+                    () -> lifecycle.requirePublicationPermitLocked(context, BalanceContext.PublicationKind.TERMINAL));
+            var pass = context.beginCleanup(registered.item());
+            context.finishCleanup(pass, true, false);
+        }
+        if (response != null) {
+            try { AbstractRequestScheduler.completeFutureResult(response); }
+            finally { response.permit().closePublication(); }
+        }
+        assertTrue(lifecycle.updatePreemption(claim, org.flexlb.balance.preemption.PreemptionCancelPhase.NOT_FOUND_STALE));
+        var source = registered.item().decodeEp();
+        when(source.reconcilePreemptionResources(org.mockito.ArgumentMatchers.eq(21L), org.mockito.ArgumentMatchers.any())).thenReturn(true);
+
+        lifecycle.onDecodeStatus(source, List.of(DecodeEndpoint.WorkerStatusFact.allocated(registered.item().decodeReservation())));
+        lifecycle.runtime.continuations().awaitIdle();
+
+        verify(source).reconcilePreemptionResources(21L, DecodeEndpoint.PreemptionUpdate.finished(registered.item().decodeReservation()));
+        assertTrue(claim.isFinished());
+        assertEquals(RequestStage.FINISHED, context.stage());
+        assertTrue(claim.terminalObservation().toCompletableFuture().isDone());
+        assertNull(lifecycle.findRequestContext(707L));
+        assertNull(context.preemption());
+    }
+
     @Test
     void deliveryCannotConsumeAnotherRoutesHandoffReceipt() {
         Registered registered = registerItem(705L);

@@ -227,6 +227,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         private long batchId;
         private PreparedSubmission submission;
         private PrefillState.BatchReservation reservation;
+        private PrefillEndpoint prefill;
         private final ArrayList<PrefillAdmissionResources.Member> members;
         private PrefillState.CommittedHandoff committedHandoff;
         private final List<RequestRoute> items = new AbstractList<>() {
@@ -251,7 +252,6 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             requirePhase(Phase.PREPARING, "append");
             try {
                 if (members.isEmpty()) {
-                    PrefillEndpoint prefill;
                     try {
                         var attempt = Objects.requireNonNull(owner.prepareSubmission.get(), "submission attempt");
                         if (!attempt.accepted()) { return attempt.boundary(); }
@@ -306,6 +306,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                     reservation.commitLocked(items, predictedMs);
             committedHandoff = handoff;
             reservation = null;
+            prefill = null;
             phase = Phase.COMMITTED;
             return handoff.precedingWork();
         }
@@ -385,7 +386,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 for (var member : members) {
                     failure = rollback(member, failure);
                 }
-                failure = rollback(reservation, failure);
+                if (reservation != null) { failure = Failures.run(failure, () -> prefill.rollbackReservation(reservation)); }
                 reservation = null;
             } finally {
                 failure = Failures.run(failure, this::closeSubmission);

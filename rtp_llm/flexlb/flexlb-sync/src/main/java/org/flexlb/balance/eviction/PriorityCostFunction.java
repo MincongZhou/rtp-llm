@@ -60,7 +60,7 @@ public final class PriorityCostFunction {
      */
     public static long g(DecodeTaskPhase stage) {
         return switch (stage) {
-            case MASTER_QUEUED_NOT_DISPATCHED -> MASTER_QUEUED_STAGE_WEIGHT;
+            case LOCAL_RESERVED, MASTER_QUEUED_NOT_DISPATCHED -> MASTER_QUEUED_STAGE_WEIGHT;
             case ENGINE_MAY_HAVE_SEEN -> ENGINE_MAY_HAVE_SEEN_STAGE_WEIGHT;
             case ACCEPTED_NOT_RUNNING -> ACCEPTED_STAGE_WEIGHT;
             case RUNNING -> RUNNING_STAGE_WEIGHT;

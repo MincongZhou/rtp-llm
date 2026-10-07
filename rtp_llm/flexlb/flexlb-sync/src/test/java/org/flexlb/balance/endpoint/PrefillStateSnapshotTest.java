@@ -46,7 +46,7 @@ class PrefillStateSnapshotTest {
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillActiveIndex waiting = PrefillActiveIndex.ordered(4,
             Comparator.comparingLong(RequestRoute::requestId));
-    private final PrefillState state = new PrefillState(lock, waiting, clock::get, () -> { });
+    private final PrefillState state = new PrefillState(lock, waiting, clock::get);
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
     @ParameterizedTest
@@ -177,25 +177,10 @@ class PrefillStateSnapshotTest {
         assertThrows(UnsupportedOperationException.class, () -> bounded.items().clear());
     }
 
-    @ParameterizedTest
-    @ValueSource(ints = {0, 1, 2})
-    void batchCapacityReleaseAlwaysWakesItsBoundWorker(int subscriptionChanges) {
-        AtomicInteger notifications = new AtomicInteger();
-        Runnable wake = () -> {
-            assertFalse(lock.isHeldByCurrentThread());
-            notifications.incrementAndGet();
-        };
-        PrefillState ledger = new PrefillState(lock, waiting, clock::get, wake);
-        var availability = ledger.batchAvailability(1);
-        assertThrows(IllegalArgumentException.class, () -> availability.addListener(() -> { }));
-        assertThrows(IllegalArgumentException.class, () -> availability.addListener(null));
-        if (subscriptionChanges > 0) {
-            availability.addListener(wake);
-            availability.addListener(wake);
-        }
-        if (subscriptionChanges > 1) {
-            availability.removeListener(wake);
-        }
+    @Test
+    void batchCapacityRollbackRestoresAvailability() {
+        PrefillState ledger = new PrefillState(lock, waiting, clock::get);
+        var availability = (java.util.function.BooleanSupplier) () -> ledger.batchCapacityAvailable(1);
         var request = item(99L);
         lock.lock();
         try {
@@ -203,24 +188,18 @@ class PrefillStateSnapshotTest {
         } finally {
             lock.unlock();
         }
-        assertTrue(availability.isAvailable());
+        assertTrue(availability.getAsBoolean());
         try (var lease = ledger.reserveBatch(request, 9L, 1, generation.tryAcquireHandoff()).reservation()) {
             org.junit.jupiter.api.Assertions.assertNotNull(lease);
-            assertFalse(availability.isAvailable());
+            assertFalse(availability.getAsBoolean());
         }
-        assertTrue(availability.isAvailable());
-        assertEquals(1, notifications.get());
+        assertTrue(availability.getAsBoolean());
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void openLeaseRollbackNotifiesOnceOutsideLockEvenWhenHandoffFails(boolean batch) {
-        AtomicInteger notifications = new AtomicInteger();
-        PrefillState ledger = new PrefillState(lock, waiting, clock::get, () -> {
-            assertFalse(lock.isHeldByCurrentThread());
-            notifications.incrementAndGet();
-            throw new IllegalStateException("observer failure");
-        });
+    void openLeaseRollbackRestoresFactsEvenWhenHandoffFails(boolean batch) {
+        PrefillState ledger = new PrefillState(lock, waiting, clock::get);
         RuntimeException failure = new IllegalStateException("generation drain failure");
         EndpointGenerationLifecycle retiring = new EndpointGenerationLifecycle(() -> { throw failure; });
         RequestRoute request = item(91L);
@@ -241,9 +220,7 @@ class PrefillStateSnapshotTest {
         } else {
             lease.close();
         }
-        assertEquals(1, notifications.get());
         lease.close();
-        assertEquals(1, notifications.get(), "an already settled lease cannot notify twice");
         lock.lock();
         try {
             assertEquals(0, ledger.captureQueueCounters().batchSlots());
@@ -313,15 +290,15 @@ class PrefillStateSnapshotTest {
             assertEquals(4, state.stats().locallyOwnedRequests());
         }
         clock.set(110);
-        assertEquals(1, state.evictExpiredInflight(10, id -> id == first.requestId()));
+        assertEquals(1, EndpointTestSupport.evictPrefill(state, 10, id -> id == first.requestId()));
         assertEquals(3, state.stats().locallyOwnedRequests(), "one retained member protects both batch members");
         assertEquals(1, state.stats().batchCount());
         assertEquals(1, state.stats().individuallyOwnedRequests(), "fresh individual survives");
         assertEquals(List.of(queued), waitingItems());
-        assertEquals(1, state.evictExpiredInflight(10, ignored -> false), "a batch counts once");
+        assertEquals(1, EndpointTestSupport.evictPrefill(state, 10, ignored -> false), "a batch counts once");
         assertEquals(1, state.stats().locallyOwnedRequests());
         clock.set(115);
-        assertEquals(1, state.evictExpiredInflight(10, ignored -> false));
+        assertEquals(1, EndpointTestSupport.evictPrefill(state, 10, ignored -> false));
         assertEquals(List.of(queued), waitingItems(), "orphan sweeps never remove queued ownership");
         assertTrue(state.committedSnapshot().batches().isEmpty());
         assertTrue(state.committedSnapshot().requests().isEmpty());
@@ -538,6 +515,11 @@ class PrefillStateSnapshotTest {
         assertFalse(retiring.tryStartCleanup());
 
         var retired = state.retireGenerationOwnership();
+        assertEquals(0, drained.get(), "State returns cleanup capabilities without executing them");
+        for (var handoff : retired.orphanedHandoffs()) {
+            if (callbackFails) { assertThrows(IllegalStateException.class, handoff::close); }
+            else { handoff.close(); }
+        }
         assertEquals("retirement reached an OPEN Prefill batch lease", retired.invariantFailure().getMessage());
         assertEquals(List.of(request), retired.ownedItems());
         assertTrue(retired.batchCompletions().isEmpty());
@@ -613,12 +595,8 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
-    void stopClosesOnlyTheCanonicalRouteLeaseAndNotifiesOutsideTheLock() {
-        AtomicInteger notifications = new AtomicInteger();
-        var ledger = new PrefillState(lock, waiting, clock::get, () -> {
-            assertFalse(lock.isHeldByCurrentThread());
-            notifications.incrementAndGet();
-        });
+    void stopClosesOnlyTheCanonicalRouteLease() {
+        var ledger = new PrefillState(lock, waiting, clock::get);
         RequestRoute item = item(1);
         lock.lock();
         PrefillState.RouteReservation lease;
@@ -631,9 +609,7 @@ class PrefillStateSnapshotTest {
         assertSame(item, ledger.detachNextActiveForStop());
         assertTrue(waitingItems().isEmpty());
         assertEquals(1L, ledger.observedRequestCount(), "stop callback still owns the retained identity");
-        assertEquals(1, notifications.get());
         lease.close();
-        assertEquals(1, notifications.get());
         assertThrows(IllegalStateException.class, () -> ledger.prepareRoute(item, 30L));
         lock.lock();
         try {
@@ -646,8 +622,8 @@ class PrefillStateSnapshotTest {
 
     @Test
     void activeRemovalLeavesOpenBatchLeaseWithPreparingTransaction() {
-        AtomicInteger released = new AtomicInteger(), drained = new AtomicInteger();
-        var ledger = new PrefillState(lock, waiting, clock::get, released::incrementAndGet);
+        AtomicInteger drained = new AtomicInteger();
+        var ledger = new PrefillState(lock, waiting, clock::get);
         var retiring = new EndpointGenerationLifecycle(drained::incrementAndGet);
         RequestRoute request = item(1);
         lock.lock();
@@ -671,7 +647,6 @@ class PrefillStateSnapshotTest {
         }
         lease.close();
         lease.close();
-        assertEquals(1, released.get());
         assertEquals(1, drained.get());
         lock.lock();
         try {
@@ -845,8 +820,6 @@ class PrefillStateSnapshotTest {
         var before = capture();
         long version = state.mutationVersion();
         var failure = new IllegalStateException("prediction unavailable");
-        var failedReductions = new AtomicInteger();
-        var publications = new AtomicInteger();
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setFinishedTaskInfo(Map.of("1", task(1, null, 500, 0)));
@@ -855,13 +828,11 @@ class PrefillStateSnapshotTest {
                 .freezeStatusResponse(response);
 
         assertSame(failure, assertThrows(IllegalStateException.class,
-                () -> state.reconcileWorkerStatus(observation, survivors -> {
+                () -> EndpointTestSupport.reconcile(state, observation, survivors -> {
                     assertEquals(List.of(b), survivors);
                     throw failure;
-                }, publications::incrementAndGet, failedReductions::incrementAndGet)));
+                })));
 
-        assertEquals(1, failedReductions.get());
-        assertEquals(0, publications.get());
         assertEquals(version, state.mutationVersion());
         assertSame(before.work(), capture().work());
         assertEquals(List.of(1L, 2L), state.committedSnapshot().batches().getFirst().requestIds());
@@ -870,9 +841,8 @@ class PrefillStateSnapshotTest {
         assertEquals(List.of(queued), waitingItems());
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void terminalBatchAndUnchangedBatchRetainTheirOwnFactsAcrossPublication(boolean publicationFails) {
+    @Test
+    void terminalBatchAndUnchangedBatchRetainTheirOwnFacts() {
         RequestRoute a = item(1), b = item(2), c = item(3), d = item(4);
         commitBatch(List.of(a, b), 300L);
         enqueue(c);
@@ -894,19 +864,10 @@ class PrefillStateSnapshotTest {
         response.setRunningTaskInfo(Map.of("3", activeC, "4", activeD));
         var observation = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
                 .freezeStatusResponse(response);
-        var failure = new IllegalStateException("status publication failed");
-        var failedReductions = new AtomicInteger();
-        var outcome = state.reconcileWorkerStatus(observation, unused -> {
+        var outcome = EndpointTestSupport.reconcile(state, observation, unused -> {
             throw new AssertionError("completed and unchanged batches need no new prediction");
-        }, () -> {
-            if (publicationFails) { throw failure; }
-        }, () -> {
-            failedReductions.incrementAndGet();
-            throw new AssertionError("secondary retirement failure");
         });
 
-        assertSame(publicationFails ? failure : null, outcome.publicationFailure());
-        assertEquals(publicationFails ? 1 : 0, failedReductions.get());
         assertEquals(4, outcome.schedulerFacts().size());
         assertEquals(List.of(1L, 2L), outcome.schedulerFacts().stream()
                 .filter(fact -> fact.kind() == PrefillState.WorkerStatusFact.Kind.COMPLETED)
@@ -1009,9 +970,7 @@ class PrefillStateSnapshotTest {
         response.setRunningTaskInfo(active);
         var observation = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
                 .freezeStatusResponse(response);
-        var outcome = state.reconcileWorkerStatus(observation,
-                repredictor, () -> { }, () -> { });
-        assertNull(outcome.publicationFailure());
+        var outcome = EndpointTestSupport.reconcile(state, observation, repredictor);
         return outcome;
     }
 
