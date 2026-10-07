@@ -5,6 +5,8 @@ import org.flexlb.util.PriorityNormalizer;
 import java.math.BigInteger;
 import java.util.Arrays;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Exact, overflow-free priority harm of an eviction plan.
  *
@@ -98,15 +100,8 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
     }
 
     private static void requireValidPriority(int priority) {
-        if (!PriorityNormalizer.isValid(priority)) {
-            throw new IllegalArgumentException(
-                    "priority must be in ["
-                            + PriorityNormalizer.MIN_PRIORITY
-                            + ", "
-                            + PriorityNormalizer.MAX_PRIORITY
-                            + "]: "
-                            + priority);
-        }
+        checkArgument(PriorityNormalizer.isValid(priority),
+                "priority must be in [" + PriorityNormalizer.MIN_PRIORITY + ", " + PriorityNormalizer.MAX_PRIORITY + "]: %s", priority);
     }
 
     /** Mutable accumulator used only while one immutable plan is built. */
@@ -120,9 +115,7 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
 
         public Builder add(int priority, BigInteger harm) {
             requireValidPriority(priority);
-            if (harm.signum() < 0) {
-                throw new IllegalArgumentException("harm must be non-negative: " + harm);
-            }
+            checkArgument(harm.signum() >= 0, "harm must be non-negative: %s", harm);
             if (harm.signum() != 0) {
                 harmByPriority[priority] = valueOrZero(harmByPriority[priority]).add(harm);
             }

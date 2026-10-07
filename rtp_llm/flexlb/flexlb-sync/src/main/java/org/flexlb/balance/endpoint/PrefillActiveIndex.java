@@ -14,6 +14,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.TreeSet;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Active request identities for one Prefill generation.
  *
@@ -118,9 +120,7 @@ public final class PrefillActiveIndex implements Iterable<RequestRoute> {
     public long version() { return version; }
 
     public boolean add(RequestRoute item) {
-        if (queue == null) {
-            throw new IllegalStateException("DIRECT Prefill generation has no active request index");
-        }
+        checkState(queue != null, "DIRECT Prefill generation has no active request index");
         Objects.requireNonNull(item, "item");
         if (identities.containsKey(item)) {
             return false;

@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalLong;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Immutable view of Prefill work which has crossed an endpoint lifecycle boundary.
  *
@@ -35,10 +37,7 @@ public final class WorkSnapshot {
         this.capturedAtMs = capturedAtMs;
         this.requests = List.copyOf(requests);
         this.batches = List.copyOf(batches);
-        if (unknownRequestCount < 0L) {
-            throw new IllegalArgumentException(
-                    "unknownRequestCount must be non-negative");
-        }
+        checkArgument(unknownRequestCount >= 0L, "unknownRequestCount must be non-negative");
         this.unknownRequestCount = unknownRequestCount;
 
         int runningCount = 0;
@@ -122,10 +121,7 @@ public final class WorkSnapshot {
                               long remainingWorkMs) {
 
         public RequestWork {
-            if (remainingWorkMs < 0L) {
-                throw new IllegalArgumentException(
-                        "remaining request work must be non-negative");
-            }
+            checkArgument(remainingWorkMs >= 0L, "remaining request work must be non-negative");
         }
     }
 
@@ -137,11 +133,8 @@ public final class WorkSnapshot {
 
         public BatchWork {
             requestIds = List.copyOf(requestIds);
-            if (remainingWorkMs.isPresent()
-                    && remainingWorkMs.getAsLong() < 0L) {
-                throw new IllegalArgumentException(
-                        "remaining batch work must be non-negative");
-            }
+            checkArgument(!remainingWorkMs.isPresent() || remainingWorkMs.getAsLong() >= 0L,
+                    "remaining batch work must be non-negative");
         }
 
         /** Convenience constructor for a batch with a known work estimate. */

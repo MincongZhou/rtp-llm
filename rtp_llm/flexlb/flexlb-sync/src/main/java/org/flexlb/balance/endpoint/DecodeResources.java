@@ -7,6 +7,7 @@ import org.flexlb.enums.DecodeTaskPhase;
 import java.util.Map;
 import java.util.function.Predicate;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.math.LongMath.saturatedAdd;
 
 /** Immutable Decode resource identities, capacity arithmetic, snapshots and observed facts. */
@@ -19,10 +20,8 @@ public final class DecodeResources {
             long reservationToken) {
 
         public ReservationHandle {
-            if (endpointGenerationId <= 0L || reservationToken <= 0L) {
-                throw new IllegalArgumentException(
-                        "Decode reservation identity must be positive");
-            }
+            checkArgument(endpointGenerationId > 0L && reservationToken > 0L,
+                    "Decode reservation identity must be positive");
         }
     }
 
@@ -101,10 +100,8 @@ public final class DecodeResources {
         public DecodeRequestStatus {
             java.util.Objects.requireNonNull(kind, "kind");
             java.util.Objects.requireNonNull(reservation, "reservation");
-            if (kind != Kind.TERMINAL && errorCode != 0L) {
-                throw new IllegalArgumentException(
-                        "only a terminal Decode request status may carry an error code");
-            }
+            checkArgument(kind == Kind.TERMINAL || errorCode == 0L,
+                    "only a terminal Decode request status may carry an error code");
         }
 
         public static DecodeRequestStatus active(ReservationHandle reservation) {
@@ -199,10 +196,7 @@ public final class DecodeResources {
             java.util.Objects.requireNonNull(address, "address");
             java.util.Objects.requireNonNull(topology, "topology");
             java.util.Objects.requireNonNull(workerStatus, "workerStatus");
-            if (generationId <= 0L) {
-                throw new IllegalArgumentException(
-                        "Decode routing view requires a positive generation");
-            }
+            checkArgument(generationId > 0L, "Decode routing view requires a positive generation");
         }
     }
 
@@ -244,11 +238,10 @@ public final class DecodeResources {
             long maxKvUsagePercent) {
 
         public AdmissionCapacity {
-            if (maxEngineRequests < 0L || maxKvUsagePercent <= 0L
-                    || maxKvUsagePercent > RoutingConfig.PERCENTAGE_SCALE) {
-                throw new IllegalArgumentException(
-                        "Decode admission limits are outside their domain");
-            }
+            checkArgument(maxEngineRequests >= 0L
+                    && maxKvUsagePercent > 0L
+                    && maxKvUsagePercent <= RoutingConfig.PERCENTAGE_SCALE,
+                    "Decode admission limits are outside their domain");
         }
 
         /** Use the same occupancy scope for the observation and every exact victim release. */
@@ -256,9 +249,8 @@ public final class DecodeResources {
                                         CapacityRelease release) {
             java.util.Objects.requireNonNull(usage, "usage");
             java.util.Objects.requireNonNull(release, "release");
-            if (hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
-                throw new IllegalArgumentException("Decode demand must satisfy expected >= hard >= 0");
-            }
+            checkArgument(hardKvTokens >= 0L && expectedKvTokens >= hardKvTokens,
+                    "Decode demand must satisfy expected >= hard >= 0");
             long requests = maxEngineRequests == 0L ? 0L
                     : shortfall(Math.max(0L, usage.occupiedRequests - release.requests),
                             1L, maxEngineRequests, 0L);
@@ -274,9 +266,7 @@ public final class DecodeResources {
 
         /** Integer arithmetic never rounds the configured KV budget up. */
         public long kvBudget(long totalKv) {
-            if (totalKv < 0L) {
-                throw new IllegalArgumentException("negative KV capacity");
-            }
+            checkArgument(totalKv >= 0L, "negative KV capacity");
             return totalKv / 100L * maxKvUsagePercent + totalKv % 100L * maxKvUsagePercent / 100L;
         }
 
@@ -292,10 +282,12 @@ public final class DecodeResources {
     public record CapacityUsage(long occupiedRequests, long totalKvTokens, long availableKvTokens,
                                 long hardReservedKvTokens, long expectedKvUsed) {
         public CapacityUsage {
-            if (occupiedRequests < 0L || totalKvTokens < 0L || availableKvTokens < 0L
-                    || hardReservedKvTokens < 0L || expectedKvUsed < 0L) {
-                throw new IllegalArgumentException("Decode occupancy must be non-negative");
-            }
+            checkArgument(occupiedRequests >= 0L
+                    && totalKvTokens >= 0L
+                    && availableKvTokens >= 0L
+                    && hardReservedKvTokens >= 0L
+                    && expectedKvUsed >= 0L,
+                    "Decode occupancy must be non-negative");
         }
 
         public long hardKvAvailable() {
@@ -307,15 +299,12 @@ public final class DecodeResources {
         public static final CapacityRelease NONE = new CapacityRelease(0L, 0L, 0L);
 
         public CapacityRelease {
-            if (requests < 0L || hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
-                throw new IllegalArgumentException("invalid Decode capacity release");
-            }
+            checkArgument(requests >= 0L && hardKvTokens >= 0L && expectedKvTokens >= hardKvTokens,
+                    "invalid Decode capacity release");
         }
 
         static long saturatedAddNonNegative(long left, long right) {
-            if (left < 0 || right < 0) {
-                throw new IllegalArgumentException("KV admission counters must be non-negative");
-            }
+            checkArgument(left >= 0 && right >= 0, "KV admission counters must be non-negative");
             return saturatedAdd(left, right);
         }
 

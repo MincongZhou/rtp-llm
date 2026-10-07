@@ -10,6 +10,8 @@ import java.util.NavigableSet;
 import java.util.TreeSet;
 import java.util.function.Predicate;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * FIFO or fixed-range PRIORITY index for the model queue.
  *
@@ -78,9 +80,7 @@ final class OrderedRequestQueue {
 
     /** Rare route withdrawal: restore the original position without issuing a new sequence. */
     void restore(GlobalQueueEntry entry) {
-        if (!entry.removed || entry.sequence <= 0L) {
-            throw new IllegalStateException("only a previously removed entry can be restored");
-        }
+        checkState(entry.removed && entry.sequence > 0L, "only a previously removed entry can be restored");
         insert(entry, true);
     }
 
@@ -126,10 +126,10 @@ final class OrderedRequestQueue {
 
     boolean remove(GlobalQueueEntry entry) {
         if (entry.removed) { return false; }
-        if (size <= 0) { throw new IllegalStateException("ordered queue size underflow"); }
+        checkState(size > 0, "ordered queue size underflow");
         int index = bucketIndex(entry);
         Bucket bucket = buckets[index];
-        if (bucket == null) { throw new IllegalStateException("ordered queue bucket is missing"); }
+        checkState(bucket != null, "ordered queue bucket is missing");
         readyRetries.remove(entry);
         bucket.remove(entry);
         if (bucket.nextToScan == null) { pendingPriorities.clear(index); }
@@ -148,7 +148,7 @@ final class OrderedRequestQueue {
                 entries.add(entry);
             }
         }
-        if (size != 0) { throw new IllegalStateException("ordered queue drain left active entries"); }
+        checkState(size == 0, "ordered queue drain left active entries");
         return entries;
     }
 
@@ -157,9 +157,8 @@ final class OrderedRequestQueue {
         private GlobalQueueEntry tail;
         private GlobalQueueEntry nextToScan;
         void insert(GlobalQueueEntry entry, boolean restoring) {
-            if (!entry.removed || entry.previous != null || entry.next != null) {
-                throw new IllegalStateException("ordered queue entry is already linked");
-            }
+            checkState(entry.removed && entry.previous == null && entry.next == null,
+                    "ordered queue entry is already linked");
             GlobalQueueEntry before = restoring ? head : null;
             while (before != null && before.sequence < entry.sequence) { before = before.next; }
             GlobalQueueEntry previous = before == null ? tail : before.previous;
@@ -177,19 +176,13 @@ final class OrderedRequestQueue {
                 nextToScan = next;
             }
             if (previous == null) {
-                if (head != entry) {
-                    throw new IllegalStateException(
-                            "ordered queue head linkage is inconsistent");
-                }
+                checkState(head == entry, "ordered queue head linkage is inconsistent");
                 head = next;
             } else {
                 previous.next = next;
             }
             if (next == null) {
-                if (tail != entry) {
-                    throw new IllegalStateException(
-                            "ordered queue tail linkage is inconsistent");
-                }
+                checkState(tail == entry, "ordered queue tail linkage is inconsistent");
                 tail = previous;
             } else {
                 next.previous = previous;

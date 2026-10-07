@@ -47,6 +47,9 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Standalone Java load client (replaces the legacy Python load client).
  *
@@ -175,9 +178,7 @@ public final class JavaLoadClient {
     public static void main(String[] args) throws Exception {
         Config config = Config.fromEnv();
         config.print();
-        if (config.traceFile.isEmpty()) {
-            throw new IllegalArgumentException("TRACE_FILE environment variable is required");
-        }
+        checkArgument(!config.traceFile.isEmpty(), "TRACE_FILE environment variable is required");
         JavaLoadClient client = new JavaLoadClient(config);
         try {
             client.run();
@@ -955,10 +956,8 @@ public final class JavaLoadClient {
     private static EngineRpcService.RoleAddrPB toRoleAddrPb(
             EngineRpcService.RoleTypePB roleType, String addr) {
         int colon = addr.lastIndexOf(':');
-        if (colon <= 0 || colon == addr.length() - 1) {
-            throw new IllegalArgumentException(
-                    "invalid engine address '" + addr + "' (expected host:port)");
-        }
+        checkArgument(colon > 0 && colon != addr.length() - 1,
+                "invalid engine address '%s' (expected host:port)", addr);
         int grpcPort;
         try {
             grpcPort = Integer.parseInt(addr.substring(colon + 1));
@@ -978,10 +977,8 @@ public final class JavaLoadClient {
 
     private static String roundRobinAddr(List<String> addrs, AtomicInteger rr, String emptyError) {
         if (addrs.isEmpty()) {
-            if (emptyError.isEmpty()) {
-                return "";
-            }
-            throw new IllegalStateException(emptyError);
+            checkState(emptyError.isEmpty(), emptyError);
+            return "";
         }
         int idx = Math.floorMod(rr.getAndIncrement(), addrs.size());
         return addrs.get(idx);
@@ -1461,9 +1458,7 @@ public final class JavaLoadClient {
         if (numShards <= 1) {
             return new ArrayList<>(records);
         }
-        if (shardIndex < 0 || shardIndex >= numShards) {
-            throw new IllegalArgumentException("SHARD_INDEX must be in [0, NUM_SHARDS)");
-        }
+        checkArgument(shardIndex >= 0 && shardIndex < numShards, "SHARD_INDEX must be in [0, NUM_SHARDS)");
         List<TraceRecord> sharded = new ArrayList<>();
         for (int i = 0; i < records.size(); i++) {
             if (i % numShards == shardIndex) {
@@ -1845,18 +1840,11 @@ public final class JavaLoadClient {
             this.sendModeQps = sendModeQps;
             this.rampUpSeconds = rampUpSeconds;
             this.replayUniquePrefix = replayUniquePrefix;
-            if (!"replay".equals(sendMode) && !"uniform".equals(sendMode)) {
-                throw new IllegalArgumentException(
-                        "SEND_MODE must be 'replay' or 'uniform', got '" + sendMode + "'");
-            }
-            if ("uniform".equals(sendMode) && sendModeQps <= 0) {
-                throw new IllegalArgumentException(
-                        "SEND_MODE=uniform requires SEND_MODE_QPS > 0 (total target QPS)");
-            }
-            if (rampUpSeconds < 0) {
-                throw new IllegalArgumentException(
-                        "RAMP_UP_SECONDS must be >= 0, got " + rampUpSeconds);
-            }
+            checkArgument("replay".equals(sendMode) || "uniform".equals(sendMode),
+                    "SEND_MODE must be 'replay' or 'uniform', got '%s'", sendMode);
+            checkArgument(!"uniform".equals(sendMode) || !(sendModeQps <= 0),
+                    "SEND_MODE=uniform requires SEND_MODE_QPS > 0 (total target QPS)");
+            checkArgument(!(rampUpSeconds < 0), "RAMP_UP_SECONDS must be >= 0, got %s", rampUpSeconds);
         }
 
         boolean isUniform() {
@@ -1884,10 +1872,8 @@ public final class JavaLoadClient {
                     continue;
                 }
                 int colon = addr.lastIndexOf(':');
-                if (colon <= 0 || colon == addr.length() - 1) {
-                    throw new IllegalArgumentException(
-                            "invalid GRPC_TARGETS entry '" + addr + "' (expected host:port)");
-                }
+                checkArgument(colon > 0 && colon != addr.length() - 1,
+                        "invalid GRPC_TARGETS entry '%s' (expected host:port)", addr);
                 try {
                     int port = Integer.parseInt(addr.substring(colon + 1));
                     if (port <= 0 || port > 65535) {
@@ -1901,11 +1887,7 @@ public final class JavaLoadClient {
                     out.add(addr);
                 }
             }
-            if (out.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "GRPC_TARGETS is set but contains no valid host:port address: '"
-                                + raw + "'");
-            }
+            checkArgument(!out.isEmpty(), "GRPC_TARGETS is set but contains no valid host:port address: '%s'", raw);
             return out;
         }
 

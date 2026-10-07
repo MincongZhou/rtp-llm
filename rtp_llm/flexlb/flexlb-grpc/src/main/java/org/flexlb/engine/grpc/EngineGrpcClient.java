@@ -28,6 +28,8 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Engine gRPC client for worker status queries
  */
@@ -60,14 +62,9 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                                     + DEFAULT_ENQUEUE_TIMEOUT_MILLIS + "}")
                             long enqueueTimeoutMillis) {
         super(grpcReporter);
-        if (enqueueTimeoutMillis <= 0L) {
-            throw new IllegalArgumentException("enqueueTimeoutMillis must be positive");
-        }
+        checkArgument(enqueueTimeoutMillis > 0L, "enqueueTimeoutMillis must be positive");
         this.enqueueTimeoutMillis = enqueueTimeoutMillis;
-        if (connectTimeoutMillis <= 0) {
-            throw new IllegalArgumentException(
-                    "connectTimeoutMillis must be positive");
-        }
+        checkArgument(connectTimeoutMillis > 0, "connectTimeoutMillis must be positive");
         this.executor = executor;
         this.eventLoopGroup = eventLoopGroup;
         this.connectTimeoutMillis = connectTimeoutMillis;

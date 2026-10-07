@@ -10,6 +10,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Shared workers for exact request facts after they leave queue ownership.
  */
@@ -37,9 +39,7 @@ final class RequestContinuationExecutor implements AutoCloseable {
         Objects.requireNonNull(fact, "fact");
         boolean start;
         synchronized (lifecycle) {
-            if (!accepting) {
-                throw new IllegalStateException("request continuation executor is closed");
-            }
+            checkState(accepting, "request continuation executor is closed");
             AbstractRequestScheduler owner = context.scheduler();
             start = !queues.containsKey(context);
             queues.computeIfAbsent(context, ignored -> new ArrayDeque<>()).addLast(() -> {

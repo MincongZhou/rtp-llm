@@ -25,6 +25,7 @@ import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 
@@ -56,10 +57,8 @@ public final class PrefillState {
             R reservation) {
         public ReservationResult {
             Objects.requireNonNull(status, "status");
-            if ((status == CapacityStatus.ACQUIRED) != (reservation != null)) {
-                throw new IllegalArgumentException(
-                        "only ACQUIRED may carry a reservation");
-            }
+            checkArgument((status == CapacityStatus.ACQUIRED) == (reservation != null),
+                    "only ACQUIRED may carry a reservation");
         }
     }
 
@@ -71,10 +70,8 @@ public final class PrefillState {
         public PrefillRequestStatus {
             Objects.requireNonNull(route, "route");
             Objects.requireNonNull(kind, "kind");
-            if (kind == Kind.ACTIVE && errorCode != 0L) {
-                throw new IllegalArgumentException(
-                        "an active Prefill request status cannot carry an error code");
-            }
+            checkArgument(kind != Kind.ACTIVE || errorCode == 0L,
+                    "an active Prefill request status cannot carry an error code");
         }
 
         public static PrefillRequestStatus active(RequestRoute route) {
@@ -83,10 +80,7 @@ public final class PrefillState {
 
         public static PrefillRequestStatus terminal(
                 RequestRoute route, Kind kind, long errorCode) {
-            if (kind == Kind.ACTIVE) {
-                throw new IllegalArgumentException(
-                        "terminal Prefill request status requires a terminal kind");
-            }
+            checkArgument(kind != Kind.ACTIVE, "terminal Prefill request status requires a terminal kind");
             return new PrefillRequestStatus(route, kind, errorCode);
         }
 
@@ -138,11 +132,11 @@ public final class PrefillState {
             int batchCount,
             long maxObservedAgeMs) {
         public Stats {
-            if (locallyOwnedRequests < 0 || individuallyOwnedRequests < 0
-                    || batchCount < 0 || maxObservedAgeMs < 0L) {
-                throw new IllegalArgumentException(
-                        "Prefill state stats must be non-negative");
-            }
+            checkArgument(locallyOwnedRequests >= 0
+                    && individuallyOwnedRequests >= 0
+                    && batchCount >= 0
+                    && maxObservedAgeMs >= 0L,
+                    "Prefill state stats must be non-negative");
         }
     }
 
@@ -239,13 +233,8 @@ public final class PrefillState {
                           long predictedWorkMs,
                           PrefillBatchFeatures originalFeatures,
                           long nowMs) {
-            if (batchId < 0L) {
-                throw new IllegalArgumentException("batchId must be non-negative");
-            }
-            if (predictedWorkMs < 0L) {
-                throw new IllegalArgumentException(
-                        "predicted batch work must be non-negative");
-            }
+            checkArgument(batchId >= 0L, "batchId must be non-negative");
+            checkArgument(predictedWorkMs >= 0L, "predicted batch work must be non-negative");
             this.batchId = batchId;
             this.members = members;
             this.originalPredictionMs = predictedWorkMs;
@@ -324,10 +313,7 @@ public final class PrefillState {
         }
 
         private void commitIndividual(long predictedMs, long nowMs) {
-            if (!isActive()) {
-                throw new IllegalStateException(
-                        "request is not an ACTIVE route request_id=" + item.requestId());
-            }
+            checkState(isActive(), "request is not an ACTIVE route request_id=%s", item.requestId());
             remainingWorkMs = Math.clamp(predictedMs, 0L, (long) Integer.MAX_VALUE);
             phaseBaseMs = nowMs;
             queueMembership = QueueMembership.UNINDEXED;
@@ -336,23 +322,16 @@ public final class PrefillState {
         }
 
         private void commitBatch(BatchWork work) {
-            if (!isActive()) {
-                throw new IllegalStateException(
-                        "request is not an ACTIVE batch member request_id=" + item.requestId());
-            }
+            checkState(isActive(), "request is not an ACTIVE batch member request_id=%s", item.requestId());
             batchWork = work;
             reservation = null;
             queueMembership = QueueMembership.UNINDEXED;
         }
 
         private void observeIndividualPhase(Phase next, long nowMs) {
-            if (next != Phase.ENGINE_QUEUED && next != Phase.ENGINE_RUNNING) {
-                throw new IllegalArgumentException("invalid Engine phase " + next);
-            }
-            if (batchWork != null || individualPhase == null) {
-                throw new IllegalStateException(
-                        "request is not individual request_id=" + item.requestId());
-            }
+            checkArgument(next == Phase.ENGINE_QUEUED || next == Phase.ENGINE_RUNNING, "invalid Engine phase %s", next);
+            checkState(batchWork == null && individualPhase != null,
+                    "request is not individual request_id=%s", item.requestId());
             remainingWorkMs = remainingWorkAt(nowMs);
             phaseBaseMs = Math.max(phaseBaseMs, nowMs);
             individualPhase = next;
@@ -438,9 +417,7 @@ public final class PrefillState {
         }
 
         private TerminalObservation merge(TerminalObservation other) {
-            if (owner != other.owner) {
-                throw new IllegalArgumentException("cannot merge different terminal owners");
-            }
+            checkArgument(owner == other.owner, "cannot merge different terminal owners");
             return new TerminalObservation(owner,
                     Math.max(executionTimeMs, other.executionTimeMs),
                     errorCode != 0L ? errorCode : other.errorCode,
@@ -541,9 +518,7 @@ public final class PrefillState {
     }
 
     public QueueSnapshot captureQueue(int limit) {
-        if (limit <= 0) {
-            throw new IllegalArgumentException("queue capture limit must be positive");
-        }
+        checkArgument(limit > 0, "queue capture limit must be positive");
         lock.lock();
         try {
             List<RequestRoute> items = new ArrayList<>(Math.min(limit, activeIndex.size()));
@@ -855,7 +830,7 @@ public final class PrefillState {
     }
 
     private static void requirePositiveBatchLimit(int maximum) {
-        if (maximum <= 0) { throw new IllegalArgumentException("maximumInflightBatches must be positive"); }
+        checkArgument(maximum > 0, "maximumInflightBatches must be positive");
     }
 
     CommittedHandoff commitRouteGroupLocked(
@@ -864,27 +839,15 @@ public final class PrefillState {
             EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         requireLock();
         Objects.requireNonNull(generationHandoff, "generationHandoff");
-        if (exactReservations.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "route commit requires at least one reservation");
-        }
+        checkArgument(!exactReservations.isEmpty(), "route commit requires at least one reservation");
         validateGroupLocked(items, false);
-        if (items.size() != exactReservations.size()) {
-            throw new IllegalArgumentException(
-                    "route commit requires one exact lease per member");
-        }
+        checkArgument(items.size() == exactReservations.size(), "route commit requires one exact lease per member");
         for (int index = 0; index < items.size(); index++) {
             RequestEntry entry = requests.get(items.get(index).requestId());
             RouteReservation lease = exactReservations.get(index);
-            if (lease == null || lease.owner != this) {
-                throw new IllegalArgumentException("route reservation belongs to another Prefill ledger");
-            }
-            if (entry.reservation != lease
-                    || lease.originalOwner != entry) {
-                throw new IllegalStateException(
-                        "route commit does not own exact OPEN lease request_id="
-                                + items.get(index).requestId());
-            }
+            checkArgument(lease != null && lease.owner == this, "route reservation belongs to another Prefill ledger");
+            checkState(entry.reservation == lease && lease.originalOwner == entry,
+                    "route commit does not own exact OPEN lease request_id=%s", items.get(index).requestId());
         }
         long nowMs = clock.getAsLong();
         CommittedHandoff committedHandoff = new CommittedHandoff(generationHandoff,
@@ -908,9 +871,7 @@ public final class PrefillState {
             EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         requireLock();
         Objects.requireNonNull(generationHandoff, "generationHandoff");
-        if (items.size() != predictions.length) {
-            throw new IllegalArgumentException("route commit requires one prediction per member");
-        }
+        checkArgument(items.size() == predictions.length, "route commit requires one prediction per member");
         validateGroupLocked(items, true);
         for (RequestRoute item : items) {
             checkState(requests.get(item.requestId()).reservation == null,
@@ -937,22 +898,16 @@ public final class PrefillState {
         RequestEntry head = lease.originalOwner == null ? null
                 : requests.get(lease.originalOwner.item.requestId());
         RequestRoute headItem = head == null || !head.isActive() ? null : head.item;
-        if (head == null
-                || head.reservation != lease
-                || !items.contains(headItem)
-                || lease.generationHandoff == null) {
-            throw new IllegalStateException(
-                    "batch commit does not own exact OPEN lease batch_id="
-                            + lease.batchId);
-        }
+        checkState(head != null
+                && head.reservation == lease
+                && items.contains(headItem)
+                && lease.generationHandoff != null,
+                "batch commit does not own exact OPEN lease batch_id=%s", lease.batchId);
         for (RequestRoute item : items) {
             RequestEntry member = requests.get(item.requestId());
             Reservation expected = item == headItem ? lease : null;
-            if (member.reservation != expected) {
-                throw new IllegalStateException(
-                        "batch member owns another exact reservation request_id="
-                                + item.requestId());
-            }
+            checkState(member.reservation == expected,
+                    "batch member owns another exact reservation request_id=%s", item.requestId());
         }
         long nowMs = clock.getAsLong();
         Set<RequestEntry> members = new HashSet<>(items.size());
@@ -1016,9 +971,7 @@ public final class PrefillState {
     public ReservationResult<RouteReservation> reserveUnqueuedRoute(
             RequestRoute item, long predictedMs, long maxOutstandingRequests) {
         Objects.requireNonNull(item, "item");
-        if (maxOutstandingRequests < 0L) {
-            throw new IllegalArgumentException("request limit must be non-negative");
-        }
+        checkArgument(maxOutstandingRequests >= 0L, "request limit must be non-negative");
         lock.lock();
         try {
             if (requests.containsKey(item.requestId())) {
@@ -1243,13 +1196,12 @@ public final class PrefillState {
     /** Null means the out-of-lock prediction was invalidated; no fact has changed. */
     public StatusReconciliation commitStatusLocked(StatusReduction reduction, Map<Long, Long> predictions) {
         requireLock();
-        if (reduction.owner != this) { throw new IllegalArgumentException("Status reduction belongs to another State"); }
+        checkArgument(reduction.owner == this, "Status reduction belongs to another State");
         if (reduction.version != mutationVersion) { return null; }
-        if (!predictions.keySet().equals(reduction.predictionInputs.keySet())) {
-            throw new IllegalArgumentException("Predictions do not match the prepared batches");
-        }
+        checkArgument(predictions.keySet().equals(reduction.predictionInputs.keySet()),
+                "Predictions do not match the prepared batches");
         for (long prediction : predictions.values()) {
-            if (prediction < 0L) { throw new IllegalArgumentException("Negative batch prediction"); }
+            checkArgument(prediction >= 0L, "Negative batch prediction");
         }
         // Allocate the result before the first ownership mutation.
         boolean capacityReleased = !reduction.terminals.isEmpty()
@@ -1585,8 +1537,8 @@ public final class PrefillState {
 
     /** Consume only open preparation and return any generation capability to its execution owner. */
     public PreparationRollback rollbackPreparation(Reservation reservation) {
-        if (reservation.owner != this) { throw new IllegalArgumentException("Preparation belongs to another State"); }
-        if (lock.isHeldByCurrentThread()) { throw new IllegalStateException("Preparation rollback cannot run under ownershipLock"); }
+        checkArgument(reservation.owner == this, "Preparation belongs to another State");
+        checkState(!lock.isHeldByCurrentThread(), "Preparation rollback cannot run under ownershipLock");
         lock.lock();
         try {
             if (reservation.originalOwner == null) { return PreparationRollback.UNCHANGED; }
@@ -1629,18 +1581,12 @@ public final class PrefillState {
         RequestEntry originalOwner = lease.originalOwner;
         RequestEntry current = requests.get(originalOwner.item.requestId());
         if (current == originalOwner) {
-            if (current.reservation != lease) {
-                throw new IllegalStateException(
-                        "canonical Prefill lease owner lost its exact reservation"
-                                + " request_id=" + originalOwner.item.requestId());
-            }
+            checkState(current.reservation == lease,
+                    "canonical Prefill lease owner lost its exact reservation request_id=%s", originalOwner.item.requestId());
             return current;
         }
-        if (current != null && current.reservation == lease) {
-            throw new IllegalStateException(
-                    "replacement request cannot own an earlier Prefill lease"
-                            + " request_id=" + originalOwner.item.requestId());
-        }
+        checkState(current == null || current.reservation != lease,
+                "replacement request cannot own an earlier Prefill lease request_id=%s", originalOwner.item.requestId());
         return null;
     }
 

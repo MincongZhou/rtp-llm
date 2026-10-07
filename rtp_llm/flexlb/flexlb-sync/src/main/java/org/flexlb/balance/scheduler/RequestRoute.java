@@ -10,6 +10,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * One exact worker assignment for a request, created before publication.
  * BalanceContext records the whole request lifecycle; this identity fences callbacks
@@ -26,9 +28,8 @@ public final class RequestRoute implements GroupPlanner.Input {
             DecodeResources.ReservationHandle decodeReservation, long enqueuedAtMs) {
         Objects.requireNonNull(context, "context");
         RequestRequirements frozenDecode = Objects.requireNonNull(context.getRequirements(), "registered request inputs");
-        if (decodeReservation != null && decodeReservation.requestId() != frozenDecode.requestId()) {
-            throw new IllegalArgumentException("Decode reservation belongs to another request");
-        }
+        checkArgument(decodeReservation == null || decodeReservation.requestId() == frozenDecode.requestId(),
+                "Decode reservation belongs to another request");
         if (context.getWorkerEnqueueSequence() == 0L) {
             context.initializeWorkerQueue(enqueuedAtMs, WORKER_ENQUEUE_SEQUENCE::incrementAndGet);
         }
@@ -39,9 +40,7 @@ public final class RequestRoute implements GroupPlanner.Input {
     static RequestRoute create(
             BalanceContext context, ProvisionalRoute admission, long enqueuedAtMs) {
         admission.requireProvisional();
-        if (context.getRequestId() != admission.requestId()) {
-            throw new IllegalArgumentException("admission cannot build another request");
-        }
+        checkArgument(context.getRequestId() == admission.requestId(), "admission cannot build another request");
         return create(context, admission.response(),
                 ServerStatus.copyOf(admission.prefillStatus()), ServerStatus.copyOf(admission.decodeStatus()),
                 admission.prefillEndpoint(), admission.decodeEndpoint(), admission.decodeReservation(), enqueuedAtMs);

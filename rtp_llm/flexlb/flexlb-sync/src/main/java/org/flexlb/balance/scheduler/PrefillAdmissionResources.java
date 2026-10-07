@@ -12,6 +12,7 @@ import org.flexlb.util.Logger;
 import java.util.List;
 import java.util.Objects;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted;
 import static org.flexlb.balance.delivery.CapacityBoundary.Attempt.rejected;
 
@@ -46,7 +47,7 @@ final class PrefillAdmissionResources {
         }
 
         boolean transferToEndpoint(RequestRoute exact) {
-            if (item != exact) { throw new IllegalArgumentException("handoff belongs to another exact route"); }
+            checkArgument(item == exact, "handoff belongs to another exact route");
             if (decode == null) { return true; }
             return switch (decode.dispatch()) {
                 case TRANSFERRED -> true;

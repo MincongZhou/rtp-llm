@@ -20,6 +20,8 @@ import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /** Owns scheduler maintenance, metrics traversal, and ordered shutdown. */
 @Component
 public final class SchedulerRuntime {
@@ -78,8 +80,8 @@ public final class SchedulerRuntime {
 
     void initializeScheduler(RequestScheduler scheduler) {
         synchronized (schedulerLock) {
-            if (stopping) { throw new IllegalStateException("scheduler is closed"); }
-            if (this.scheduler != null) { throw new IllegalStateException("scheduler already initialized"); }
+            checkState(!stopping, "scheduler is closed");
+            checkState(this.scheduler == null, "scheduler already initialized");
             FlexlbConfig startupConfig = config.loadBalanceConfig();
             if (startupConfig.isQueue()) {
                 endpoints.configureQueue(QueueExecutionSettings.capture(startupConfig));

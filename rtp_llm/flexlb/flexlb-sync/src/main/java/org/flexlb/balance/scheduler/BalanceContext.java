@@ -38,6 +38,8 @@ import java.util.function.BiConsumer;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 import static org.flexlb.dao.loadbalance.Response.buildSuccessResponse;
@@ -72,9 +74,7 @@ public class BalanceContext {
 
     /** 绑定本请求的调度所有者；RequestRepository 在 context 锁内调用，绑定后不可更换 owner。 */
     void bindScheduler(AbstractRequestScheduler owner) {
-        if (scheduler != null && scheduler != owner) {
-            throw new IllegalStateException("request scheduler ownership cannot change");
-        }
+        checkState(scheduler == null || scheduler == owner, "request scheduler ownership cannot change");
         scheduler = Objects.requireNonNull(owner, "scheduler owner");
     }
 
@@ -146,10 +146,10 @@ public class BalanceContext {
 
     /** External callers may initialize a context; registered futures cannot be replaced or rebound. */
     public synchronized void setFuture(CompletableFuture<Response> future) {
-        if ((this.future instanceof RequestFuture
-                || future instanceof RequestFuture) && this.future != future) {
-            throw new IllegalStateException("registered request future cannot be replaced or rebound");
-        }
+        checkState(!(this.future instanceof RequestFuture)
+                && !(future instanceof RequestFuture)
+                || this.future == future,
+                "registered request future cannot be replaced or rebound");
         this.future = future;
     }
 
@@ -244,9 +244,8 @@ public class BalanceContext {
     private SchedulingMetadata schedulingMetadata;
 
     public synchronized void setSchedulingMetadata(SchedulingMetadata metadata) {
-        if (this.future instanceof RequestFuture && schedulingMetadata != metadata) {
-            throw new IllegalStateException("registered scheduling metadata is immutable");
-        }
+        checkState(!(this.future instanceof RequestFuture) || schedulingMetadata == metadata,
+                "registered scheduling metadata is immutable");
         schedulingMetadata = metadata;
     }
 
@@ -515,9 +514,9 @@ public class BalanceContext {
             admission.prefillRetirement = candidate;
             return;
         }
-        if (admission.prefillRetirement.source != candidate.source || admission.prefillRetirement.item != candidate.item) {
-            throw new IllegalStateException("admission observed another Prefill generation for request " + this.getRequestId());
-        }
+        checkState(admission.prefillRetirement.source == candidate.source
+                && admission.prefillRetirement.item == candidate.item,
+                "admission observed another Prefill generation for request %s", this.getRequestId());
     }
 
     boolean ownsPrefillRouteLocked(PrefillEndpoint source, RequestRoute expected) {
@@ -573,9 +572,8 @@ public class BalanceContext {
     }
 
     CancelReason requireCancellationFirstCauseLocked() {
-        if (this.cancellationReason == null) {
-            throw new IllegalStateException("missing cancellation first cause for request " + this.getRequestId());
-        }
+        checkState(this.cancellationReason != null,
+                "missing cancellation first cause for request %s", this.getRequestId());
         return this.cancellationReason;
     }
 
@@ -601,9 +599,7 @@ public class BalanceContext {
             if (!this.isOpen()) {
                 return false;
             }
-            if (this.requestDeadline != null) {
-                throw new IllegalStateException("request deadline already installed for " + this.getRequestId());
-            }
+            checkState(this.requestDeadline == null, "request deadline already installed for %s", this.getRequestId());
             this.requestDeadline = exact;
             this.assertInvariantLocked();
             return true;
@@ -612,9 +608,7 @@ public class BalanceContext {
 
     void configureInactivityTimeout(long timeoutMs) {
         synchronized (this) {
-            if (timeoutMs <= 0L) {
-                throw new IllegalArgumentException("request inactivity timeout must be positive");
-            }
+            checkArgument(timeoutMs > 0L, "request inactivity timeout must be positive");
             this.inactivityTimeoutMs = timeoutMs;
         }
     }
@@ -663,16 +657,10 @@ public class BalanceContext {
     DecisionDeadline updateDeliveryPredictionLocked(WorkSnapshot precedingWork, long unstartedWorkMs, long nowMs) {
         this.requireContextLock("delivery prediction consumption");
         Objects.requireNonNull(precedingWork, "precedingWork");
-        if (unstartedWorkMs < 0L) {
-            throw new IllegalArgumentException("unstarted work must be non-negative");
-        }
-        if (this.deliveryPredictionConsumed) {
-            throw new IllegalStateException("delivery prediction already consumed");
-        }
+        checkArgument(unstartedWorkMs >= 0L, "unstarted work must be non-negative");
+        checkState(!this.deliveryPredictionConsumed, "delivery prediction already consumed");
         double lifetime = this.route.ctx().getConfig().getRequestLifecycle().getDecision().getLifetime();
-        if (!Double.isFinite(lifetime) || lifetime < 1.0) {
-            throw new IllegalArgumentException("invalid decision lifetime");
-        }
+        checkArgument(Double.isFinite(lifetime) && !(lifetime < 1.0), "invalid decision lifetime");
         this.deliveryPredictionConsumed = true;
         if (!this.decodeAccepted) {
             if (this.prefillCompletedAtMs > 0L) {
@@ -795,9 +783,8 @@ public class BalanceContext {
             var prefill = route.prefill();
             CancelTarget cancelTarget = prefill == null ? null
                     : new CancelTarget(prefill.getServerIp(), prefill.getGrpcPort());
-            if (cancelTarget == null || !cancelTarget.isRoutable()) {
-                throw new IllegalStateException("Priority victim has no routable Cancel target request_id=" + getRequestId());
-            }
+            checkState(cancelTarget != null && cancelTarget.isRoutable(),
+                    "Priority victim has no routable Cancel target request_id=%s", getRequestId());
             preemption = new PreemptionRegistration(this, attemptToken, detail, cancelTarget);
             this.assertInvariantLocked();
             return preemption;
@@ -822,9 +809,10 @@ public class BalanceContext {
 
     void requireCleanupOwner(TerminalAction action) {
         synchronized (this) {
-            if (this.stage != RequestStage.FINALIZING || action.requestContext() != this || action.item() != this.route) {
-                throw new IllegalStateException("cleanup does not own request " + this.getRequestId());
-            }
+            checkState(this.stage == RequestStage.FINALIZING
+                    && action.requestContext() == this
+                    && action.item() == this.route,
+                    "cleanup does not own request %s", this.getRequestId());
         }
     }
 
@@ -855,9 +843,7 @@ public class BalanceContext {
     }
 
     void requireOutsideContextLock(String operation) {
-        if (Thread.holdsLock(this)) {
-            throw new IllegalStateException(operation + " must run outside the BalanceContext lock");
-        }
+        checkState(!Thread.holdsLock(this), "%s must run outside the BalanceContext lock", operation);
     }
 
     private void advanceStageLocked(RequestStage next) {
@@ -878,16 +864,12 @@ public class BalanceContext {
             case FINISHED ->
                 false;
         };
-        if (!allowed) {
-            throw new IllegalStateException("invalid request stage " + this.stage + " -> " + next);
-        }
+        checkState(allowed, "invalid request stage %s -> %s", this.stage, next);
         this.stage = next;
     }
 
     private static long deadlineAfter(long startedAtMs, long durationMs) {
-        if (startedAtMs < 0L || durationMs <= 0L) {
-            throw new IllegalArgumentException("deadline requires a valid start and positive duration");
-        }
+        checkArgument(startedAtMs >= 0L && durationMs > 0L, "deadline requires a valid start and positive duration");
         return saturatedAdd(startedAtMs, durationMs);
     }
 
@@ -934,9 +916,7 @@ public class BalanceContext {
          */
         public void terminate(Response failure) {
             Objects.requireNonNull(failure, "failure");
-            if (failure.isSuccess()) {
-                throw new IllegalArgumentException("admission termination requires a failure");
-            }
+            checkArgument(!failure.isSuccess(), "admission termination requires a failure");
             if (resolved.compareAndSet(false, true)) {
                 completion.accept(this, failure);
             }
@@ -953,7 +933,7 @@ public class BalanceContext {
 
         @Override
         public void close() {
-            if (!resolved.get()) { throw new IllegalStateException("admission must be explicitly finished"); }
+            checkState(resolved.get(), "admission must be explicitly finished");
         }
     }
 
@@ -1016,8 +996,8 @@ public class BalanceContext {
         public void complete(DeliveryResult result) {
             Objects.requireNonNull(result, "delivery result");
             synchronized (owner) {
-                if (kind != DeliveryClaimKind.BATCH_ENQUEUE) { throw new IllegalStateException("not a batch delivery"); }
-                if (senderFinished) { throw new IllegalStateException("delivery already completed: " + item.requestId()); }
+                checkState(kind == DeliveryClaimKind.BATCH_ENQUEUE, "not a batch delivery");
+                checkState(!senderFinished, "delivery already completed: %s", item.requestId());
                 senderFinished = true;
                 sendOutcome = switch (result.status()) {
                     case NOT_SENT -> SendOutcome.NOT_SENT;
@@ -1139,9 +1119,10 @@ public class BalanceContext {
 
     static SelectedResponse selectPublication(BalanceContext ctx, PublicationPermit permit, ResponseCompletion completion, Response response, Throwable failure, boolean mayInterruptIfRunning) {
         ctx.requireOutsideContextLock("response selection");
-        if (permit.requestContext != ctx || completion != ResponseCompletion.RESPONSE && permit.kind != PublicationKind.TERMINAL) {
-            throw new IllegalArgumentException("incompatible publication permit");
-        }
+        checkArgument(permit.requestContext == ctx
+                && (completion == ResponseCompletion.RESPONSE
+                || permit.kind == PublicationKind.TERMINAL),
+                "incompatible publication permit");
         permit.consumeForSelection();
         try {
             synchronized (ctx) {
@@ -1190,9 +1171,8 @@ public class BalanceContext {
         }
 
         void consumeForSelection() {
-            if (!consumed.compareAndSet(false, true)) {
-                throw new IllegalStateException("response selection permit already consumed for request " + requestContext.getRequestId());
-            }
+            checkState(consumed.compareAndSet(false, true),
+                    "response selection permit already consumed for request %s", requestContext.getRequestId());
         }
     }
 
@@ -1337,9 +1317,7 @@ public class BalanceContext {
      */
     TerminalAction claimFinalizationLocked(DeferredTerminal event, TerminalOutcome transition, Response response, boolean requestPublication, Supplier<PublicationPermit> publication) {
         this.requireContextLock("terminal claim");
-        if (transition == null) {
-            throw new IllegalStateException("terminal transition is required for request " + this.getRequestId());
-        }
+        checkState(transition != null, "terminal transition is required for request %s", this.getRequestId());
         if (terminalAction != null || !this.ownsResourceTrackingLocked() || admission != null || this.cleanup != null && (!this.cleanup.ready() || preemption != null && !preemption.isFinished())) {
             return null;
         }
@@ -1450,9 +1428,7 @@ public class BalanceContext {
 
     void detachWithdrawnRoute(AdmissionHandle operation, RequestRoute exact) {
         requireContextLock("route withdrawal");
-        if (admission != operation || route != exact) {
-            throw new IllegalStateException("route withdrawal lost its owner: " + getRequestId());
-        }
+        checkState(admission == operation && route == exact, "route withdrawal lost its owner: %s", getRequestId());
         route = null;
         detail = "queued after Decode reservation withdrawal";
         updatedAtMs = System.currentTimeMillis();
@@ -1471,18 +1447,16 @@ public class BalanceContext {
 
     void rejectRoutePublication(RequestRoute exact) {
         requireContextLock("route publication rollback");
-        if (stage != RequestStage.ROUTING || route != exact || admission == null) {
-            throw new IllegalStateException("request route publication ownership changed for " + getRequestId());
-        }
+        checkState(stage == RequestStage.ROUTING && route == exact && admission != null,
+                "request route publication ownership changed for %s", getRequestId());
         route = null;
         assertInvariantLocked();
     }
 
     void confirmRoutePublication(RequestRoute exact) {
         requireContextLock("route publication confirmation");
-        if (route != exact || stage != RequestStage.ROUTING) {
-            throw new IllegalStateException("route publication lost its owner for " + getRequestId());
-        }
+        checkState(route == exact && stage == RequestStage.ROUTING,
+                "route publication lost its owner for %s", getRequestId());
         advanceStageLocked(RequestStage.READY_TO_DELIVER);
         assertInvariantLocked();
     }
@@ -1616,9 +1590,8 @@ public class BalanceContext {
 
     void selectQueuedCancellation(boolean interrupt) {
         requireContextLock("queued cancellation");
-        if (selectedResponse != null || cancellationReason == null) {
-            throw new IllegalStateException("queued cancellation has no response ownership");
-        }
+        checkState(selectedResponse == null && cancellationReason != null,
+                "queued cancellation has no response ownership");
         selectedResponse = new ResponseResult(ResponseCompletion.CANCELLATION, null, null, interrupt);
     }
 
@@ -1687,7 +1660,7 @@ public class BalanceContext {
 
     void finishTerminalEffectsLocked(TerminalAction action) {
         requireContextLock("terminal effects");
-        if (terminalAction != action || cleanup == null) { throw new IllegalStateException("stale terminal effects"); }
+        checkState(terminalAction == action && cleanup != null, "stale terminal effects");
         cleanup.terminalEffectsFinished = true;
     }
 
@@ -2276,9 +2249,7 @@ record DeferredTerminal(Kind kind, StrategyErrorType errorType, String detail, W
             case INACTIVITY_EXPIRED, PRIORITY, DECODE_GENERATION_RETIRED ->
                 errorType == null && workerSource == null;
         };
-        if (!valid) {
-            throw new IllegalArgumentException("deferred terminal kind requires its exact payload");
-        }
+        checkArgument(valid, "deferred terminal kind requires its exact payload");
     }
 
     static DeferredTerminal failure(StrategyErrorType errorType, String detail) {

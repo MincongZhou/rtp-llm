@@ -2,6 +2,8 @@ package org.flexlb.dao;
 
 import org.flexlb.util.PriorityNormalizer;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Immutable scheduling metadata shared by every scheduling mode.
  *
@@ -17,9 +19,7 @@ public final class SchedulingMetadata {
     private final long expiresAtMs;
 
     private SchedulingMetadata(int priority, PrioritySource source, long expiresAtMs) {
-        if (expiresAtMs <= 0) {
-            throw new IllegalArgumentException("schedule deadline must be a positive Unix timestamp");
-        }
+        checkArgument(expiresAtMs > 0, "schedule deadline must be a positive Unix timestamp");
         this.priority = priority;
         this.source = source;
         this.expiresAtMs = expiresAtMs;

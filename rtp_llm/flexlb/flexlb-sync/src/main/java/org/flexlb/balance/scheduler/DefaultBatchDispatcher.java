@@ -43,6 +43,9 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Default batch-submission execution adapter.
  * <p>
@@ -344,13 +347,8 @@ public class DefaultBatchDispatcher {
             String decisionReason,
             BiConsumer<RequestRoute, DeliveryResult> observer) {
         List<RequestRoute> items = List.copyOf(exactItems);
-        if (items.isEmpty()) {
-            throw new IllegalArgumentException("batch cannot be empty");
-        }
-        if (batchId <= 0L || predictedMs < 0L) {
-            throw new IllegalArgumentException(
-                    "batchId must be positive and predictedMs non-negative");
-        }
+        checkArgument(!items.isEmpty(), "batch cannot be empty");
+        checkArgument(batchId > 0L && predictedMs >= 0L, "batchId must be positive and predictedMs non-negative");
         Objects.requireNonNull(decisionReason, "decisionReason");
         Objects.requireNonNull(observer, "observer");
         boolean invoked = false;
@@ -468,10 +466,7 @@ public class DefaultBatchDispatcher {
     private void requireBatchDispatcher() {
         DispatcherConfig dispatcher =
                 configService.loadBalanceConfig().getDispatcher();
-        if (dispatcher.getType() == DispatcherConfig.Type.BATCH) {
-            return;
-        }
-        throw new IllegalStateException(
+        checkState(dispatcher.getType() == DispatcherConfig.Type.BATCH,
                 "batch submission requires BATCH dispatcher configuration");
     }
 
@@ -605,13 +600,10 @@ public class DefaultBatchDispatcher {
             BatchRoleAddressCache roleAddresses)
             throws InvalidProtocolBufferException, InterruptedException {
         EngineRpcService.GenerateInputPB generateInput = item.ctx().getGenerateInput();
-        if (generateInput == null) {
-            throw new IllegalArgumentException("generateInputPb is missing for request " + item.requestId());
-        }
+        checkArgument(generateInput != null, "generateInputPb is missing for request %s", item.requestId());
         EngineRpcService.GenerateInputPB.Builder input = generateInput.toBuilder();
-        if (input.getRequestId() != item.requestId()) {
-            throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");
-        }
+        checkArgument(input.getRequestId() == item.requestId(),
+                "request_id mismatch between schedule request and GenerateInputPB");
         // This batch RPC carries independent requests. Propagate each Schedule
         // parent in its own payload, never in the shared RPC metadata.
         if (FlexlbTrace.isEnabled() && item.ctx().getTraceContext() != null) {

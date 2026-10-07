@@ -5,6 +5,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Block pool with token counting — the mock counterpart of the production
  * C++ BlockPool/KVCacheAllocator admission chain (KV capacity model v2).
@@ -248,9 +250,7 @@ final class MockLruBlockCache {
         // Free-first allocation for the net-new part (same coupling as
         // acquire: eviction trades prefix reuse for capacity).
         while (freeBlocks() < netNew) {
-            if (!evictOne()) {
-                throw new IllegalStateException("capacity gate admitted without enough evictable blocks");
-            }
+            checkState(evictOne(), "capacity gate admitted without enough evictable blocks");
         }
         heldBlocks += netNew;
         return new AllocationOutcome(new BlockLease(hitKeys, netNew), null);

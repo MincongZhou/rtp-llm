@@ -19,6 +19,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalLong;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.missingEndpoint;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.prepareMember;
@@ -41,10 +43,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             List<RequestRoute> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs) {
-        if (candidates.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "route delivery requires at least one candidate");
-        }
+        checkArgument(!candidates.isEmpty(), "route delivery requires at least one candidate");
         RequestRoute head = candidates.get(0);
         PrefillEndpoint prefill = head.prefillEp();
         RouteTransaction transaction = new RouteTransaction(this, prefill, evaluator, candidates.size());
@@ -274,7 +273,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         private void requirePhase(Phase expected) {
-            if (phase != expected) { throw new IllegalStateException("expected " + expected + " route admission, was " + phase); }
+            checkState(phase == expected, "expected %s route admission, was %s", expected, phase);
         }
     }
 
@@ -335,9 +334,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 if (requiredThroughIndex < 0 || requiredThroughIndex >= prefix.size()) {
                     throw new IndexOutOfBoundsException(requiredThroughIndex);
                 }
-                if (requiredThroughIndex < computedThrough) {
-                    throw new IllegalArgumentException("planning index must not decrease");
-                }
+                checkArgument(requiredThroughIndex >= computedThrough, "planning index must not decrease");
                 while (computedThrough < requiredThroughIndex) {
                     int next = computedThrough + 1;
                     long itemMs = predictions.itemDurationMs(prefix.get(next));

@@ -8,6 +8,8 @@ import java.util.List;
 import java.util.OptionalLong;
 import java.util.OptionalDouble;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Projects one incoming route against immutable, coherently captured inputs. */
 public final class RouteProjection {
 
@@ -109,16 +111,9 @@ public final class RouteProjection {
             long routingCacheMatchTokens) {
 
         public Probe {
-            if (seqLen < 0L) {
-                throw new IllegalArgumentException("seqLen must be non-negative");
-            }
-            if (hitCache < 0L || hitCache > seqLen) {
-                throw new IllegalArgumentException("hitCache must be in [0, seqLen]");
-            }
-            if (routingCacheMatchTokens < 0L) {
-                throw new IllegalArgumentException(
-                        "routingCacheMatchTokens must be non-negative");
-            }
+            checkArgument(seqLen >= 0L, "seqLen must be non-negative");
+            checkArgument(hitCache >= 0L && hitCache <= seqLen, "hitCache must be in [0, seqLen]");
+            checkArgument(routingCacheMatchTokens >= 0L, "routingCacheMatchTokens must be non-negative");
         }
     }
 
@@ -164,29 +159,15 @@ public final class RouteProjection {
         public static final long UNKNOWN = -1L;
 
         public Candidate {
-            if (projectedTtftMsValue < UNKNOWN) {
-                throw new IllegalArgumentException("projectedTtftMs must be non-negative");
-            }
-            if ((state == State.MODELED)
-                    != (projectedTtftMsValue != UNKNOWN)) {
-                throw new IllegalArgumentException(
-                        "only MODELED projections may carry a projected TTFT");
-            }
-            if (incomingPrefillMs < 0L) {
-                throw new IllegalArgumentException(
-                        "incomingPrefillMs must be non-negative");
-            }
-            if (blockerRole != null
-                    && state != State.BLOCKED
-                    && state != State.UNAVAILABLE) {
-                throw new IllegalArgumentException(
-                        "capacity block requires a blocked or unavailable result");
-            }
+            checkArgument(projectedTtftMsValue >= UNKNOWN, "projectedTtftMs must be non-negative");
+            checkArgument((state == State.MODELED) == (projectedTtftMsValue != UNKNOWN),
+                    "only MODELED projections may carry a projected TTFT");
+            checkArgument(incomingPrefillMs >= 0L, "incomingPrefillMs must be non-negative");
+            checkArgument(blockerRole == null || state == State.BLOCKED || state == State.UNAVAILABLE,
+                    "capacity block requires a blocked or unavailable result");
             detail = detail == null ? "" : detail;
-            if (cacheHitTokens < 0L || routingCacheMatchTokens < 0L) {
-                throw new IllegalArgumentException(
-                        "cache token counts must be non-negative");
-            }
+            checkArgument(cacheHitTokens >= 0L && routingCacheMatchTokens >= 0L,
+                    "cache token counts must be non-negative");
         }
 
         public OptionalLong projectedTtftMs() {
@@ -218,14 +199,9 @@ public final class RouteProjection {
         public Inputs {
             // Committed work may reuse an older clock base while its ownership
             // is unchanged. The projector rebases running duration to queue time.
-            if (queue.capturedAtMs() < work.capturedAtMs()) {
-                throw new IllegalArgumentException(
-                        "work snapshot cannot be newer than its queue capture");
-            }
-            if (ownershipVersion < 0L) {
-                throw new IllegalArgumentException(
-                        "ownershipVersion must be non-negative");
-            }
+            checkArgument(queue.capturedAtMs() >= work.capturedAtMs(),
+                    "work snapshot cannot be newer than its queue capture");
+            checkArgument(ownershipVersion >= 0L, "ownershipVersion must be non-negative");
         }
     }
 

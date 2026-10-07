@@ -32,6 +32,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static org.flexlb.balance.endpoint.DecodeResources.CapacityRelease.saturatedAddNonNegative;
 
 /** Resource ledger for one Decode generation. All mutations share admissionLock.
@@ -145,11 +147,8 @@ final class DecodeState {
     }
 
     private long nextReservationTokenLocked() {
-        if (nextReservationToken <= 0L
-                || nextReservationToken == Long.MAX_VALUE) {
-            throw new IllegalStateException(
-                    "Decode reservation token space exhausted");
-        }
+        checkState(nextReservationToken > 0L && nextReservationToken != Long.MAX_VALUE,
+                "Decode reservation token space exhausted");
         return nextReservationToken++;
     }
 
@@ -200,9 +199,8 @@ final class DecodeState {
     ReservationReleaseResult release(ReservationHandle reservation, ReleaseReason reason) {
         java.util.Objects.requireNonNull(reason, "reason");
         if (reservation == null) {
-            if (reason == ReleaseReason.LOCAL_ROLLBACK || reason == ReleaseReason.NOT_SENT) {
-                throw new IllegalArgumentException("Decode reservation is required for release");
-            }
+            checkArgument(reason != ReleaseReason.LOCAL_ROLLBACK && reason != ReleaseReason.NOT_SENT,
+                    "Decode reservation is required for release");
             return ReservationReleaseResult.STALE;
         }
         if (reservation.endpointGenerationId() != status.getGenerationId()) { return ReservationReleaseResult.STALE; }
@@ -352,10 +350,7 @@ final class DecodeState {
 
     boolean markQueued(
             ReservationHandle reservation) {
-        if (reservation == null) {
-            throw new IllegalArgumentException(
-                    "Decode reservation is required for queued transition");
-        }
+        checkArgument(reservation != null, "Decode reservation is required for queued transition");
         admissionLock.lock();
         try {
             if (reservation.endpointGenerationId()
@@ -471,9 +466,7 @@ final class DecodeState {
             return;
         }
         dispatchUsage.remove(reservation);
-        if (dispatchUsage.requests < 0) {
-            throw new IllegalStateException("negative active Decode dispatch permit count");
-        }
+        checkState(!(dispatchUsage.requests < 0), "negative active Decode dispatch permit count");
     }
 
     boolean shouldRetryDispatch(
@@ -831,9 +824,8 @@ final class DecodeState {
 
     /** A claim changes its KV hold once; writes preserve expected >= hard for advisory readers. */
     private void setKvHeld(PreemptionClaim claim, boolean held) {
-        if (!admissionLock.isHeldByCurrentThread()) {
-            throw new IllegalStateException("Priority preemption KV hold mutation requires admissionLock");
-        }
+        checkState(admissionLock.isHeldByCurrentThread(),
+                "Priority preemption KV hold mutation requires admissionLock");
         if (claim.kvHeldAfterWorkerRelease == held) { return; }
         long hard = priorityPreemptionHeldKv;
         long expected = priorityPreemptionHeldExpectedKv;
@@ -860,10 +852,8 @@ final class DecodeState {
     }
 
     private static void requirePriorityPreemptionHoldInvariant(long hardKvTokens, long expectedKvTokens) {
-        if (hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
-            throw new IllegalStateException("Invalid priority preemption KV hold counters: hard="
-                    + hardKvTokens + ", expected=" + expectedKvTokens);
-        }
+        checkState(hardKvTokens >= 0L && expectedKvTokens >= hardKvTokens,
+                "Invalid priority preemption KV hold counters: hard=%s, expected=%s", hardKvTokens, expectedKvTokens);
     }
 
     private static final class PreemptionClaim {
@@ -877,10 +867,8 @@ final class DecodeState {
 
         private PreemptionClaim(long attemptToken, ReservationHandle reservation,
                                 long hardKvTokens, long expectedKvTokens) {
-            if (hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
-                throw new IllegalArgumentException(
-                        "Priority preemption claim requires expected KV >= hard KV >= 0");
-            }
+            checkArgument(hardKvTokens >= 0L && expectedKvTokens >= hardKvTokens,
+                    "Priority preemption claim requires expected KV >= hard KV >= 0");
             this.attemptToken = attemptToken;
             this.reservation = reservation;
             this.hardKvTokens = hardKvTokens;
@@ -904,32 +892,26 @@ final class DecodeState {
     ReentrantLock ownershipLock() { return admissionLock; }
 
     CalibrationResult calibrateLocked(WorkerStatus.StatusObservation observation) {
-        if (!admissionLock.isHeldByCurrentThread()) { throw new IllegalStateException("Decode calibration requires ownershipLock"); }
-        if (observation.owner() != status) { throw new IllegalArgumentException("Status belongs to another Decode generation"); }
+        checkState(admissionLock.isHeldByCurrentThread(), "Decode calibration requires ownershipLock");
+        checkArgument(observation.owner() == status, "Status belongs to another Decode generation");
         DecodeRoutingView before = routingViewLocked();
         List<DecodeRequestStatus> requestStatuses = doCalibrate(observation.engine(), observation.finishedTasks());
         return new CalibrationResult(List.copyOf(requestStatuses), before);
     }
 
     void initialize(WorkerStatus.StatusObservation observation) {
-        if (observation.owner() != status) {
-            throw new IllegalArgumentException("Status belongs to another Decode generation");
-        }
+        checkArgument(observation.owner() == status, "Status belongs to another Decode generation");
         admissionLock.lock();
         try {
-            if (!doCalibrate(observation.engine(), observation.finishedTasks()).isEmpty()) {
-                throw new IllegalStateException("Private Decode candidate produced locally-owned request statuses");
-            }
+            checkState(doCalibrate(observation.engine(), observation.finishedTasks()).isEmpty(),
+                    "Private Decode candidate produced locally-owned request statuses");
         } finally {
             admissionLock.unlock();
         }
     }
 
     List<DecodeRequestStatus> observeHeartbeat(WorkerStatus.StatusObservation observation) {
-        if (observation.owner() != status) {
-            throw new IllegalArgumentException(
-                    "Status observation belongs to another Decode generation");
-        }
+        checkArgument(observation.owner() == status, "Status observation belongs to another Decode generation");
         List<DecodeRequestStatus> requestStatuses = new ArrayList<>(
                 observation.runningTasks().size());
         admissionLock.lock();

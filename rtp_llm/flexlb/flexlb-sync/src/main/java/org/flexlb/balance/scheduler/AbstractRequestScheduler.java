@@ -42,6 +42,8 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 
 /** Shared request protocol; concrete schedulers own their mode-specific placement algorithm. */
@@ -133,7 +135,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
      * Transfer queued Decode capacity, then return each victim to its original global queue identity.
      */
     public void completeWithdrawal(AdmissionHandle withdrawal, boolean committed) {
-        if (withdrawal.owner().scheduler() != this) { throw new IllegalArgumentException("foreign withdrawal"); }
+        checkArgument(withdrawal.owner().scheduler() == this, "foreign withdrawal");
         Throwable failure = null;
         BalanceContext context = withdrawal.owner();
         // Closing the handle clears its route; retain the exact old identity for requeue.
@@ -141,9 +143,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         try {
             if (committed) {
                 // Decode replacement has committed. Never take the Prefill lock under the context monitor.
-                if (!item.prefillEp().removeQueued(item, "DECODE_RESERVATION_YIELDED")) {
-                    throw new IllegalStateException("withdrawn route is no longer queued: " + context.getRequestId());
-                }
+                checkState(item.prefillEp().removeQueued(item, "DECODE_RESERVATION_YIELDED"),
+                        "withdrawn route is no longer queued: %s", context.getRequestId());
                 synchronized (context) {
                     context.detachWithdrawnRoute(withdrawal, item);
                 }
@@ -369,9 +370,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (requests.isClosed()) {
                 return false;
             }
-            if (inFlightAdmissionHandles == Integer.MAX_VALUE) {
-                throw new IllegalStateException("admission handle counter overflow");
-            }
+            checkState(inFlightAdmissionHandles != Integer.MAX_VALUE, "admission handle counter overflow");
             inFlightAdmissionHandles++;
             return true;
         }
@@ -379,9 +378,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     private void exitAdmissionHandleGate() {
         synchronized (admissionQuiescenceMonitor) {
-            if (inFlightAdmissionHandles <= 0) {
-                throw new IllegalStateException("admission handle counter underflow");
-            }
+            checkState(inFlightAdmissionHandles > 0, "admission handle counter underflow");
             inFlightAdmissionHandles--;
             if (inFlightAdmissionHandles == 0) {
                 admissionQuiescenceMonitor.notifyAll();
@@ -497,9 +494,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     void closeOutstandingAndTerminalize() {
-        if (!requests.isClosed()) {
-            throw new IllegalStateException("admission must close before terminal shutdown");
-        }
+        checkState(requests.isClosed(), "admission must close before terminal shutdown");
         List<TerminalAction> actions = new ArrayList<>();
         for (BalanceContext requestContext : ownedRequests()) {
             TerminalAction action = requestContext.claimShutdownAction(() -> requirePublicationPermitLocked(requestContext, PublicationKind.TERMINAL));
@@ -631,9 +626,10 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         BalanceContext ctx = exact.ctx();
         Runnable expired;
         synchronized (ctx) {
-            if (kind == DeliveryClaimKind.NONE || kind == DeliveryClaimKind.BATCH_ENQUEUE && correlationId <= 0L) {
-                throw new IllegalArgumentException("invalid delivery identity");
-            }
+            checkArgument(kind != DeliveryClaimKind.NONE
+                    && (kind != DeliveryClaimKind.BATCH_ENQUEUE
+                    || correlationId > 0L),
+                    "invalid delivery identity");
             if (!ownsPreparedDeliveryLocked(ctx, exact)) {
                 return null;
             }
@@ -646,9 +642,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 ctx.recordCancellationLocked(CancelReason.DEADLINE_EXCEEDED, "request scheduling deadline exceeded before delivery");
                 expired = finalizationEffects(ctx.tryTerminateCancellationLocked(() -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), null);
             } else {
-                if (!handoff.transferToEndpoint(exact)) {
-                    throw new IllegalStateException("endpoint ownership lost for request " + ctx.getRequestId());
-                }
+                checkState(handoff.transferToEndpoint(exact),
+                        "endpoint ownership lost for request %s", ctx.getRequestId());
                 return ctx.beginDelivery(exact, kind, correlationId, nowMs, (claim, result) -> {
                     Runnable work = acceptDeliveryResult(claim, result);
                     if (work != null) { submitContinuation(claim.item.ctx(), work); }
@@ -687,9 +682,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (!ctx.ownsActiveRoute(claim.item)) {
                 return;
             }
-            if (ctx.deliveryClaimKind() != DeliveryClaimKind.ROUTE_DECISION) {
-                throw new IllegalArgumentException("route publication requires a route claim");
-            }
+            checkArgument(ctx.deliveryClaimKind() == DeliveryClaimKind.ROUTE_DECISION,
+                    "route publication requires a route claim");
             obsolete = ctx.updateDeliveryPredictionLocked(work, predictedMs, System.currentTimeMillis());
             effect = ctx.acknowledgeDeliveryLocked(null);
         }
@@ -1192,9 +1186,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     PublicationPermit requirePublicationPermitLocked(BalanceContext ctx, PublicationKind kind) {
         ctx.requireContextLock("publication registration");
         var registration = responseCompletions.tryRegister();
-        if (registration == null) {
-            throw new IllegalStateException("frontend publication is closed for request " + ctx.getRequestId());
-        }
+        checkState(registration != null, "frontend publication is closed for request %s", ctx.getRequestId());
         return new PublicationPermit(registration, ctx, kind);
     }
 

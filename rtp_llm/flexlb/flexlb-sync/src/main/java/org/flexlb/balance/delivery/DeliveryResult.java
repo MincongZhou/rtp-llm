@@ -1,16 +1,13 @@
 package org.flexlb.balance.delivery;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Transport result for one exact delivery claim. */
 public record DeliveryResult(Status status, Throwable cause) {
 
     public DeliveryResult {
-        if (status == null) {
-            throw new IllegalArgumentException("delivery status is required");
-        }
-        if ((status == Status.DELIVERED) == (cause != null)) {
-            throw new IllegalArgumentException(
-                    "only unsuccessful delivery requires a cause");
-        }
+        checkArgument(status != null, "delivery status is required");
+        checkArgument((status == Status.DELIVERED) != (cause != null), "only unsuccessful delivery requires a cause");
     }
 
     public static DeliveryResult delivered() {

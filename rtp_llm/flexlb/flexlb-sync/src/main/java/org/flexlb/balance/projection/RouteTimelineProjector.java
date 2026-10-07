@@ -12,6 +12,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 
 /** Thread-confined frozen-snapshot TTFT projector and invocation-scoped result view. */
@@ -153,7 +155,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             if (constraints.maxRequests() > 1 && !GroupPlanner.windowElapsed(enqueuedAtMs, projectionAtMs,
                     constraints.collectionWindowMs())) {
                 readyAtMs = GroupPlanner.collectionDeadlineMs(enqueuedAtMs, constraints.collectionWindowMs());
-                if (readyAtMs < 0L) { throw new IllegalArgumentException("collection deadline must be non-negative"); }
+                checkArgument(readyAtMs >= 0L, "collection deadline must be non-negative");
                 if (readyAtMs >= expiresAtMs) { return unavailable("INCOMING_EXPIRED_BEFORE_DISPATCH"); }
             }
             try {
@@ -210,10 +212,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
                         predictionFailure.detail("BATCH_PREDICTION_FAILED"));
             }
             int probePosition = ordered.probePosition;
-            if (selection.items().isEmpty()) {
-                throw new IllegalStateException(
-                        "non-empty projected queue produced an empty group");
-            }
+            checkState(!selection.items().isEmpty(), "non-empty projected queue produced an empty group");
 
             if (queue.grouping().dispatchReason(selection, queue.constraints(), decisionNowMs) == null) {
                 decisionNowMs = Math.min(
@@ -369,9 +368,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
         }
 
         private void removePlannedPrefix(int count) {
-            if (count > probePosition) {
-                throw new IllegalStateException("cannot consume the projected probe");
-            }
+            checkState(count <= probePosition, "cannot consume the projected probe");
             // Every member occupies one virtual position, including a rejected probe.
             headIndex = visited > count ? index - 1 : index;
         }

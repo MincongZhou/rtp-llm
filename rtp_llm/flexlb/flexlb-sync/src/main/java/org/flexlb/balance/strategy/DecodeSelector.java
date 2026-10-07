@@ -23,6 +23,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static com.google.common.base.Preconditions.checkState;
+
 @Component
 public class DecodeSelector {
 
@@ -77,15 +79,13 @@ public class DecodeSelector {
                     }
                 }
             }
-            if (!Double.isFinite(minimumCost)) {
-                throw new IllegalStateException("Decode cost formula produced no finite score: "
-                        + request.costFormula().expression());
-            }
+            checkState(Double.isFinite(minimumCost),
+                    "Decode cost formula produced no finite score: %s", request.costFormula().expression());
             double selectedCost = minimumCost;
             int selectedIndex = rotation.next(RoleType.DECODE, group, snapshots.size(),
                     i -> availabilityByWorker[i] == selectedAvailability && costByWorker[i] == selectedCost,
                     i -> snapshots.get(i).address());
-            if (selectedIndex < 0) { throw new IllegalStateException("Decode snapshot candidate disappeared"); }
+            checkState(selectedIndex >= 0, "Decode snapshot candidate disappeared");
             DecodeRoutingView selected = snapshots.get(selectedIndex);
             WorkerEndpoint.GenerationPin pin = endpointRegistry.captureDecodeGeneration(selected);
             if (pin != null) {
@@ -197,11 +197,9 @@ public class DecodeSelector {
             WorkerEndpoint.GenerationPin selectedPin,
             long requestId) {
         try {
-            if (selectedPin.generationId() != selected.generationId()
-                    || !(selectedPin.endpoint() instanceof DecodeEndpoint)) {
-                throw new IllegalStateException(
-                        "Decode snapshot pin changed before selection handoff");
-            }
+            checkState(selectedPin.generationId() == selected.generationId()
+                    && (selectedPin.endpoint() instanceof DecodeEndpoint),
+                    "Decode snapshot pin changed before selection handoff");
             WorkerStatus.TopologySnapshot topology = selected.topology();
             WorkerStatus.EngineObservation status =
                     selected.workerStatus().fields();

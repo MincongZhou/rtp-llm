@@ -17,6 +17,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * @author zjw
  * description:
@@ -184,11 +186,8 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
 
     protected static String[] parseServiceKey(String serviceKey) {
         String[] parts = serviceKey.split(":");
-        if (parts.length == 3) {
-            return new String[]{parts[0], parts[1], parts[2]};
-        }
-
-        throw new IllegalArgumentException("Invalid service key format: " + serviceKey);
+        checkArgument(parts.length == 3, "Invalid service key format: %s", serviceKey);
+        return new String[]{parts[0], parts[1], parts[2]};
     }
 
     /**

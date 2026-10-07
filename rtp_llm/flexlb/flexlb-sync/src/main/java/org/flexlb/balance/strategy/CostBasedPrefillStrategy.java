@@ -33,6 +33,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 import static com.google.common.math.LongMath.saturatedMultiply;
 
@@ -563,10 +564,8 @@ public class CostBasedPrefillStrategy {
             DebugInfo debugInfo = new DebugInfo();
             debugInfo.setHitCacheLen(bestCacheHit);
 
-            if (selectedPin == null || selectedPin.endpoint() != ep) {
-                throw new IllegalStateException(
-                        "selected Prefill endpoint generation changed before handoff");
-            }
+            checkState(selectedPin != null && selectedPin.endpoint() == ep,
+                    "selected Prefill endpoint generation changed before handoff");
             WorkerStatus workerStatus = ep.getStatus();
             WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
             WorkerStatus.EngineObservation status = workerStatus.committedEngineObservation();

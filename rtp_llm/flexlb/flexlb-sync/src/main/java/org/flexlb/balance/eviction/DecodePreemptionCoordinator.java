@@ -22,6 +22,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Executes one Engine-Cancel preemption transaction.
  *
@@ -38,10 +41,7 @@ public final class DecodePreemptionCoordinator {
         public boolean committed() { return reservation != null; }
 
         public PreemptionResult {
-            if (reservation != null && controlFailure) {
-                throw new IllegalArgumentException(
-                        "committed preemption cannot be a control failure");
-            }
+            checkArgument(reservation == null || !controlFailure, "committed preemption cannot be a control failure");
             Objects.requireNonNull(detail, "detail");
         }
     }
@@ -55,35 +55,20 @@ public final class DecodePreemptionCoordinator {
             BooleanSupplier admissionOpen,
             String detail) {
         public PreemptionCommand {
-            if (endpoint == null || victims == null || victims.isEmpty()) {
-                throw new IllegalArgumentException("endpoint and victims are required");
-            }
+            checkArgument(endpoint != null && victims != null && !victims.isEmpty(),
+                    "endpoint and victims are required");
             victims = List.copyOf(victims);
             Objects.requireNonNull(request, "request");
-            if (request.requestId() <= 0L) {
-                throw new IllegalArgumentException(
-                        "incoming request id must be positive");
-            }
+            checkArgument(request.requestId() > 0L, "incoming request id must be positive");
             Set<Long> victimIds = new LinkedHashSet<>();
             for (DecodeRequestView victim : victims) {
-                if (victim.requestId() <= 0L
-                        || victim.reservationToken() <= 0L) {
-                    throw new IllegalArgumentException(
-                            "victim requestId and reservation token must be positive");
-                }
-                if (victim.phase() == null
-                        || !victim.phase().requiresEngineCancel()) {
-                    throw new IllegalArgumentException(
-                            "coordinator accepts only Engine-Cancel victims");
-                }
-                if (!victimIds.add(victim.requestId())) {
-                    throw new IllegalArgumentException(
-                            "duplicate victim " + victim.requestId());
-                }
+                checkArgument(victim.requestId() > 0L && victim.reservationToken() > 0L,
+                        "victim requestId and reservation token must be positive");
+                checkArgument(victim.phase() != null && victim.phase().requiresEngineCancel(),
+                        "coordinator accepts only Engine-Cancel victims");
+                checkArgument(victimIds.add(victim.requestId()), "duplicate victim %s", victim.requestId());
             }
-            if (admissionOpen == null) {
-                throw new IllegalArgumentException("admission gate is required");
-            }
+            checkArgument(admissionOpen != null, "admission gate is required");
         }
     }
 
@@ -356,11 +341,8 @@ public final class DecodePreemptionCoordinator {
             if (owned.disposition == ClaimDisposition.TERMINAL) {
                 return false;
             }
-            if (owned.disposition != ClaimDisposition.RELEASABLE) {
-                throw new IllegalStateException(
-                        "Cancel outbound ownership changed request_id="
-                                + owned.requestId());
-            }
+            checkState(owned.disposition == ClaimDisposition.RELEASABLE,
+                    "Cancel outbound ownership changed request_id=%s", owned.requestId());
             // Install the conservative resource hold before RPC invocation. No ACK changes this fact.
             if (!command.endpoint().updatePreemption(token,
                     DecodeResources.PreemptionUpdate.handedOff(owned.reservation))) { return false; }
@@ -478,9 +460,7 @@ public final class DecodePreemptionCoordinator {
 
     private long nextToken() {
         long token = tokenSequence.getAndIncrement();
-        if (token <= 0) {
-            throw new IllegalStateException("preemption attempt token exhausted");
-        }
+        checkState(token > 0, "preemption attempt token exhausted");
         return token;
     }
 }

@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.ToLongFunction;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Immutable, payload-free features retained for prediction and learning. */
 public record PrefillBatchFeatures(List<Item> items) {
 
@@ -34,14 +36,8 @@ public record PrefillBatchFeatures(List<Item> items) {
 
     public record Item(long seqLen, long hitCache) implements ArithmeticFormula.Variables {
         public Item {
-            if (seqLen < 0L) {
-                throw new IllegalArgumentException(
-                        "seqLen must be non-negative");
-            }
-            if (hitCache < 0L || hitCache > seqLen) {
-                throw new IllegalArgumentException(
-                        "hitCache must be in [0, seqLen]");
-            }
+            checkArgument(seqLen >= 0L, "seqLen must be non-negative");
+            checkArgument(hitCache >= 0L && hitCache <= seqLen, "hitCache must be in [0, seqLen]");
         }
 
         @Override

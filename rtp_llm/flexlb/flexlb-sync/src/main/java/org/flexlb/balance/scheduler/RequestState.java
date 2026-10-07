@@ -2,6 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import java.util.Objects;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Immutable public view of one canonical request generation. */
 public record RequestState(
         long requestId,
@@ -16,16 +18,10 @@ public record RequestState(
         Objects.requireNonNull(state, "state");
         Objects.requireNonNull(deliveryClaimKind, "deliveryClaimKind");
         Objects.requireNonNull(detail, "detail");
-        if (deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE
-                && batchId <= 0L) {
-            throw new IllegalArgumentException(
-                    "batch enqueue delivery requires a positive batchId");
-        }
-        if (deliveryClaimKind != DeliveryClaimKind.BATCH_ENQUEUE
-                && batchId != 0L) {
-            throw new IllegalArgumentException(
-                    "only batch enqueue delivery may carry a batchId");
-        }
+        checkArgument(deliveryClaimKind != DeliveryClaimKind.BATCH_ENQUEUE || batchId > 0L,
+                "batch enqueue delivery requires a positive batchId");
+        checkArgument(deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE || batchId == 0L,
+                "only batch enqueue delivery may carry a batchId");
     }
 
     /** An expected batch ID of zero accepts any batch, including route delivery. */

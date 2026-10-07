@@ -33,6 +33,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Runs grouping and delivery for one Prefill endpoint generation.
  * PrefillState owns queued identities, capacity reservations and queue revisions;
@@ -231,11 +234,7 @@ public final class WorkerBatcher {
     public Runnable capacityAvailableSignal() { return capacityAvailableSignal; }
 
     public synchronized void start() {
-        if (runtimeState != RuntimeState.NEW) {
-            throw new IllegalStateException(
-                    "Worker batcher cannot start from "
-                            + runtimeState);
-        }
+        checkState(runtimeState == RuntimeState.NEW, "Worker batcher cannot start from %s", runtimeState);
         runtimeState = RuntimeState.STARTING;
         try {
             workerThread.start();
@@ -303,10 +302,7 @@ public final class WorkerBatcher {
      * neither previews nor reserves capacity. Caller holds {@link #queueLock}.
      */
     public AdmissionBlock admissionBlockLocked() {
-        if (!queueLock.isHeldByCurrentThread()) {
-            throw new IllegalStateException(
-                    "capacity block snapshot requires queueLock");
-        }
+        checkState(queueLock.isHeldByCurrentThread(), "capacity block snapshot requires queueLock");
         BatcherCycleResult blocked = capacityBlockedHead;
         if (blocked == null
                 || !prefillState.queueWaitCurrentLocked(blocked.request(), 0L, 0L,
@@ -321,10 +317,7 @@ public final class WorkerBatcher {
     }
 
     public Throwable stopAndAwait() {
-        if (Thread.currentThread() == workerThread) {
-            throw new IllegalStateException(
-                    "Prefill runtime cannot await its own worker thread");
-        }
+        checkState(Thread.currentThread() != workerThread, "Prefill runtime cannot await its own worker thread");
         Throwable failure = stopAndDrain(
                 normalStopFailure,
                 true);
@@ -373,10 +366,8 @@ public final class WorkerBatcher {
         synchronized (this) {
             alreadyStopping = stopped;
             if (alreadyStopping) {
-                if (!stopCompletion.isDone() && terminationOwner == Thread.currentThread()) {
-                    throw new IllegalStateException(
-                            "Prefill runtime cannot await its active stop transaction");
-                }
+                checkState(stopCompletion.isDone() || terminationOwner != Thread.currentThread(),
+                        "Prefill runtime cannot await its active stop transaction");
             } else {
                 stopped = true;
                 terminationOwner = Thread.currentThread();
@@ -510,10 +501,7 @@ public final class WorkerBatcher {
 
     private void requireExactEndpoint(
             RequestRoute item, String operation) {
-        if (item.prefillEp() != prefillEndpoint) {
-            throw new IllegalArgumentException(
-                    operation + " belongs to another Prefill generation");
-        }
+        checkArgument(item.prefillEp() == prefillEndpoint, "%s belongs to another Prefill generation", operation);
     }
 
     /** Read the last captured queue wait state without waiting or acquiring the queue lock. */
@@ -544,9 +532,7 @@ public final class WorkerBatcher {
 
     /** Capture scheduling constraints while holding the shared Prefill ownership lock. */
     public GroupPlanner.Constraints projectionConstraintsLocked() {
-        if (!queueLock.isHeldByCurrentThread()) {
-            throw new IllegalStateException("projection constraints require queueLock");
-        }
+        checkState(queueLock.isHeldByCurrentThread(), "projection constraints require queueLock");
         return schedulingConstraints(maxDecisionRequests(), predictedExecutionBudgetMs(), collectionWindowMs());
     }
 
@@ -902,10 +888,7 @@ public final class WorkerBatcher {
     /** Own the blocked head, its listener and projection invalidation under queueLock. */
     private void setCapacityBlockedHeadLocked(
             BatcherCycleResult blocked) {
-        if (!queueLock.isHeldByCurrentThread()) {
-            throw new IllegalStateException(
-                    "capacity block update requires queueLock");
-        }
+        checkState(queueLock.isHeldByCurrentThread(), "capacity block update requires queueLock");
         if (capacityBlockedHead == blocked) {
             return;
         }

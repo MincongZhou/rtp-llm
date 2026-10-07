@@ -47,6 +47,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Formula-driven Engine gRPC cluster for FlexLB control-plane and capacity tests.
  *
@@ -516,27 +518,18 @@ public final class JavaMockEngineCluster {
      * 127.1.0.0-127.5.249. Valid for engineIndex in [0, 63749].
      */
     static String derivedLoopbackIp(int engineIndex) {
-        if (engineIndex < 0) {
-            throw new IllegalArgumentException("engine index must be >= 0");
-        }
+        checkArgument(engineIndex >= 0, "engine index must be >= 0");
         int thirdOctet = engineIndex / 250 + 1;
-        if (thirdOctet > 255) {
-            throw new IllegalArgumentException(
-                    "engine index " + engineIndex + " exceeds the unique loopback IP space (max 63749)");
-        }
+        checkArgument(thirdOctet <= 255,
+                "engine index %s exceeds the unique loopback IP space (max 63749)", engineIndex);
         return "127." + thirdOctet + "." + (engineIndex % 250) + ".1";
     }
 
     /** Parses a strict true/false CLI value for {@code flag}. */
     static boolean parseBooleanFlag(String value, String flag) {
-        if ("true".equalsIgnoreCase(value)) {
-            return true;
-        }
-        if ("false".equalsIgnoreCase(value)) {
-            return false;
-        }
-        throw new IllegalArgumentException(
-                "Invalid boolean value for " + flag + ": " + value + " (expected true|false)");
+        checkArgument("true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value),
+                "Invalid boolean value for %s: %s (expected true|false)", flag, value);
+        return Boolean.parseBoolean(value);
     }
 
     private static void addEngineRecords(List<Map<String, Object>> engines,
@@ -1841,9 +1834,7 @@ public final class JavaMockEngineCluster {
          * {@link #DEFAULT_RESPONSE_POLL_TIMEOUT_MS} default).
          */
         void setResponsePollTimeoutMs(long responsePollTimeoutMs) {
-            if (responsePollTimeoutMs < 1) {
-                throw new IllegalArgumentException("response poll timeout must be >= 1 ms");
-            }
+            checkArgument(responsePollTimeoutMs >= 1, "response poll timeout must be >= 1 ms");
             this.responsePollTimeoutMs = responsePollTimeoutMs;
         }
 
@@ -1854,9 +1845,7 @@ public final class JavaMockEngineCluster {
          * overridable via env {@code MOCK_COMPLETION_RETAIN_WINDOW}).
          */
         void setCompletionRetainWindow(int completionRetainWindow) {
-            if (completionRetainWindow < 0) {
-                throw new IllegalArgumentException("completion retain window must be >= 0");
-            }
+            checkArgument(completionRetainWindow >= 0, "completion retain window must be >= 0");
             this.completionRetainWindow = completionRetainWindow;
         }
 
@@ -2217,11 +2206,10 @@ public final class JavaMockEngineCluster {
          * normal Prefill hand-off without teaching the cancel channel to scan.
          */
         void registerDecodeOwnership(long requestId, FastRpcService decode) {
-            if (roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
-                    || decode == null
-                    || decode.roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
-                throw new IllegalArgumentException("decode ownership requires Prefill -> Decode");
-            }
+            checkArgument(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+                    && decode != null
+                    && decode.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                    "decode ownership requires Prefill -> Decode");
             synchronized (decode.decodeQueueLock) {
                 FastRpcService previousDecode = downstreamDecodeOwners.put(requestId, decode);
                 if (previousDecode != null && previousDecode != decode) {
@@ -5703,9 +5691,7 @@ public final class JavaMockEngineCluster {
                             key.substring(UNIQUE_ENGINE_IPS_FLAG.length() + 1), UNIQUE_ENGINE_IPS_FLAG);
                     continue;
                 }
-                if (i + 1 >= args.length) {
-                    throw new IllegalArgumentException("Missing value for " + key);
-                }
+                checkArgument(i + 1 < args.length, "Missing value for %s", key);
                 String value = args[++i];
                 switch (key) {
                     case "--n-prefill" -> config.nPrefill = Integer.parseInt(value);
@@ -5742,31 +5728,20 @@ public final class JavaMockEngineCluster {
                     default -> throw new IllegalArgumentException("Unknown argument: " + key);
                 }
             }
-            if (config.endpointFile == null || config.performanceFile == null
-                    || config.masterConfigFile == null) {
-                throw new IllegalArgumentException(
-                        "--endpoint-file, --performance, and --master-config are required");
-            }
+            checkArgument(config.endpointFile != null && config.performanceFile != null && config.masterConfigFile != null,
+                    "--endpoint-file, --performance, and --master-config are required");
             if (config.discoveryFile == null) {
                 config.discoveryFile = Path.of(config.endpointFile).toAbsolutePath()
                         .resolveSibling("discovery.json").toString();
             }
             // Single-role clusters are allowed (e.g. engine_kill_restart_test victim JVMs
             // hosting only prefill or only decode engines), but at least one engine is required.
-            if (config.nPrefill < 0 || config.nDecode < 0
-                    || config.nPrefill + config.nDecode < 1) {
-                throw new IllegalArgumentException(
-                        "n-prefill/n-decode must be >= 0 with at least one engine in total");
-            }
-            if (config.eventLoopThreads < 1 || config.completionThreads < 1) {
-                throw new IllegalArgumentException("thread counts must be positive");
-            }
-            if (config.decodeMaxConcurrency < 1) {
-                throw new IllegalArgumentException("--decode-max-concurrency must be >= 1");
-            }
-            if (config.statsIntervalMs < 1) {
-                throw new IllegalArgumentException("--stats-interval-ms must be >= 1");
-            }
+            checkArgument(config.nPrefill >= 0 && config.nDecode >= 0 && config.nPrefill + config.nDecode >= 1,
+                    "n-prefill/n-decode must be >= 0 with at least one engine in total");
+            checkArgument(config.eventLoopThreads >= 1 && config.completionThreads >= 1,
+                    "thread counts must be positive");
+            checkArgument(config.decodeMaxConcurrency >= 1, "--decode-max-concurrency must be >= 1");
+            checkArgument(config.statsIntervalMs >= 1, "--stats-interval-ms must be >= 1");
             return config;
         }
     }

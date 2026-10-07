@@ -5,6 +5,8 @@ import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import java.util.Comparator;
 import java.util.List;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Pure planning result for one decode eviction on one endpoint
  * (design doc 11-13). Produced by {@link EvictionPlanner#planDecode}; carries
@@ -34,10 +36,7 @@ public record DecodeEvictionProposal(
         victims = List.copyOf(victims);
         boolean hasLocal = victims.stream().anyMatch(victim -> victim.phase().isMasterQueued());
         boolean hasCancel = victims.stream().anyMatch(victim -> victim.phase().requiresEngineCancel());
-        if (hasLocal && hasCancel) {
-            throw new IllegalArgumentException(
-                    "decode proposal cannot mix Master-local and Engine-Cancel victims");
-        }
+        checkArgument(!hasLocal || !hasCancel, "decode proposal cannot mix Master-local and Engine-Cancel victims");
     }
 
     public boolean requiresEngineCancel() {

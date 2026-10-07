@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.Node;
 
 /**
@@ -49,9 +51,7 @@ public final class ArithmeticFormula {
      */
     public static ArithmeticFormula parse(String expression, Map<String, Integer> variables,
                                           Set<String> aggregateExcludedVariables, boolean allowAggregates) {
-        if (expression == null) {
-            throw new IllegalArgumentException("Formula expression is required");
-        }
+        checkArgument(expression != null, "Formula expression is required");
         ParseKey key = new ParseKey(expression,
                 Map.copyOf(java.util.Objects.requireNonNull(variables, "variables")),
                 Set.copyOf(java.util.Objects.requireNonNull(aggregateExcludedVariables, "aggregateExcludedVariables")),
@@ -92,7 +92,7 @@ public final class ArithmeticFormula {
     }
 
     public double evaluateWithBindings(double[] vars, List<? extends Variables> items) {
-        if (compiled.bindings() == null) throw new IllegalStateException("Batch aggregates are disabled");
+        checkState(compiled.bindings() != null, "Batch aggregates are disabled");
         return compiled.bindings().evaluate(vars, items);
     }
 
@@ -117,7 +117,7 @@ public final class ArithmeticFormula {
         }
 
         public double evaluate(double[] batchVars) {
-            if (!nonempty) throw new IllegalStateException("Append an item before evaluating a batch");
+            checkState(nonempty, "Append an item before evaluating a batch");
             return program.evaluate(batchVars, sums);
         }
     }

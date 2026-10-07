@@ -16,6 +16,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Runs asynchronous frontend completion tasks on dedicated workers. External Future
  * mutations use completeNow on their caller to preserve synchronous return semantics.
@@ -93,9 +95,7 @@ final class ResponseCompletionExecutor implements AutoCloseable {
     }
 
     private void requireOwnedRegistration(CompletionRegistration registration) {
-        if (registration.owner != this) {
-            throw new IllegalStateException("completion registration belongs to another executor");
-        }
+        checkState(registration.owner == this, "completion registration belongs to another executor");
     }
 
     /** Runs a scheduler-owned completion operation, without interpreting request facts. */

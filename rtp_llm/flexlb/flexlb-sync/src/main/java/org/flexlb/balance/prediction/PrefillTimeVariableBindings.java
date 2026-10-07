@@ -3,6 +3,8 @@ package org.flexlb.balance.prediction;
 import java.util.Arrays;
 import java.util.List;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Thread-local scalar bindings; immutable items supply aggregate bindings directly. */
 final class PrefillTimeVariableBindings {
 
@@ -53,9 +55,7 @@ final class PrefillTimeVariableBindings {
         private int count;
 
         void append(long seqLen, long hitCache) {
-            if (seqLen < 0 || hitCache < 0 || hitCache > seqLen) {
-                throw new IllegalArgumentException("Invalid request token counts");
-            }
+            checkArgument(seqLen >= 0 && hitCache >= 0 && hitCache <= seqLen, "Invalid request token counts");
             fillRequestVars(item, seqLen, hitCache);
             long input = (long) item[PrefillTimeFormula.IDX_INPUT_TOKENS];
             long hit = (long) item[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS];

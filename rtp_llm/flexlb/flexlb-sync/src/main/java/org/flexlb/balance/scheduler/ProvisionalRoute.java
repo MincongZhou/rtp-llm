@@ -14,6 +14,8 @@ import org.flexlb.util.Failures;
 import java.util.List;
 import java.util.Objects;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 
 /**
  * Selected workers and resources owned by one routing scope.
@@ -43,28 +45,22 @@ public final class ProvisionalRoute implements AutoCloseable {
         SelectedRole decode = null;
         for (SelectedRole selected : selectedRoles) {
             ServerStatus status = selected.serverStatus();
-            if (status.getRequestId() != context.getRequestId()) {
-                throw new IllegalStateException("selected role belongs to another request");
-            }
+            checkState(status.getRequestId() == context.getRequestId(), "selected role belongs to another request");
             RoleType role = status.getRole();
             if (role != null && role.supportsPrefill()) {
-                if (prefill != null || !(selected.endpoint() instanceof PrefillEndpoint)) {
-                    throw new IllegalStateException("route requires one exact Prefill selection");
-                }
+                checkState(prefill == null && (selected.endpoint() instanceof PrefillEndpoint),
+                        "route requires one exact Prefill selection");
                 selected.prefillWorkMs();
                 prefill = selected;
             } else if (role == RoleType.DECODE) {
-                if (decode != null || !(selected.endpoint() instanceof DecodeEndpoint)) {
-                    throw new IllegalStateException("route requires at most one exact Decode selection");
-                }
+                checkState(decode == null && (selected.endpoint() instanceof DecodeEndpoint),
+                        "route requires at most one exact Decode selection");
                 decode = selected;
             } else {
                 selected.close();
             }
         }
-        if (prefill == null) {
-            throw new IllegalStateException("route has no Prefill endpoint generation");
-        }
+        checkState(prefill != null, "route has no Prefill endpoint generation");
         ProvisionalRoute admission = new ProvisionalRoute(context.getRequestId(), response, prefill, decode);
         prefill.transferToRoute();
         if (decode != null) {
@@ -77,9 +73,8 @@ public final class ProvisionalRoute implements AutoCloseable {
     WorkerEndpoint blockedEndpointIfCurrent(PlacementKey blocker) {
         requireProvisional();
         SelectedRole selected = blocker.role() == RoleType.DECODE ? decode : prefill;
-        if (selected == null || !blocker.equals(placementKey(selected))) {
-            throw new IllegalArgumentException("blocker does not belong to the selected route");
-        }
+        checkArgument(selected != null && blocker.equals(placementKey(selected)),
+                "blocker does not belong to the selected route");
         WorkerEndpoint endpoint = selected.endpoint();
         long version = endpoint instanceof PrefillEndpoint worker ? worker.placementVersion()
                 : ((DecodeEndpoint) endpoint).placementVersion();
@@ -125,9 +120,7 @@ public final class ProvisionalRoute implements AutoCloseable {
 
     boolean reserveDecode(RequestRequirements requirements) {
         requireProvisional();
-        if (requirements.requestId() != requestId) {
-            throw new IllegalArgumentException("request inputs do not match selected route");
-        }
+        checkArgument(requirements.requestId() == requestId, "request inputs do not match selected route");
         if (decodeEndpoint() == null || decodeReservation != null) { return true; }
         DecodeResources.AdmissionCapacity capacity = switch (requirements.mode()) {
             case IMMEDIATE -> null;
@@ -220,7 +213,7 @@ public final class ProvisionalRoute implements AutoCloseable {
     }
 
     void requireProvisional() {
-        if (!provisional) { throw new IllegalStateException("route admission already resolved"); }
+        checkState(provisional, "route admission already resolved");
     }
 
     @Override

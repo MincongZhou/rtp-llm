@@ -33,6 +33,9 @@ import java.util.OptionalLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongPredicate;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
@@ -56,9 +59,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             prefillState.ownershipLock().lock();
             try {
                 EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
-                if (exact == null) {
-                    throw new IllegalStateException("route commit no longer owns its generation handoff");
-                }
+                checkState(exact != null, "route commit no longer owns its generation handoff");
                 PrefillState.CommittedHandoff committed =
                         prefillState.commitRouteGroupLocked(exactItems, exactReservations, exact);
                 generationHandoff = null;
@@ -72,9 +73,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         public PrefillState.CommittedHandoff commitQueuedLocked(
                 List<RequestRoute> exactItems, long[] predictions) {
             EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
-            if (exact == null) {
-                throw new IllegalStateException("route commit no longer owns its generation handoff");
-            }
+            checkState(exact != null, "route commit no longer owns its generation handoff");
             PrefillState.CommittedHandoff committed =
                     prefillState.commitQueuedRoutesLocked(exactItems, predictions, exact);
             generationHandoff = null;
@@ -240,9 +239,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         prefillState.ownershipLock().lock();
         try {
             if (runtime != null) { return; }
-            if (settings == null || settings.dispatcherType() != dispatcherType) {
-                throw new IllegalArgumentException("queued admission requires a compatible QUEUE configuration");
-            }
+            checkArgument(settings != null && settings.dispatcherType() == dispatcherType,
+                    "queued admission requires a compatible QUEUE configuration");
             prefillState.enableQueueLocked(settings.priorityOrdering()
                     ? WorkerBatcher.PRIORITY_QUEUE_ORDER : WorkerBatcher.FIFO_QUEUE_ORDER);
             WorkerBatcher worker = new WorkerBatcher(ipPort(), this, settings, deliveryStrategy, prefillState);
@@ -414,11 +412,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public CapacityBoundary.Availability batchAdmissionAvailability(
             int maximumInflightBatches) {
-        if (maximumInflightBatches <= 0) { throw new IllegalArgumentException("maximumInflightBatches must be positive"); }
+        checkArgument(maximumInflightBatches > 0, "maximumInflightBatches must be positive");
         return new CapacityBoundary.Availability() {
             @Override public boolean isAvailable() { return prefillState.batchCapacityAvailable(maximumInflightBatches); }
             @Override public void addListener(Runnable listener) {
-                if (runtime == null || listener != runtime.capacityAvailableSignal()) { throw new IllegalArgumentException("Expected this generation's worker wake signal"); }
+                checkArgument(runtime != null && listener == runtime.capacityAvailableSignal(),
+                        "Expected this generation's worker wake signal");
             }
             @Override public void removeListener(Runnable listener) { }
         };
@@ -507,20 +506,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
             WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         PrefillState.StatusReconciliation reconciliation = reduceStatus(ws, observation, null);
-        if (!reconciliation.requestStatuses().isEmpty()
-                || !reconciliation.batchCompletions().isEmpty()) {
-            throw new IllegalStateException(
-                    "Private Prefill candidate produced locally-owned request statuses");
-        }
+        checkState(reconciliation.requestStatuses().isEmpty() && reconciliation.batchCompletions().isEmpty(),
+                "Private Prefill candidate produced locally-owned request statuses");
         return () -> { };
     }
 
     /** Keep ordinary reduction/publication in one lock; predict a shrunk batch outside it. */
     private PrefillState.StatusReconciliation reduceStatus(WorkerStatus ws,
             WorkerStatus.StatusObservation observation, WorkerStatus.PreparedStatus prepared) {
-        if (observation.owner() != ws) {
-            throw new IllegalArgumentException("Status observation belongs to another Prefill generation");
-        }
+        checkArgument(observation.owner() == ws, "Status observation belongs to another Prefill generation");
         var lock = prefillState.ownershipLock();
         PrefillState.StatusReduction reduction = null;
         PrefillState.StatusReconciliation result = null;
@@ -540,7 +534,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     if (reduction.predictionInputs().isEmpty() || !predictions.isEmpty()) {
                         long version = prefillState.mutationVersion();
                         result = prefillState.commitStatusLocked(reduction, predictions);
-                        if (result == null) { throw new IllegalStateException("Locked Prefill reduction changed during commit"); }
+                        checkState(result != null, "Locked Prefill reduction changed during commit");
                         if (prepared != null && !observation.alive()) { beginRetirement(); }
                         if (prefillState.mutationVersion() != version) { signalSchedulingInputsChanged(); }
                         if (prepared != null) { ws.publishPreparedStatus(prepared); }
@@ -575,10 +569,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             WorkerStatus ws,
             WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
-        if (observation.owner() != ws) {
-            throw new IllegalArgumentException(
-                    "Status observation belongs to another Prefill generation");
-        }
+        checkArgument(observation.owner() == ws, "Status observation belongs to another Prefill generation");
         PrefillState.HeartbeatReconciliation reconciliation =
                 prefillState.reconcileHeartbeat(observation);
         if (reconciliation.capacityReleased()) { notifyCapacityAvailable(); }

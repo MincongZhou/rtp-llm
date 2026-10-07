@@ -7,6 +7,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Immutable scheduling inputs captured for a route-time what-if projection.
  *
@@ -27,16 +29,11 @@ public record QueueSnapshot(
         if (queueScheduling) { Objects.requireNonNull(grouping, "grouping"); }
         activeItems = List.copyOf(activeItems);
         if (admissionBlock != null) {
-            if (activeItems.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "admission block requires an ACTIVE head");
-            }
+            checkArgument(!activeItems.isEmpty(), "admission block requires an ACTIVE head");
             GroupPlanner.Item head = activeItems.getFirst();
-            if (head.requestId() != admissionBlock.requestId()
-                    || head.enqueueSeq() != admissionBlock.enqueueSeq()) {
-                throw new IllegalArgumentException(
-                        "admission block must identify the exact ACTIVE head");
-            }
+            checkArgument(head.requestId() == admissionBlock.requestId()
+                    && head.enqueueSeq() == admissionBlock.enqueueSeq(),
+                    "admission block must identify the exact ACTIVE head");
         }
     }
 

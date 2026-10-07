@@ -1,5 +1,7 @@
 package org.flexlb.balance.planner;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Pure grouping of ordered inputs. No clock reads, queue mutation or resource acquisition. */
 public enum GroupingPolicy {
     SINGLE,
@@ -12,10 +14,11 @@ public enum GroupingPolicy {
     public <T extends GroupPlanner.Input> GroupPlanner.Selection<T> select(
             Iterable<T> items, GroupPlanner.Constraints constraints,
             GroupPlanner.PrefixPrediction<T> predictor) {
-        if (this == SINGLE && (constraints.maxRequests() != 1 || constraints.collectionWindowMs() != 0L
-                || constraints.predictedExecutionBudgetMs() != 0L)) {
-            throw new IllegalArgumentException("SINGLE requires one member and no collection or prediction budget");
-        }
+        checkArgument(this != SINGLE
+                || constraints.maxRequests() == 1
+                && constraints.collectionWindowMs() == 0L
+                && constraints.predictedExecutionBudgetMs() == 0L,
+                "SINGLE requires one member and no collection or prediction budget");
         return GroupPlanner.selectWithPrediction(items, constraints, this == SINGLE ? null : predictor);
     }
 
@@ -25,10 +28,9 @@ public enum GroupingPolicy {
             return null;
         }
         String reason = this == SINGLE ? "single_request" : GroupPlanner.dispatchReason(selection, constraints, nowMs);
-        if (reason == null && GroupPlanner.collectionDeadlineMs(selection.windowOpenedAtMs(),
-                constraints.collectionWindowMs()) < 0L) {
-            throw new IllegalArgumentException("collection deadline must be non-negative");
-        }
+        checkArgument(reason != null
+                || GroupPlanner.collectionDeadlineMs(selection.windowOpenedAtMs(), constraints.collectionWindowMs()) >= 0L,
+                "collection deadline must be non-negative");
         return reason;
     }
 }

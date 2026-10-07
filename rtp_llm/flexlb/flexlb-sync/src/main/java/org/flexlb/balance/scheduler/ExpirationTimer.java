@@ -16,6 +16,8 @@ import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
 import java.util.function.LongSupplier;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /** Schedules exact deadline capabilities and drains accepted registrations on close. */
 final class ExpirationTimer implements AutoCloseable {
 
@@ -48,10 +50,7 @@ final class ExpirationTimer implements AutoCloseable {
 
         final synchronized void installScheduled(
                 ScheduledFuture<?> exactScheduled) {
-            if (scheduled != null) {
-                throw new IllegalStateException(
-                        "deadline already owns a scheduled task");
-            }
+            checkState(scheduled == null, "deadline already owns a scheduled task");
             scheduled = exactScheduled;
             if (state == DeadlineState.CANCELED) {
                 exactScheduled.cancel(false);
@@ -262,10 +261,7 @@ final class ExpirationTimer implements AutoCloseable {
 
     private void endRegistration() {
         synchronized (registrationMonitor) {
-            if (inflightRegistrations <= 0) {
-                throw new IllegalStateException(
-                        "ExpirationTimer registration count underflow");
-            }
+            checkState(inflightRegistrations > 0, "ExpirationTimer registration count underflow");
             inflightRegistrations--;
             if (inflightRegistrations == 0) {
                 registrationMonitor.notifyAll();

@@ -22,6 +22,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /** Selects exactly one delivery strategy from the canonical startup config. */
 @Configuration(proxyBeanMethods = false)
 public class DeliveryBindingConfiguration {
@@ -76,12 +78,8 @@ public class DeliveryBindingConfiguration {
             long timestamp = TimeUnit.MILLISECONDS.toSeconds(
                     System.currentTimeMillis())
                     - BATCH_EPOCH_SECONDS;
-            if (timestamp < 0L || (timestamp >>> TIMESTAMP_BITS) != 0L) {
-                throw new IllegalStateException(
-                        timestamp < 0L
-                                ? "system clock is before the batch ID epoch"
-                                : "batch ID timestamp overflow");
-            }
+            checkState(timestamp >= 0L && (timestamp >>> TIMESTAMP_BITS) == 0L,
+                    timestamp < 0L ? "system clock is before the batch ID epoch" : "batch ID timestamp overflow");
             return (timestamp << TIMESTAMP_SHIFT)
                     | (masterId << MASTER_ID_SHIFT)
                     | (BATCH_SEQUENCE.getAndIncrement()

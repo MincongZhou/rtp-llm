@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Getter;
 import lombok.Setter;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Public FLEXLB_CONFIG contract, organized by stable responsibility owner.
  * Mutually exclusive behavior is represented by tagged unions so inactive
@@ -86,19 +88,16 @@ public final class FlexlbConfig {
 
     @JsonIgnore
     public SchedulerConfig queueScheduler() {
-        if (isQueue()) {
-            return scheduler;
-        }
-        throw new IllegalStateException("queue scheduler configuration is not active");
+        checkState(isQueue(), "queue scheduler configuration is not active");
+        return scheduler;
     }
 
     @JsonIgnore
     public QueueOrderingConfig priorityOrdering() {
         QueueOrderingConfig ordering = queueScheduler().getOrdering();
-        if (ordering.getType() == QueueOrderingConfig.Type.PRIORITY) {
-            return ordering;
-        }
-        throw new IllegalStateException("priority ordering configuration is not active");
+        checkState(ordering.getType() == QueueOrderingConfig.Type.PRIORITY,
+                "priority ordering configuration is not active");
+        return ordering;
     }
 
     @Getter

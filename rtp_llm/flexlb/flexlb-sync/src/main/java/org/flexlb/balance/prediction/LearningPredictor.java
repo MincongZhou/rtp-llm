@@ -9,6 +9,8 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Prefill-time predictor with linear regression and online Adam-optimizer learning.
  *
@@ -53,9 +55,7 @@ public class LearningPredictor implements PrefillTimePredictor {
         public BatchPrediction newBatchPrediction() {
             double[] inputs = new double[LINEAR_PARAM_COUNT];
             return (seqLen, hitCache) -> {
-                if (seqLen < 0 || hitCache < 0 || hitCache > seqLen) {
-                    throw new IllegalArgumentException("Invalid request token counts");
-                }
+                checkArgument(seqLen >= 0 && hitCache >= 0 && hitCache <= seqLen, "Invalid request token counts");
                 appendInput(inputs, seqLen, hitCache);
                 return predict(inputs);
             };

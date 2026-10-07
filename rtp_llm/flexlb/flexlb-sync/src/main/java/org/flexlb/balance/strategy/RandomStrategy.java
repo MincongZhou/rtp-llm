@@ -15,6 +15,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Random selection for the stateless VIT role. */
 @Component
 public final class RandomStrategy {
@@ -29,10 +31,7 @@ public final class RandomStrategy {
 
     public SelectedRole select(
             BalanceContext context, RoleType role, String group) {
-        if (role != RoleType.VIT) {
-            throw new IllegalArgumentException(
-                    "RANDOM endpoint selection is supported only for VIT");
-        }
+        checkArgument(role == RoleType.VIT, "RANDOM endpoint selection is supported only for VIT");
         List<String> addresses =
                 endpointRegistry.endpointAddressSnapshot(RoleType.VIT);
         if (addresses.isEmpty()) {

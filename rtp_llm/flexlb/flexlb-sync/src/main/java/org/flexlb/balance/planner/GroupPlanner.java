@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalDouble;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.math.LongMath.saturatedAdd;
 import static com.google.common.math.LongMath.saturatedMultiply;
 
@@ -77,10 +78,7 @@ public final class GroupPlanner {
             long collectionWindowMs) {
 
         public Constraints {
-            if (maxRequests < 1) {
-                throw new IllegalArgumentException(
-                        "maxRequests must be positive");
-            }
+            checkArgument(maxRequests >= 1, "maxRequests must be positive");
         }
     }
 
@@ -222,20 +220,16 @@ public final class GroupPlanner {
 
     private static void validateSelectedPrediction(
             List<?> items, OptionalDouble selectedPredictionMs) {
-        if (items.isEmpty() && selectedPredictionMs.isPresent()) {
-            throw new IllegalArgumentException(
-                    "empty decision group cannot carry a prediction");
-        }
+        checkArgument(!items.isEmpty() || !selectedPredictionMs.isPresent(),
+                "empty decision group cannot carry a prediction");
         if (selectedPredictionMs.isPresent()) {
             requireValidPrediction(selectedPredictionMs.getAsDouble());
         }
     }
 
     private static double requireValidPrediction(double predictedMs) {
-        if (!Double.isFinite(predictedMs) || predictedMs < 0.0d) {
-            throw new IllegalArgumentException(
-                    "group prediction must be finite and non-negative");
-        }
+        checkArgument(Double.isFinite(predictedMs) && !(predictedMs < 0.0d),
+                "group prediction must be finite and non-negative");
         return predictedMs;
     }
 

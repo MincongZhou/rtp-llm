@@ -32,6 +32,9 @@ import java.util.function.Function;
 import java.util.function.LongPredicate;
 import java.util.function.Supplier;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 /** Owns discovered worker identities and their published routing generations. */
 @Component
 public class EndpointRegistry {
@@ -129,9 +132,7 @@ public class EndpointRegistry {
     private final ConfigService configService;
     private volatile QueueExecutionSettings queueSettings;
     public synchronized void configureQueue(QueueExecutionSettings settings) {
-        if (queueSettings != null && !queueSettings.equals(settings)) {
-            throw new IllegalStateException("incompatible queue execution settings");
-        }
+        checkState(queueSettings == null || queueSettings.equals(settings), "incompatible queue execution settings");
         queueSettings = settings;
     }
 
@@ -337,13 +338,9 @@ public class EndpointRegistry {
             requireGenerationLock(status);
             status.requireActiveGeneration();
             WorkerStatus.StatusObservation observation = prepared.observation();
-            if (observation.owner() != status) {
-                throw new IllegalArgumentException("staged status belongs to another worker generation");
-            }
+            checkArgument(observation.owner() == status, "staged status belongs to another worker generation");
             RoleType role = observation.role();
-            if (role != status.getRole()) {
-                throw new IllegalArgumentException("staged status role does not match its worker generation");
-            }
+            checkArgument(role == status.getRole(), "staged status role does not match its worker generation");
             java.util.Objects.requireNonNull(address, "address");
             if (status.appliedStatusCursor().statusVersion() >= 0L) {
                 throw new IllegalStateException(
@@ -360,13 +357,10 @@ public class EndpointRegistry {
             WorkerEndpoint exact = candidate;
             publicationAttempted = true;
             mutateEndpointMap(role, endpoints(role), address, (ignored, current) -> {
-                if (current != null && current.getStatus() == status) {
-                    throw new IllegalStateException("Endpoint generation is already published for " + address);
-                }
-                if (current != null) {
-                    throw new IllegalStateException(
-                            "Existing endpoint generation must be withdrawn before publication for " + address);
-                }
+                checkState(current == null || current.getStatus() != status,
+                        "Endpoint generation is already published for %s", address);
+                checkState(current == null,
+                        "Existing endpoint generation must be withdrawn before publication for %s", address);
                 return exact;
             });
             signalPublishedEndpoint(candidate);
@@ -398,20 +392,14 @@ public class EndpointRegistry {
 
     private void beginCandidatePublication() {
         synchronized (lifecycleGate) {
-            if (closeCompletion != null) {
-                throw new IllegalStateException(
-                        "EndpointRegistry is closing");
-            }
+            checkState(closeCompletion == null, "EndpointRegistry is closing");
             inflightPublications++;
         }
     }
 
     private void endCandidatePublication() {
         synchronized (lifecycleGate) {
-            if (inflightPublications <= 0) {
-                throw new IllegalStateException(
-                        "EndpointRegistry publication count underflow");
-            }
+            checkState(inflightPublications > 0, "EndpointRegistry publication count underflow");
             inflightPublications--;
             if (inflightPublications == 0) {
                 lifecycleGate.notifyAll();
@@ -451,11 +439,8 @@ public class EndpointRegistry {
                     : null;
             WorkerEndpoint published = endpoints.compute(
                     address, (ignored, observed) -> {
-                if (observed != exactCurrent) {
-                    throw new IllegalStateException(
-                            role + " endpoint mapping changed outside its directory transaction: "
-                                    + address);
-                }
+                checkState(observed == exactCurrent,
+                        "%s endpoint mapping changed outside its directory transaction: %s", role, address);
                 return next;
             });
             if (updatesPrefillDirectory) {
@@ -490,10 +475,8 @@ public class EndpointRegistry {
     }
 
     private static void requireGenerationLock(WorkerStatus status) {
-        if (!status.lock.isHeldByCurrentThread()) {
-            throw new IllegalStateException(
-                    "Endpoint publication requires the WorkerStatus generation lock");
-        }
+        checkState(status.lock.isHeldByCurrentThread(),
+                "Endpoint publication requires the WorkerStatus generation lock");
     }
 
     /**
@@ -512,16 +495,12 @@ public class EndpointRegistry {
         expectedStatus.requireActiveGeneration();
         Retirement retirement;
         synchronized (lifecycleGate) {
-            if (closeCompletion != null) {
-                throw new IllegalStateException("EndpointRegistry is closing");
-            }
+            checkState(closeCompletion == null, "EndpointRegistry is closing");
             WorkerEndpoint expected = get(roleType, ipPort, expectedStatus);
             retirement = new Retirement(roleType, ipPort, expectedStatus, expected);
             if (expected != null) {
                 mutateEndpointMap(roleType, endpoints(roleType), ipPort, (ignored, current) -> {
-                    if (current != expected) {
-                        throw new IllegalStateException("Endpoint changed while its generation lock was held: " + ipPort);
-                    }
+                    checkState(current == expected, "Endpoint changed while its generation lock was held: %s", ipPort);
                     // Close admission while the exact mapping is still visible.
                     current.beginRetirement();
                     return null;
@@ -542,9 +521,7 @@ public class EndpointRegistry {
     /** Resolve the barrier owned by a retirement with a published endpoint. */
     private void resolveDetachedGeneration() {
         synchronized (lifecycleGate) {
-            if (inflightDetachedRetirements <= 0) {
-                throw new IllegalStateException("Detached retirement count underflow");
-            }
+            checkState(inflightDetachedRetirements > 0, "Detached retirement count underflow");
             inflightDetachedRetirements--;
             if (inflightDetachedRetirements == 0) {
                 lifecycleGate.notifyAll();
@@ -556,9 +533,7 @@ public class EndpointRegistry {
             WorkerStatus status,
             RoleType role,
             WorkerStatus.EngineObservation engineStatus) {
-        if (role == RoleType.FRONTEND) {
-            throw new IllegalArgumentException("Unsupported role: " + role);
-        }
+        checkArgument(role != RoleType.FRONTEND, "Unsupported role: %s", role);
         boolean prefill = role == RoleType.PREFILL
                 || role == RoleType.PDFUSION;
         if (prefill && engineStatus.dpSize() > 1) {
@@ -796,11 +771,8 @@ public class EndpointRegistry {
         return statusesByRole.get(role).computeIfAbsent(address, ignored -> {
             WorkerStatus discovered = Objects.requireNonNull(
                     discoveredFactory.get(), "discovered status");
-            if (discovered.getRole() != role
-                    || !address.equals(discovered.getIpPort())) {
-                throw new IllegalArgumentException(
-                        "Discovered WorkerStatus identity does not match directory key");
-            }
+            checkArgument(discovered.getRole() == role && address.equals(discovered.getIpPort()),
+                    "Discovered WorkerStatus identity does not match directory key");
             return discovered;
         });
     }

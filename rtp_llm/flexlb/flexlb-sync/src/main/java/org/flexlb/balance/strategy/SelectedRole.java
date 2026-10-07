@@ -9,6 +9,9 @@ import org.flexlb.util.Failures;
 
 import java.util.Objects;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * One exact endpoint-generation selection.
  *
@@ -34,33 +37,20 @@ public final class SelectedRole implements AutoCloseable {
             long placementVersion) {
         this.generationPin = generationPin;
         this.serverStatus = serverStatus;
-        if (!serverStatus.isSuccess()) {
-            throw new IllegalArgumentException(
-                    "SelectedRole requires successful response metadata");
-        }
+        checkArgument(serverStatus.isSuccess(), "SelectedRole requires successful response metadata");
         WorkerEndpoint endpoint = generationPin.endpoint();
-        if (!Objects.equals(serverStatus.getServerIp(), endpoint.getIp())
-                || serverStatus.getHttpPort() != endpoint.getHttpPort()) {
-            throw new IllegalArgumentException(
-                    "selection metadata does not match pinned endpoint address");
-        }
-        if (prefillWorkMs >= 0L
-                && (!(endpoint instanceof PrefillEndpoint)
-                        || serverStatus.getRole() != RoleType.PREFILL
-                                && serverStatus.getRole() != RoleType.PDFUSION)) {
-            throw new IllegalArgumentException(
-                    "Prefill selection requires a Prefill endpoint role");
-        }
-        if (serverStatus.getRole() == RoleType.DECODE
-                && !(endpoint instanceof DecodeEndpoint)) {
-            throw new IllegalArgumentException(
-                    "Decode selection requires a Decode endpoint role");
-        }
+        checkArgument(Objects.equals(serverStatus.getServerIp(), endpoint.getIp())
+                && serverStatus.getHttpPort() == endpoint.getHttpPort(),
+                "selection metadata does not match pinned endpoint address");
+        checkArgument(prefillWorkMs < 0L
+                || (endpoint instanceof PrefillEndpoint)
+                && (serverStatus.getRole() == RoleType.PREFILL
+                || serverStatus.getRole() == RoleType.PDFUSION),
+                "Prefill selection requires a Prefill endpoint role");
+        checkArgument(serverStatus.getRole() != RoleType.DECODE || (endpoint instanceof DecodeEndpoint),
+                "Decode selection requires a Decode endpoint role");
         this.prefillWorkMs = prefillWorkMs;
-        if (placementVersion < 0L) {
-            throw new IllegalArgumentException(
-                    "placementVersion must be non-negative");
-        }
+        checkArgument(placementVersion >= 0L, "placementVersion must be non-negative");
         this.placementVersion = placementVersion;
     }
 
@@ -122,10 +112,7 @@ public final class SelectedRole implements AutoCloseable {
     }
 
     public long prefillWorkMs() {
-        if (prefillWorkMs < 0L) {
-            throw new IllegalStateException(
-                    "selection does not carry Prefill work");
-        }
+        checkState(prefillWorkMs >= 0L, "selection does not carry Prefill work");
         return prefillWorkMs;
     }
 
@@ -135,9 +122,7 @@ public final class SelectedRole implements AutoCloseable {
 
     /** Transfer the whole selected result; its routing facts stay immutable. */
     public synchronized void transferToRoute() {
-        if (owner != Owner.SELECTOR) {
-            throw new IllegalStateException("selected endpoint generation was already consumed");
-        }
+        checkState(owner == Owner.SELECTOR, "selected endpoint generation was already consumed");
         owner = Owner.ROUTE;
     }
 
@@ -146,9 +131,7 @@ public final class SelectedRole implements AutoCloseable {
     }
 
     public WorkerEndpoint.GenerationPin generationPin() {
-        if (owner == Owner.CLOSED) {
-            throw new IllegalStateException("selected endpoint generation is closed");
-        }
+        checkState(owner != Owner.CLOSED, "selected endpoint generation is closed");
         return generationPin;
     }
 

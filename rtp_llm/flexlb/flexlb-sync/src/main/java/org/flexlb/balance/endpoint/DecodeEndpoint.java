@@ -29,6 +29,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongPredicate;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Decode worker boundary: lifecycle pins, resource operations and lock-free notifications.
  * DecodeState owns the generation-local resource ledger and its single mutation lock.
  */
@@ -77,9 +79,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Select no user outcome here: Prefill rejection alone cannot release Decode ownership. */
     public boolean settleFailedRequest(ReservationHandle reservation, DeliveryResult.Status source) {
-        if (source != DeliveryResult.Status.NOT_SENT && source != DeliveryResult.Status.PREFILL_REJECTED) {
-            throw new IllegalArgumentException("expected a definite request failure");
-        }
+        checkArgument(source == DeliveryResult.Status.NOT_SENT || source == DeliveryResult.Status.PREFILL_REJECTED,
+                "expected a definite request failure");
         if (reservation == null) { return true; }
         if (source == DeliveryResult.Status.NOT_SENT) { release(reservation, ReleaseReason.NOT_SENT); }
         return !state.hasOwnedResources(reservation);
@@ -115,7 +116,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public EngineDispatchPermitTransferStatus dispatch(EngineDispatchPermit permit, DispatchOutcome outcome) {
         java.util.Objects.requireNonNull(permit, "permit");
         java.util.Objects.requireNonNull(outcome, "outcome");
-        if (permit.endpoint != this) { throw new IllegalArgumentException("Dispatch permit belongs to another endpoint"); }
+        checkArgument(permit.endpoint == this, "Dispatch permit belongs to another endpoint");
         synchronized (permit) {
             if (permit.dispatchResult != null) {
                 return outcome == DispatchOutcome.ENGINE_OWNED
@@ -181,15 +182,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
             EngineDispatchPermit permit) {
 
         public EngineDispatchPermitAcquisition {
-            if (status == null) {
-                throw new IllegalArgumentException("permit acquisition status is required");
-            }
+            checkArgument(status != null, "permit acquisition status is required");
             boolean ownsHandoff = status == EngineDispatchPermitAcquireStatus.ACQUIRED
                     || status == EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED;
-            if (ownsHandoff != (permit != null)) {
-                throw new IllegalArgumentException(
-                        "only ACQUIRED or ALREADY_ACCEPTED results carry an engine dispatch permit");
-            }
+            checkArgument(ownsHandoff == (permit != null),
+                    "only ACQUIRED or ALREADY_ACCEPTED results carry an engine dispatch permit");
         }
     }
 
@@ -221,9 +218,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public PreemptionBeginResult beginPreemption(long attemptToken, List<ReservationHandle> victims,
                                                  long incomingRequestId, long hardKv, long expectedKv,
                                                  int priority, AdmissionCapacity capacity) {
-        if (attemptToken <= 0 || victims == null || victims.isEmpty()) {
-            throw new IllegalArgumentException("attempt token and victims are required");
-        }
+        checkArgument(attemptToken > 0 && victims != null && !victims.isEmpty(),
+                "attempt token and victims are required");
         GenerationPin pin = tryPinGeneration();
         if (pin == null) { return PreemptionBeginResult.ENDPOINT_RETIRED; }
         try (pin) {

@@ -27,6 +27,8 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 public class EngineSyncRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
@@ -90,10 +92,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.cacheFullSnapshotDebugMode = cacheFullSnapshotDebugMode;
-        if (statusStaleAfterUs <= 0L) {
-            throw new IllegalArgumentException(
-                    "statusStaleAfterUs must be positive");
-        }
+        checkArgument(statusStaleAfterUs > 0L, "statusStaleAfterUs must be positive");
         this.statusStaleAfterUs = statusStaleAfterUs;
     }
 
@@ -278,10 +277,8 @@ public class EngineSyncRunner implements Runnable {
             String site,
             String group) {
         int separator = workerIpPort.lastIndexOf(':');
-        if (separator <= 0 || separator == workerIpPort.length() - 1) {
-            throw new IllegalArgumentException(
-                    "Invalid worker address: " + workerIpPort);
-        }
+        checkArgument(separator > 0 && separator != workerIpPort.length() - 1,
+                "Invalid worker address: %s", workerIpPort);
         String ip = workerIpPort.substring(0, separator);
         int port = Integer.parseInt(workerIpPort.substring(separator + 1));
         WorkerStatus discovered = WorkerStatus.createDiscovered(

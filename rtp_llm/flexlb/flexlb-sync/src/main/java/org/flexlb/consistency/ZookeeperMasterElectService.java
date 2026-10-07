@@ -36,6 +36,7 @@ import java.util.Collection;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static org.flexlb.consistency.LBStatusConsistencyService.MASTER_CHANGE_NOTIFY_PATH;
 
 @Slf4j
@@ -96,9 +97,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
 
     private void initializeRoleId() {
         roleId = System.getenv("HIPPO_ROLE");
-        if (StringUtils.isBlank(roleId)) {
-            throw new IllegalArgumentException("HIPPO_ROLE is required when needConsistency=true");
-        }
+        checkArgument(!StringUtils.isBlank(roleId), "HIPPO_ROLE is required when needConsistency=true");
     }
 
     private void initializeIpAndPort() {

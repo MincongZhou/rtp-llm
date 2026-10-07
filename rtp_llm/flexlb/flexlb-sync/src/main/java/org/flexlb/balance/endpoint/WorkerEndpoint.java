@@ -8,6 +8,8 @@ import java.util.OptionalLong;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Primary abstraction for a remote inference worker.
  * Holds one immutable-generation {@link WorkerStatus} reference — all state
@@ -98,18 +100,12 @@ public class WorkerEndpoint {
             WorkerStatus ws,
             WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
-        if (observation.owner() != ws) {
-            throw new IllegalArgumentException(
-                    "Status observation belongs to another WorkerStatus generation");
-        }
+        checkArgument(observation.owner() == ws, "Status observation belongs to another WorkerStatus generation");
         return NO_STATUS_PROJECTION;
     }
 
     protected final void requireStatusGeneration(WorkerStatus ws) {
-        if (status != ws) {
-            throw new IllegalArgumentException(
-                    "WorkerStatus generation does not belong to this endpoint");
-        }
+        checkArgument(status == ws, "WorkerStatus generation does not belong to this endpoint");
     }
 
     /**
@@ -128,11 +124,8 @@ public class WorkerEndpoint {
 
     /** Validate an exact, still-open pin before consuming its admission right. */
     public final void requirePinnedGeneration(GenerationPin pin) {
-        if (pin == null || pin.endpoint != this
-                || !pin.permit.isOpen()) {
-            throw new IllegalArgumentException(
-                    "Generation pin does not own this endpoint generation");
-        }
+        checkArgument(pin != null && pin.endpoint == this && pin.permit.isOpen(),
+                "Generation pin does not own this endpoint generation");
     }
 
     /**

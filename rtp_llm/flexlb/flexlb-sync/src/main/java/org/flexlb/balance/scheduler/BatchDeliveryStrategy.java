@@ -26,6 +26,8 @@ import java.util.function.BiConsumer;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.missingEndpoint;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.prepareMember;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.preserveRejectedCause;
@@ -58,10 +60,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             List<RequestRoute> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs) {
-        if (candidates.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "batch delivery requires at least one candidate");
-        }
+        checkArgument(!candidates.isEmpty(), "batch delivery requires at least one candidate");
         BatchTransaction transaction = new BatchTransaction(this, candidates.size());
         Throwable failure = null;
         try {
@@ -164,10 +163,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 }
                 gate = new DispatchGate(
                         claimed);
-                if (remainingQueueDepth < 0) {
-                    throw new IllegalArgumentException(
-                            "remainingQueueDepth must be non-negative");
-                }
+                checkArgument(remainingQueueDepth >= 0, "remainingQueueDepth must be non-negative");
                 sender.sendBatch(submitted, batch.batchId, deliveredPredictionMs,
                         decisionReason, gate);
                 senderAccepted = true;
@@ -257,9 +253,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                         if (!attempt.accepted()) { return attempt.boundary(); }
                         submission = attempt.value();
                         batchId = owner.batchIds.getAsLong();
-                        if (batchId <= 0L) {
-                            throw new IllegalStateException("batch id supplier returned a non-positive id");
-                        }
+                        checkState(batchId > 0L, "batch id supplier returned a non-positive id");
                         prefill = exact.prefillEp();
                         if (prefill == null) { throw missingEndpoint("Prefill", exact); }
                     } catch (Throwable failure) {
@@ -408,10 +402,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         private void requirePhase(Phase expected, String operation) {
-            if (phase != expected) {
-                throw new IllegalStateException(
-                        "cannot " + operation + " batch transaction in " + phase);
-            }
+            checkState(phase == expected, "cannot %s batch transaction in %s", operation, phase);
         }
     }
 
@@ -458,10 +449,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             for (DeliveryClaim claim : members) {
                 DeliveryClaim previous = claimsByItem.put(
                         claim.item, claim);
-                if (previous != null) {
-                    throw new IllegalArgumentException(
-                            "duplicate batch delivery identity");
-                }
+                checkArgument(previous == null, "duplicate batch delivery identity");
             }
         }
 
@@ -502,10 +490,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
         private void invoke(RequestRoute item, DeliveryResult completion) {
             DeliveryClaim claim = claimsByItem.get(item);
-            if (claim == null) {
-                throw new IllegalStateException(
-                        "batch completion referenced an unsubmitted identity");
-            }
+            checkState(claim != null, "batch completion referenced an unsubmitted identity");
             claim.complete(completion);
         }
     }
@@ -562,9 +547,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
             @Override
             public double durationMs(List<GroupPlanner.Item> prefix, int through) {
-                if (through < 0 || through >= prefix.size() || through + 1 < size) {
-                    throw new IllegalArgumentException("Prediction requires a growing prefix");
-                }
+                checkArgument(through >= 0 && through < prefix.size() && through + 1 >= size,
+                        "Prediction requires a growing prefix");
                 while (size <= through) {
                     GroupPlanner.Item item = prefix.get(size);
                     double next = prediction.append(item.seqLen(), item.hitCache());

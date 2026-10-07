@@ -5,12 +5,14 @@ import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Only the immutable configuration shared by all WorkerBatchers. */
 public record QueueExecutionSettings(boolean priorityOrdering, boolean preemptQueued,
         DispatcherConfig.Type dispatcherType, long maxOutstandingRequests, int maxInflightPerWorker,
         DecisionPolicyConfig.Type grouping, int maxRequests, long collectionWaitMs, long executionBudgetMs) {
     public static QueueExecutionSettings capture(FlexlbConfig config) {
-        if (!config.isQueue()) { throw new IllegalArgumentException("QUEUE settings required"); }
+        checkArgument(config.isQueue(), "QUEUE settings required");
         var decision = config.decisionPolicy();
         boolean single = decision.getType() == DecisionPolicyConfig.Type.SINGLE;
         return new QueueExecutionSettings(config.isPriorityOrdering(), config.allowsPreemption(VictimStage.PREFILL_QUEUED),

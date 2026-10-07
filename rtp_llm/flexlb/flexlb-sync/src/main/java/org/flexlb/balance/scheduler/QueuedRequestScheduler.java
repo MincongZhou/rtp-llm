@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
+import static com.google.common.base.Preconditions.checkState;
 import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 
 /**
@@ -232,9 +233,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 }
                 case SUBMIT, REQUEUE -> {
                     GlobalQueueEntry entry = event.entry;
-                    if (queuedEntries.putIfAbsent(entry.context, entry) != null) {
-                        throw new IllegalStateException("duplicate global queue identity");
-                    }
+                    checkState(queuedEntries.putIfAbsent(entry.context, entry) == null,
+                            "duplicate global queue identity");
                     if (event.kind == EventKind.REQUEUE) {
                         entry.context.setPlanType("");
                         entry.context.setPlanCost(0L);
