@@ -1247,8 +1247,6 @@ public final class PrefillState {
                 || reduction.active.unknownRequests < unknownEngineRequestCount;
         var result = new StatusReconciliation(reduction.result.schedulerFacts(),
                 reduction.result.batchCompletions(), capacityReleased);
-        committedWorkCapture = null;
-        recordMutationLocked();
         for (var change : reduction.batches.entrySet()) {
             BatchWork batch = change.getKey();
             BatchOutcome outcome = change.getValue();
@@ -1259,14 +1257,18 @@ public final class PrefillState {
             batch.touch(reduction.nowMs);
         }
         for (TerminalObservation terminal : reduction.terminals.values()) { removeCommittedLocked(terminal.owner); }
-        applyActiveObservationsLocked(reduction.active, reduction.nowMs);
+        boolean workChanged = applyActiveObservationsLocked(reduction.active, reduction.nowMs)
+                || !reduction.terminals.isEmpty() || !predictions.isEmpty();
         for (long batchId : reduction.predictionInputs.keySet()) {
             BatchWork batch = committedBatches.get(batchId);
             batch.remainingWorkMs = predictions.get(batchId);
             batch.phaseBaseMs = reduction.nowMs;
             batch.touch(reduction.nowMs);
         }
-        publishRequestCountLocked();
+        if (workChanged) {
+            committedWorkCapture = null;
+            recordMutationLocked();
+        }
         return result;
     }
 

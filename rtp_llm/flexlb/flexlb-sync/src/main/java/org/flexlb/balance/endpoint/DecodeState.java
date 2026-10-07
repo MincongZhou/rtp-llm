@@ -931,6 +931,9 @@ final class DecodeState {
     }
 
     void initialize(WorkerStatus.StatusObservation observation) {
+        if (observation.owner() != status) {
+            throw new IllegalArgumentException("Status belongs to another Decode generation");
+        }
         admissionLock.lock();
         try {
             if (!doCalibrate(observation.engine(), observation.finishedTasks()).isEmpty()) {

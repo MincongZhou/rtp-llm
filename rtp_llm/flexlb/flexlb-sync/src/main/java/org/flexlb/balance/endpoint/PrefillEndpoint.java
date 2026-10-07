@@ -520,6 +520,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Keep ordinary reduction/publication in one lock; predict a shrunk batch outside it. */
     private PrefillState.StatusReconciliation reduceStatus(WorkerStatus ws,
             WorkerStatus.StatusObservation observation, WorkerStatus.PreparedStatus prepared) {
+        if (observation.owner() != ws) {
+            throw new IllegalArgumentException("Status observation belongs to another Prefill generation");
+        }
         var lock = prefillState.ownershipLock();
         PrefillState.StatusReduction reduction = null;
         PrefillState.StatusReconciliation result = null;
@@ -537,10 +540,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         reduction = current;
                     }
                     if (reduction.predictionInputs().isEmpty() || !predictions.isEmpty()) {
+                        long version = prefillState.mutationVersion();
                         result = prefillState.commitStatusLocked(reduction, predictions);
                         if (result == null) { throw new IllegalStateException("Locked Prefill reduction changed during commit"); }
                         if (prepared != null && !observation.alive()) { beginRetirement(); }
-                        signalSchedulingInputsChanged();
+                        if (prefillState.mutationVersion() != version) { signalSchedulingInputsChanged(); }
                         if (prepared != null) { ws.publishPreparedStatus(prepared); }
                     }
                 } catch (Throwable failure) {

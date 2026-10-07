@@ -1047,6 +1047,26 @@ class PrefillStateSnapshotTest {
         }
     }
 
+    @Test
+    void unchangedWorkerObservationReusesWorkAndProjectionVersion() {
+        RequestRoute request = item(1);
+        commitBatch(List.of(request), 100L);
+        var active = Map.of("1", task(1, TaskPhase.RUNNING, 0L, 0L));
+        ToLongFunction<List<RequestRoute>> noRepacking = ignored -> {
+            throw new AssertionError("unchanged membership needs no prediction");
+        };
+        reconcile(Map.of(), active, noRepacking);
+        var before = capture();
+        clock.addAndGet(20L);
+        var result = reconcile(Map.of(), active, noRepacking);
+        var after = capture();
+        assertEquals(1, result.schedulerFacts().size(), "activity must still reach the request owner");
+        assertFalse(result.capacityReleased());
+        assertEquals(before.version(), after.version());
+        assertSame(before.work(), after.work());
+        assertEquals(80L, after.work().materialize().totalRemainingWorkMsAt(clock.get()).orElseThrow());
+    }
+
     private PrefillState.StatusReconciliation reconcile(Map<String, TaskInfo> finished, Map<String, TaskInfo> active,
                            ToLongFunction<List<RequestRoute>> repredictor) {
         WorkerStatusResponse response = new WorkerStatusResponse();

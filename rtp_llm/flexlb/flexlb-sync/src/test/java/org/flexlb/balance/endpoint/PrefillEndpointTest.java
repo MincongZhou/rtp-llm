@@ -145,6 +145,38 @@ class PrefillEndpointTest {
     }
 
     @Test
+    void unchangedFullStatusReusesProjectionInputs() {
+        FlexlbConfig directConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        directConfig.setScheduler(org.flexlb.config.SchedulerConfig.direct());
+        directConfig.setDispatcher(DispatcherConfig.nonBatch());
+        PrefillEndpoint direct = routeEndpoint(directConfig, "127.0.0.9");
+        try {
+            var before = direct.captureRouteProjectionInputs();
+            WorkerStatusResponse response = new WorkerStatusResponse();
+            response.setAlive(true);
+            response.setRunningTaskInfo(Map.of());
+            response.setFinishedTaskInfo(Map.of());
+            EndpointTestSupport.applyStatus(direct, response).run();
+            assertSame(before, direct.captureRouteProjectionInputs());
+        } finally { direct.close(); }
+    }
+
+    @Test
+    void initializationRejectsAnotherGenerationBeforeChangingProjection() {
+        var before = endpoint.captureRouteProjectionInputs();
+        WorkerStatus other = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.2", 8080, 8090);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.PREFILL);
+        response.setAlive(true);
+        response.setRunningTaskInfo(Map.of("999", taskInfo(999L, 0L, TaskPhase.RUNNING, 0, 0L)));
+        response.setFinishedTaskInfo(Map.of());
+        assertThrows(IllegalArgumentException.class,
+                () -> endpoint.initializeFromPreparedStatus(endpoint.getStatus(), other.freezeStatusResponse(response)));
+        assertFalse(endpoint.isGenerationRetiringOrRetired());
+        assertSame(before, endpoint.captureRouteProjectionInputs());
+    }
+
+    @Test
     void commitBatchIncreasesInflightCount() {
         assertEquals(0, endpoint.ownershipStats().batchCount());
 

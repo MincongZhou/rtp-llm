@@ -237,6 +237,18 @@ class DecodeStateTest {
     }
 
     @Test
+    void initializationRejectsAnotherGenerationBeforeChangingResources() {
+        WorkerStatus owner = status();
+        DecodeState state = new DecodeState(owner);
+        var incoming = response();
+        incoming.setRunningTaskInfo(Map.of("1", task(1, TaskPhase.RUNNING)));
+        long version = state.placementVersion();
+        assertThrows(IllegalArgumentException.class, () -> state.initialize(status().freezeStatusResponse(incoming)));
+        assertEquals(version, state.placementVersion());
+        assertEquals(0, state.routingView().totalLoad());
+    }
+
+    @Test
     void shadowSweepRechecksPhaseAfterRetentionCallbackConfirmsTheRequest() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
