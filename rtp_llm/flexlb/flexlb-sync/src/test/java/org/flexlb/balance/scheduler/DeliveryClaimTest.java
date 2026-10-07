@@ -357,7 +357,6 @@ class DeliveryClaimTest {
             f.owner.onResponseUndeliverable(f.context);
             f.cancel.complete(ack);
             f.owner.runtime.continuations().awaitIdle();
-            assertEquals(BalanceContext.DeliveryClaim.SendOutcome.UNKNOWN, f.claim.sendOutcome());
             assertFalse(f.claim.tryStartSend(), "uncertain delivery must not be sent again");
             assertFalse(f.settlement().isDone());
             assertTrue(f.owner.requests.isCurrent(f.context));

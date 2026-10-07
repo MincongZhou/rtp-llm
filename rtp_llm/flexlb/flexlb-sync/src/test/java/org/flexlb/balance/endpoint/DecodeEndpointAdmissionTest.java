@@ -164,7 +164,7 @@ class DecodeEndpointAdmissionTest {
         var incoming = endpoint.replaceQueuedRequests(handles(1L, 2L), 9L, 700, 708, 70,
                 new DecodeResources.AdmissionCapacity(2, 100));
         assertNotNull(incoming);
-        assertEquals(endpoint.reservationHandle(9L), incoming);
+        assertEquals(EndpointTestSupport.decodeReservation(endpoint, 9L), incoming);
         assertFalse(reserved().containsKey(1L));
         assertFalse(reserved().containsKey(2L));
         assertEquals(70, reserved().get(9L).priority());
@@ -450,11 +450,11 @@ class DecodeEndpointAdmissionTest {
     void reserveQueuedBeforeCloseRetiresUnpublishedOwnership() {
         DecodeResources.ReservationHandle reservation = reserveQueued(
                 1L, 100, 110, 50);
-        assertEquals(reservation, endpoint.reservationHandle(1L));
+        assertEquals(reservation, EndpointTestSupport.decodeReservation(endpoint, 1L));
 
         endpoint.close();
 
-        assertNull(endpoint.reservationHandle(1L));
+        assertNull(EndpointTestSupport.decodeReservation(endpoint, 1L));
         assertTrue(endpoint.resourceSnapshot().queuedCount() == 0);
         assertEquals(0L, endpoint.routingView().inflightHardKv());
         assertEquals(0L, endpoint.routingView().inflightExpectedKv());
@@ -523,7 +523,7 @@ class DecodeEndpointAdmissionTest {
         endpoint.close();
 
         assertEquals(TRANSFERRED, permit.dispatch());
-        assertNull(endpoint.reservationHandle(requestId));
+        assertNull(EndpointTestSupport.decodeReservation(endpoint, requestId));
         assertFalse(endpoint.resourceSnapshot().isQueued(requestId));
         assertEquals(0, endpoint.routingView().engineLoad(),
                 "retirement clears canonical generation ownership without reversing the permit result");
@@ -776,7 +776,7 @@ class DecodeEndpointAdmissionTest {
         DecodeResources.WorkerStatusFact active = facts.getValue().getFirst();
         assertEquals(DecodeResources.WorkerStatusFact.Kind.ACTIVE, active.kind());
         assertEquals(reservation, active.reservation());
-        assertEquals(reservation, endpoint.reservationHandle(1L));
+        assertEquals(reservation, EndpointTestSupport.decodeReservation(endpoint, 1L));
     }
 
     @Test
@@ -804,7 +804,7 @@ class DecodeEndpointAdmissionTest {
                 try (WorkerEndpoint.GenerationPin pin =
                              blockingEndpoint.tryPinGeneration()) {
                     assertNotNull(pin);
-                    blockingEndpoint.reserveUnqueued(pin, 71L, 500L, 600L, 80);
+                    EndpointTestSupport.reserveUnqueuedDecode(blockingEndpoint, pin, 71L, 500L, 600L, 80);
                 }
             });
             assertThrows(TimeoutException.class,
@@ -818,7 +818,7 @@ class DecodeEndpointAdmissionTest {
             statusUpdate.get(5, TimeUnit.SECONDS);
             reserve.get(5, TimeUnit.SECONDS);
 
-            assertNotNull(blockingEndpoint.reservationHandle(71L));
+            assertNotNull(EndpointTestSupport.decodeReservation(blockingEndpoint, 71L));
             assertEquals(500L, blockingEndpoint.routingView().inflightHardKv());
             assertEquals(600L,
                     blockingEndpoint.routingView().inflightExpectedKv());
@@ -1015,7 +1015,7 @@ class DecodeEndpointAdmissionTest {
                         "Decode endpoint generation is retired");
             }
             DecodeResources.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, requestId, hardKv, expectedKv, priority);
+                    EndpointTestSupport.reserveUnqueuedDecode(endpoint, pin, requestId, hardKv, expectedKv, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }

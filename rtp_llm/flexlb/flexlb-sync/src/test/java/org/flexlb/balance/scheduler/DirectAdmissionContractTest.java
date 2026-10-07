@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -108,7 +109,7 @@ class DirectAdmissionContractTest {
             assertEquals(0, fixture.decode.resourceSnapshot().queuedCount());
             assertEquals(1, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(fixture.requests).liveRequestCount());
             assertEquals(RequestState.Phase.ACKNOWLEDGED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(fixture.requests).getRequestState(101L, 0L).state());
-            var reservation = fixture.decode.reservationHandle(101L);
+            var reservation = EndpointTestSupport.decodeReservation(fixture.decode, 101L);
             assertNotNull(reservation);
             assertThrows(IllegalStateException.class, () -> fixture.decode.release(
                     reservation,
@@ -147,8 +148,8 @@ class DirectAdmissionContractTest {
             assertFalse(response.isSuccess());
             assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
             fixture.assertNoPrefillOwnership();
-            assertNull(fixture.decode.reservationHandle(102L));
-            assertEquals(occupant, fixture.decode.reservationHandle(999L));
+            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 102L));
+            assertEquals(occupant, EndpointTestSupport.decodeReservation(fixture.decode, 999L));
             assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(48L, fixture.decode.routingView().inflightExpectedKv());
             assertEquals(0, fixture.decode.resourceSnapshot().queuedCount());
@@ -179,7 +180,7 @@ class DirectAdmissionContractTest {
             assertTrue(raced.get());
             assertFalse(response.isSuccess(), "an already ended request must not receive a new successful route");
             fixture.assertNoPrefillOwnership();
-            assertNull(fixture.decode.reservationHandle(103L));
+            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 103L));
             assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(0L, fixture.decode.routingView().inflightExpectedKv());
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(fixture.requests).liveRequestCount());
@@ -197,7 +198,8 @@ class DirectAdmissionContractTest {
                 BalanceContext context = claim.item.ctx();
                 assertEquals(105L, context.getRequestId());
                 assertEquals(DeliveryClaimKind.ROUTE_DECISION, context.deliveryClaimKind());
-                assertEquals(BalanceContext.DeliveryClaim.SendOutcome.NOT_STARTED, claim.sendOutcome());
+                assertEquals(BalanceContext.DeliveryClaim.SendOutcome.NOT_STARTED,
+                        org.springframework.test.util.ReflectionTestUtils.getField(claim, "sendOutcome"));
                 assertFalse(claim.settlement().toCompletableFuture().isDone());
 
                 fixture.observe(fixture.decode, Map.of(), Map.of("105", task(105L, TaskPhase.RUNNING)));
@@ -211,7 +213,7 @@ class DirectAdmissionContractTest {
                         claim.settlement().toCompletableFuture().get(2L, TimeUnit.SECONDS).sendOutcome(),
                         "a worker terminal must not fabricate address publication");
                 fixture.assertNoPrefillOwnership();
-                assertNull(fixture.decode.reservationHandle(105L));
+                assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 105L));
                 assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
                 assertEquals(0L, fixture.decode.routingView().inflightExpectedKv());
                 assertEquals(0, fixture.requests.requests.liveRequestCount());
@@ -220,7 +222,8 @@ class DirectAdmissionContractTest {
 
                 assertSame(terminal, context.getFuture().join());
                 assertEquals(BalanceContext.RequestStage.FINISHED, context.stage());
-                assertEquals(BalanceContext.DeliveryClaim.SendOutcome.NOT_STARTED, claim.sendOutcome());
+                assertEquals(BalanceContext.DeliveryClaim.SendOutcome.NOT_STARTED,
+                        org.springframework.test.util.ReflectionTestUtils.getField(claim, "sendOutcome"));
                 raced.set(true);
                 return null;
             }).when(fixture.requests).publishRoute(any(), any(), org.mockito.ArgumentMatchers.anyLong());
@@ -267,7 +270,7 @@ class DirectAdmissionContractTest {
                 verify(fixture.decode).dispatch(any(), eq(DecodeResources.DispatchOutcome.ABANDONED));
                 assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
             }
-            assertNull(fixture.decode.reservationHandle(104L));
+            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 104L));
             fixture.assertNoPrefillOwnership();
         }
     }
@@ -297,7 +300,7 @@ class DirectAdmissionContractTest {
                 fixture.observe(fixture.decode, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
                 RequestProtocolTestSupport.awaitCondition(() -> fixture.requests.requests.findActive(101L) == null);
                 assertEquals(1, fixture.prefill.observedRequestCount());
-                assertNotNull(fixture.decode.reservationHandle(102L));
+                assertNotNull(EndpointTestSupport.decodeReservation(fixture.decode, 102L));
 
             }
         }

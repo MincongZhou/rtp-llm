@@ -31,7 +31,7 @@ import java.util.function.BooleanSupplier;
  * terminal transaction may complete before or after that acknowledgement.</p>
  */
 @Component
-public final class DecodePreemptionCoordinator implements AutoCloseable {
+public final class DecodePreemptionCoordinator {
 
     public record PreemptionResult(
             DecodeResources.ReservationHandle reservation, boolean controlFailure, String detail) {
@@ -90,31 +90,15 @@ public final class DecodePreemptionCoordinator implements AutoCloseable {
     private final EngineCancelChannel cancelChannel;
     private final RequestRepository requests;
     private final java.util.concurrent.ScheduledExecutorService timer;
-    private final boolean ownsTimer;
     private final AtomicLong tokenSequence = new AtomicLong(1);
 
     @org.springframework.beans.factory.annotation.Autowired
     public DecodePreemptionCoordinator(EngineCancelChannel cancelChannel, RequestRepository requests,
                                        org.flexlb.balance.scheduler.SchedulerRuntime runtime) {
-        this(cancelChannel, requests, runtime.cleanupExecutor(), false);
-    }
-
-    DecodePreemptionCoordinator(EngineCancelChannel cancelChannel, RequestRepository requests) {
-        this(cancelChannel, requests, new java.util.concurrent.ScheduledThreadPoolExecutor(1,
-                Thread.ofPlatform().daemon().name("flexlb-preemption-control-", 1).factory()), true);
-    }
-
-    private DecodePreemptionCoordinator(EngineCancelChannel cancelChannel, RequestRepository requests,
-                                        java.util.concurrent.ScheduledExecutorService timer, boolean ownsTimer) {
         this.cancelChannel = Objects.requireNonNull(cancelChannel, "cancelChannel");
         this.requests = Objects.requireNonNull(requests, "requests");
-        this.timer = Objects.requireNonNull(timer, "timer");
-        this.ownsTimer = ownsTimer;
+        this.timer = Objects.requireNonNull(runtime, "runtime").cleanupExecutor();
     }
-
-    @Override
-    @javax.annotation.PreDestroy
-    public void close() { if (ownsTimer) { timer.shutdown(); } }
 
     CompletableFuture<PreemptionResult> preempt(
             PreemptionCommand command) {

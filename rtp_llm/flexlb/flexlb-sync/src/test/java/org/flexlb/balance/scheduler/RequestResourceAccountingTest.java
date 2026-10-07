@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 
@@ -342,7 +343,7 @@ class RequestResourceAccountingTest {
             assertFalse(f.decode.release(oldReservation, DecodeResources.ReleaseReason.COUNTERPART_FINISHED).released());
             assertEquals(HARD_KV * 2, f.decode.routingView().inflightHardKv());
             assertEquals(EXPECTED_KV * 2, f.decode.routingView().inflightExpectedKv());
-            assertEquals(replacement, f.decode.reservationHandle(ID));
+            assertEquals(replacement, EndpointTestSupport.decodeReservation(f.decode, ID));
             f.decode.release(replacement, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             f.assertEmpty();
         }

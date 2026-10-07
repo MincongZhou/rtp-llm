@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillState;
@@ -200,7 +201,7 @@ class QueuedBatchDeliveryTest {
         RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, handoff + TIMEOUT_MS - 1);
         assertOccupancy(1, 1);
         var cleanupProof = new java.util.concurrent.CompletableFuture<org.flexlb.balance.eviction.EngineCancelChannel.CancelAck>();
-        org.mockito.Mockito.when(registry.runtime.cancelChannel().cancel(any(), org.mockito.ArgumentMatchers.anyLong(), any(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(cleanupProof);
+        org.mockito.Mockito.when(SchedulerTestSupport.cancelChannel(registry).cancel(any(), org.mockito.ArgumentMatchers.anyLong(), any(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(cleanupProof);
         RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, handoff + TIMEOUT_MS);
         assertOccupancy(1, 1);
         cleanupProof.complete(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED);
@@ -372,7 +373,7 @@ class QueuedBatchDeliveryTest {
         var future = RequestProtocolTestSupport.register(registry, context);
         DecodeResources.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reserveUnqueued(pin, id, 1L, 2L, 50);
+            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, id, 1L, 2L, 50);
         }
         assertNotNull(reservation);
         DeliverySettlementTestSupport.queueDecode(decode, reservation);

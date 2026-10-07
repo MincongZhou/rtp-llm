@@ -397,7 +397,7 @@ class RequestTerminalSettlementTest {
         var publisher = mock(ResponseCompletionExecutor.class);
         var timer = mock(ExpirationTimer.class);
         AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(publisher, context, timer);
-        when(requestOwner.runtime.cancelChannel().cancel(any(), anyLong(), any(), anyLong()))
+        when(SchedulerTestSupport.cancelChannel(requestOwner).cancel(any(), anyLong(), any(), anyLong()))
                 .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED));
         when(publisher.tryRegister()).thenAnswer(call -> new ResponseCompletionExecutor.CompletionRegistration(publisher));
         doAnswer(call -> {

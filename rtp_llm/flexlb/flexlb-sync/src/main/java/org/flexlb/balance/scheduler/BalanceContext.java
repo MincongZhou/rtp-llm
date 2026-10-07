@@ -1138,8 +1138,6 @@ public class BalanceContext {
 
         public java.util.concurrent.CompletionStage<DeliverySettlement> settlement() { return settled.minimalCompletionStage(); }
         boolean cleanupRequired() { synchronized (owner) { return abandonmentReason != null; } }
-        boolean cleanupComplete() { return settled.isDone(); }
-        public SendOutcome sendOutcome() { synchronized (owner) { return sendOutcome; } }
     }
 
     static SelectedResponse selectPublication(BalanceContext ctx, PublicationPermit permit, ResponseCompletion completion, Response response, Throwable failure, boolean mayInterruptIfRunning) {

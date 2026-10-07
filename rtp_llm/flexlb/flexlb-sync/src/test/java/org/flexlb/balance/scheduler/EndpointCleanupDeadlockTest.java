@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillCleanupDeadlockFixture;
@@ -176,7 +177,7 @@ class EndpointCleanupDeadlockTest {
                 DecodeResources.ReservationHandle reservation;
                 try (var pin = endpoint.tryPinGeneration()) {
                     assertNotNull(pin);
-                    reservation = endpoint.reserveUnqueued(pin, id, 1L, 1L, 50);
+                    reservation = EndpointTestSupport.reserveUnqueuedDecode(endpoint, pin, id, 1L, 1L, 50);
                 }
                 assertNotNull(reservation);
                 context.setFuture(future);

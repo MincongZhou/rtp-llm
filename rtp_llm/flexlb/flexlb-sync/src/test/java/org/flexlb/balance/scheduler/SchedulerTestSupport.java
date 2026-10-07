@@ -51,6 +51,9 @@ public final class SchedulerTestSupport {
         }
     }
     public static SchedulerRuntime runtime(RequestScheduler owner) { return ((AbstractRequestScheduler) owner).runtime; }
+    static EngineCancelChannel cancelChannel(RequestScheduler owner) {
+        return (EngineCancelChannel) ReflectionTestUtils.getField(runtime(owner), "cancelChannel");
+    }
     static Throwable failure(RequestScheduler owner) {
         return (Throwable) ReflectionTestUtils.getField(runtime(owner), "failure");
     }

@@ -50,6 +50,7 @@ class RequestInactivityTest {
     private PrefillEndpoint prefill;
     private DecodeEndpoint decode;
     private DeliveryClaim claim;
+    private boolean deliveryCompleted;
     private final CompletableFuture<org.flexlb.balance.eviction.EngineCancelChannel.CancelAck> cleanup = new CompletableFuture<>();
     private long registeredAtMs;
     private long handedOffAtMs;
@@ -170,7 +171,7 @@ class RequestInactivityTest {
             org.springframework.test.util.ReflectionTestUtils.setField(requestContext, "batchEnqueueStartedAtMs", past);
             registry.enqueueInactivityDeadline(requestContext, exact, System.currentTimeMillis(), () -> {
             });
-            claim.complete(DeliveryResult.delivered());
+            completeDelivery(DeliveryResult.delivered());
             assertEquals(RequestState.Phase.TIMED_OUT, requestContext.snapshot().state());
             assertFalse(item.future().isDone(), "response publication follows the accepted cleanup");
         } finally {
@@ -183,7 +184,7 @@ class RequestInactivityTest {
     @ParameterizedTest
     @EnumSource(value = DeliveryResult.Status.class, names = {"UNCERTAIN"})
     void uncertainDeliveryKeepsOnlyABoundedConfirmationWait(DeliveryResult.Status outcome) throws Exception {
-        claim.complete(new DeliveryResult(outcome, new IllegalStateException("reply was lost")));
+        completeDelivery(new DeliveryResult(outcome, new IllegalStateException("reply was lost")));
         assertLiveAndCharged();
         RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, handedOffAtMs + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
@@ -196,7 +197,7 @@ class RequestInactivityTest {
         assertEquals(RequestState.Phase.CANCEL_REQUESTED,
                 registry.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED).state());
         assertEquals(1, registry.requests.liveRequestCount());
-        assertFalse(claim.cleanupComplete());
+        assertFalse(claim.settlement().toCompletableFuture().isDone());
 
         synchronized (requestContext) {
             assertEquals(CancelReason.CLIENT_CANCELLED, RequestProtocolTestSupport.<CancelReason>inspect(registry, requestContext, "requireCancellationFirstCauseLocked"));
@@ -265,18 +266,23 @@ class RequestInactivityTest {
         verify(prefill, never()).releaseRequest(any());
     }
 
+    private void completeDelivery(DeliveryResult result) {
+        claim.complete(result);
+        deliveryCompleted = true;
+    }
+
     private void acknowledgeDelivery() throws Exception {
-        claim.complete(DeliveryResult.delivered());
+        completeDelivery(DeliveryResult.delivered());
         assertTrue(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
     }
 
     private void assertExpiredAndReleased(RequestState.Phase expectedState) {
-        if (!claim.cleanupComplete()) {
+        if (!claim.settlement().toCompletableFuture().isDone()) {
             assertEquals(1, registry.requests.liveRequestCount(), "expiry retains cleanup ownership");
             cleanup.complete(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED);
-            if (claim.sendOutcome() == DeliveryClaim.SendOutcome.SENDING) {
+            if (!deliveryCompleted) {
                 assertFalse(claim.settlement().toCompletableFuture().isDone(), "early cleanup cannot release the sender");
-                claim.complete(DeliveryResult.uncertain(new IllegalStateException("sender exited")));
+                completeDelivery(DeliveryResult.uncertain(new IllegalStateException("sender exited")));
             }
             claim.settlement().toCompletableFuture().join();
             registry.runtime.continuations().awaitIdle();

@@ -39,7 +39,6 @@ public final class SchedulerRuntime {
             new java.util.concurrent.ScheduledThreadPoolExecutor(2,
                     Thread.ofPlatform().daemon().name("flexlb-request-cleanup-", 1).factory());
 
-    org.flexlb.balance.eviction.EngineCancelChannel cancelChannel() { return cancelChannel; }
     public java.util.concurrent.ScheduledExecutorService cleanupExecutor() { return cleanupExecutor; }
 
     void startDeliveryCleanup(BalanceContext.DeliveryClaim claim) {

@@ -310,7 +310,7 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("2", runningTask(2L, TaskPhase.RUNNING, 256)), null, 10_000);
         assertEquals(DecodeResources.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(2L), 9L, 700L, 708L, 70));
-        var incoming = endpoint.reservationHandle(9L);
+        var incoming = EndpointTestSupport.decodeReservation(endpoint, 9L);
         assertTrue(incoming != null);
         var before = endpoint.resourceSnapshot();
         assertEquals(1, before.runningCount());
@@ -384,7 +384,7 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         assertEquals(DecodeResources.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L), 9L, 700, 708, 70));
-        var incoming = endpoint.reservationHandle(9L);
+        var incoming = EndpointTestSupport.decodeReservation(endpoint, 9L);
         assertTrue(EndpointTestSupport.handoffPreemption(endpoint, 101L));
 
         endpoint.close();
@@ -487,7 +487,7 @@ class DecodeEndpointLayeredViewTest {
         assertFalse(endpoint.updatePreemption(105L, DecodeResources.PreemptionUpdate.canceled(victim)));
         assertEquals(1, endpoint.routingView().totalLoad());
         assertEquals(9_300, endpoint.routingView().realKvAvailable());
-        var incoming = endpoint.reservationHandle(9L);
+        var incoming = EndpointTestSupport.decodeReservation(endpoint, 9L);
         assertNotNull(incoming);
         assertEquals(incoming, endpoint.commitPreemption(105L));
         assertNull(endpoint.commitPreemption(105L));
@@ -680,7 +680,7 @@ class DecodeEndpointLayeredViewTest {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertTrue(pin != null);
             DecodeResources.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, requestId, hardKv, expectedKv, priority);
+                    EndpointTestSupport.reserveUnqueuedDecode(endpoint, pin, requestId, hardKv, expectedKv, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }

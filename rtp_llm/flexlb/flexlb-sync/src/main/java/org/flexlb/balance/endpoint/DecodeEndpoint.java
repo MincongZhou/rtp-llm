@@ -68,17 +68,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return state.reserve(requestId, hardKv, expectedKv, priority, true, capacity);
     }
 
-    /** An engine-facing shadow for work already outside the local queue. */
-    public ReservationHandle reserveUnqueued(GenerationPin pin, long requestId, long hardKv,
-                                             long expectedKv, int priority) {
-        requirePinnedGeneration(pin);
-        ReservationHandle reservation = state.reserve(requestId, hardKv, expectedKv, priority, false, null);
-        if (reservation == null) {
-            throw new IllegalStateException("Decode request id is already owned: " + requestId);
-        }
-        return reservation;
-    }
-
     /** LOCAL_ROLLBACK requires local ownership; other evidence may leave Engine/protocol ownership intact. */
     public ReservationReleaseResult release(ReservationHandle reservation, ReleaseReason reason) {
         ReservationReleaseResult result = state.release(reservation, reason);
@@ -97,10 +86,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public boolean isAcceptedByEngine(ReservationHandle reservation) { return state.isAcceptedByEngine(reservation); }
-
-    public ReservationHandle reservationHandle(long requestId) {
-        return isRetired() ? null : state.reservationHandle(requestId);
-    }
 
     // Dispatch: acquire capacity, hand over ownership, or return the permit.
 

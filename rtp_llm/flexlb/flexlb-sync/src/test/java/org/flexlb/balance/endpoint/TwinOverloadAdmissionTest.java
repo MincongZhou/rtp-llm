@@ -166,18 +166,18 @@ class TwinOverloadAdmissionTest {
         }
         for (long id = 1; id <= 8; id++) {
             DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                    endpoint.acquireDispatchPermit(endpoint.reservationHandle(id), new DecodeResources.AdmissionCapacity(8L, 90L));
+                    endpoint.acquireDispatchPermit(EndpointTestSupport.decodeReservation(endpoint, id), new DecodeResources.AdmissionCapacity(8L, 90L));
             assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
             assertEquals(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().dispatch());
         }
         assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
-                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeResources.AdmissionCapacity(8L, 90L)).status());
+                endpoint.acquireDispatchPermit(EndpointTestSupport.decodeReservation(endpoint, 9L), new DecodeResources.AdmissionCapacity(8L, 90L)).status());
 
         applyStatus(endpoint, tasks(2L, 7, 10L, TaskPhase.RUNNING),
                 tasks(1L, 1, 10L, TaskPhase.RUNNING));
         DecodeEndpoint.EngineDispatchPermitAcquisition resumed =
-                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeResources.AdmissionCapacity(8L, 90L));
+                endpoint.acquireDispatchPermit(EndpointTestSupport.decodeReservation(endpoint, 9L), new DecodeResources.AdmissionCapacity(8L, 90L));
         assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, resumed.status());
         assertTrue(resumed.permit().release());
     }

@@ -422,12 +422,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 : Optional.ofNullable(context.tryInstallPreemption(exact, attemptToken, detail));
     }
 
-    /**
-     * Retain registered IDs, including terminal records, during endpoint orphan cleanup.
-     * Called under endpoint locks: never acquire a context lock here. Read the current
-     * directory rather than a snapshot, which could miss a newly registered request.
-     */
-
     public void onQueuedItemExpired(RequestRoute exact) {
         BalanceContext requestContext = findRouteContext(exact);
         if (requestContext != null) {

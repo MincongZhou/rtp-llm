@@ -1,5 +1,6 @@
 package org.flexlb.balance.eviction;
 
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
@@ -162,7 +163,7 @@ class EvictionManagerTryAdmitTest {
         completion.complete(new DecodePreemptionCoordinator.PreemptionResult(exact, false, "committed"));
         assertSame(exact, outcome.join().reservation());
         assertNull(context.getResponse(), "reservation preparation does not publish a route response");
-        verify(endpoint, org.mockito.Mockito.never()).reservationHandle(anyLong());
+        verify(endpoint, org.mockito.Mockito.times(1)).resourceSnapshot();
         if (metricsFail) {
             verify(reporter).reportEviction(org.mockito.ArgumentMatchers.eq(RequestSchedulerReporter.EvictionEvent.PLAN), anyInt(), any(), any());
             verify(reporter).reportEngineCancel(org.mockito.ArgumentMatchers.eq(CancelEvent.REQUEST), any(), anyInt());

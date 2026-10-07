@@ -18,10 +18,44 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-/** Shared fixtures which exercise only the frozen endpoint-facing ports. */
+/** Shared fixtures for exact endpoint and resource ownership contracts. */
 public final class EndpointTestSupport {
 
     private EndpointTestSupport() {
+    }
+
+    /** Build a real local reservation without publishing it to the master queue. */
+    public static DecodeResources.ReservationHandle reserveUnqueuedDecode(
+            DecodeEndpoint endpoint, WorkerEndpoint.GenerationPin pin, long requestId,
+            long hardKv, long expectedKv, int priority) {
+        endpoint.requirePinnedGeneration(pin);
+        var state = (DecodeState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "state");
+        var reservation = state.reserve(requestId, hardKv, expectedKv, priority, false, null);
+        if (reservation == null) {
+            throw new IllegalStateException("Decode request id is already owned: " + requestId);
+        }
+        return reservation;
+    }
+
+    /** Read shadow ownership for assertions, without granting a production lookup capability. */
+    public static DecodeResources.ReservationHandle decodeReservation(DecodeEndpoint endpoint, long requestId) {
+        return endpoint.isRetired() ? null : decodeReservation(endpoint.resourceSnapshot(), requestId);
+    }
+
+    static DecodeResources.ReservationHandle decodeReservation(DecodeState state, long requestId) {
+        return decodeReservation(state.resourceSnapshot(), requestId);
+    }
+
+    private static DecodeResources.ReservationHandle decodeReservation(
+            DecodeResources.ResourceSnapshot snapshot, long requestId) {
+        var request = snapshot.requests().get(requestId);
+        if (request == null || request.reservationToken() <= 0L) { return null; }
+        return switch (request.phase()) {
+            case LOCAL_RESERVED, MASTER_QUEUED_NOT_DISPATCHED, ENGINE_MAY_HAVE_SEEN ->
+                    new DecodeResources.ReservationHandle(
+                            snapshot.routing().generationId(), requestId, request.reservationToken());
+            default -> null;
+        };
     }
 
     static int evictPrefill(PrefillState state, long ttlMs, java.util.function.LongPredicate retained) {

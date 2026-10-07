@@ -89,10 +89,10 @@ class TransientCapacityQueueContractTest {
         try (Fixture fixture = new Fixture(null, config)) {
             var low = fixture.runtime.scheduler().submit(fixture.context(990_001L, 20));
             awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
-            var oldReservation = fixture.decodeEndpoint.reservationHandle(990_001L);
+            var oldReservation = SchedulerTestSupport.decodeReservation(fixture.decodeEndpoint, 990_001L);
             var high = fixture.runtime.scheduler().submit(fixture.context(990_002L, 80));
-            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle(990_002L) != null
-                    && fixture.decodeEndpoint.reservationHandle(990_001L) == null, 2_000L);
+            awaitCondition(() -> SchedulerTestSupport.decodeReservation(fixture.decodeEndpoint, 990_002L) != null
+                    && SchedulerTestSupport.decodeReservation(fixture.decodeEndpoint, 990_001L) == null, 2_000L);
             awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
             assertFalse(low.isDone(), "local preemption must not return NO_AVAILABLE_WORKER");
             assertFalse(high.isDone());
@@ -100,10 +100,10 @@ class TransientCapacityQueueContractTest {
             assertEquals(1, fixture.decodeEndpoint.routingView().totalLoad());
             fixture.runtime.scheduler().cancel(990_002L, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(high.get(2, TimeUnit.SECONDS).isSuccess());
-            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle(990_001L) != null
+            awaitCondition(() -> SchedulerTestSupport.decodeReservation(fixture.decodeEndpoint, 990_001L) != null
                     && fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertFalse(low.isDone());
-            assertTrue(fixture.decodeEndpoint.reservationHandle(990_001L).reservationToken()
+            assertTrue(SchedulerTestSupport.decodeReservation(fixture.decodeEndpoint, 990_001L).reservationToken()
                     != oldReservation.reservationToken());
             assertEquals(List.of(), fixture.submission.requestIds(), "neither queued route was sent to the engine");
             fixture.runtime.scheduler().cancel(990_001L, 0L, CancelReason.CLIENT_CANCELLED);

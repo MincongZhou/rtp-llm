@@ -56,8 +56,8 @@ class DecodeCapacityPreemptionTest {
         assertEquals(usageChanged ? DecodeResources.PreemptionBeginResult.INFEASIBLE
                         : DecodeResources.PreemptionBeginResult.SUCCESS,
                 endpoint.beginPreemption(1L, List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
-        assertNotNull(endpoint.reservationHandle(1L));
-        if (usageChanged) { assertNull(endpoint.reservationHandle(9L)); }
+        assertNotNull(EndpointTestSupport.decodeReservation(endpoint, 1L));
+        if (usageChanged) { assertNull(EndpointTestSupport.decodeReservation(endpoint, 9L)); }
     }
 
     @Test
@@ -76,8 +76,8 @@ class DecodeCapacityPreemptionTest {
         DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
         assertNotNull(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
-        assertNull(endpoint.reservationHandle(1L));
-        assertNotNull(endpoint.reservationHandle(9L));
+        assertNull(EndpointTestSupport.decodeReservation(endpoint, 1L));
+        assertNotNull(EndpointTestSupport.decodeReservation(endpoint, 9L));
     }
 
     @Test

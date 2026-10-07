@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointCleanupTestSupport;
@@ -69,7 +70,7 @@ class EndpointCleanupOwnershipTest {
                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(mock(AbstractRequestScheduler.class)));
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            assertNotNull(endpoint.reserveUnqueued(pin, id, 1L, 1L, 50));
+            assertNotNull(EndpointTestSupport.reserveUnqueuedDecode(endpoint, pin, id, 1L, 1L, 50));
         }
         assertEquals(0, endpoint.evictExpiredRequests(-1L, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)::retainsIdentity));
         assertEquals(1, endpoint.getInflightCount());
@@ -264,7 +265,7 @@ class EndpointCleanupOwnershipTest {
             DecodeEndpoint endpoint, long id, long hardKv, long expectedKv) {
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            var reservation = endpoint.reserveUnqueued(pin, id, hardKv, expectedKv, 50);
+            var reservation = EndpointTestSupport.reserveUnqueuedDecode(endpoint, pin, id, hardKv, expectedKv, 50);
             assertNotNull(reservation);
             return reservation;
         }

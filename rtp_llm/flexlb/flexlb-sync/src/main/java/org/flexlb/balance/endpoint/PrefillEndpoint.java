@@ -279,16 +279,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     private void notifyCapacityAvailable() {
-        try { signalCapacityAvailable(); }
+        try {
+            if (runtime != null) { runtime.signalDeliveryCapacityAvailable(); }
+            signalPlacementCapacityChanged();
+        }
         catch (Throwable failure) {
             try { logger.error("Prefill capacity notification failed", failure); }
             catch (Throwable ignored) { }
         }
-    }
-
-    public void signalCapacityAvailable() {
-        if (runtime != null) { runtime.signalDeliveryCapacityAvailable(); }
-        signalPlacementCapacityChanged();
     }
 
     private void signalSchedulingInputsChanged() {

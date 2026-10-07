@@ -331,9 +331,9 @@ class EndpointRegistryRoleTest {
 
         assertNotSame(oldEndpoint, replacement);
         assertTrue(oldEndpoint.isRetired());
-        assertNull(oldEndpoint.reservationHandle(oldReservation.requestId()),
+        assertNull(EndpointTestSupport.decodeReservation(oldEndpoint, oldReservation.requestId()),
                 "close must retire A's queued ownership before B is routable");
-        assertNull(replacement.reservationHandle(oldReservation.requestId()));
+        assertNull(EndpointTestSupport.decodeReservation(replacement, oldReservation.requestId()));
         replacement.release(oldReservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         assertTrue(replacement.resourceSnapshot().reservedCount() == 0,
                 "A's exact generation handle must never mutate same-address B");

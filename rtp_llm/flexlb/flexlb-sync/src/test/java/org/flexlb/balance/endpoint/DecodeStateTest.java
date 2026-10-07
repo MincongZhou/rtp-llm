@@ -352,7 +352,7 @@ class DecodeStateTest {
         assertNotNull(state.finishPreemption(1, true));
         assertEquals(1, state.routingView().engineCapacityUsed());
         assertEquals(9_900L, state.routingView().realKvAvailable());
-        assertEquals(RELEASED, state.release(state.reservationHandle(11), ReleaseReason.LOCAL_ROLLBACK));
+        assertEquals(RELEASED, state.release(EndpointTestSupport.decodeReservation(state, 11), ReleaseReason.LOCAL_ROLLBACK));
         assertEquals(0, state.routingView().engineCapacityUsed());
     }
 

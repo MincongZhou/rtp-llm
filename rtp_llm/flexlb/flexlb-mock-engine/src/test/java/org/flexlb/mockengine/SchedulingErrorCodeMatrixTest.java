@@ -1,5 +1,6 @@
 package org.flexlb.mockengine;
 
+import org.flexlb.balance.scheduler.SchedulerTestSupport;
 import com.google.protobuf.ByteString;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.config.DecisionPolicyConfig;
@@ -288,7 +289,7 @@ class SchedulingErrorCodeMatrixTest {
         void reserveDecode(int priority) {
             var endpoint = harness.decodeEndpoint(0);
             try (var pin = endpoint.tryPinGeneration()) {
-                assertNotNull(endpoint.reserveUnqueued(pin, REQUEST_ID - 1, 0L, 0L, priority));
+                assertNotNull(SchedulerTestSupport.reserveUnqueuedDecode(endpoint, pin, REQUEST_ID - 1, 0L, 0L, priority));
             }
         }
 

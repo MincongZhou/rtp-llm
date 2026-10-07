@@ -120,7 +120,7 @@ class RequestConfirmationTimeoutTest {
                 requests.setDeliveryPrediction(claim, new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
             }
             if (waiting == ConfirmationWait.UNCERTAIN_REPLY) {
-                org.mockito.Mockito.when(SchedulerTestSupport.runtime(requests).cancelChannel().cancel(
+                org.mockito.Mockito.when(SchedulerTestSupport.cancelChannel(requests).cancel(
                         org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong(),
                         org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
                         .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED));

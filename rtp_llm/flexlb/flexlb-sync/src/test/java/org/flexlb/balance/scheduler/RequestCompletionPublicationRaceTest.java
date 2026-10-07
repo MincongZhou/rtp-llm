@@ -317,7 +317,7 @@ class RequestCompletionPublicationRaceTest {
                 await(resumeCleanup);
                 return DecodeResources.ReservationReleaseResult.RELEASED;
             }).when(decode).release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
-            when(registry.runtime.cancelChannel().cancel(any(), anyLong(), any(), anyLong()))
+            when(SchedulerTestSupport.cancelChannel(registry).cancel(any(), anyLong(), any(), anyLong()))
                     .thenReturn(CompletableFuture.completedFuture(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED));
             assertTrue(claim.tryStartSend());
             var completions = new java.util.concurrent.atomic.AtomicInteger();

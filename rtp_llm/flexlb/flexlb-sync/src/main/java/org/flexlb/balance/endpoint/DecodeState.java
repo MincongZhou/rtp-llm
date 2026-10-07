@@ -197,22 +197,6 @@ final class DecodeState {
         }
     }
 
-    ReservationHandle reservationHandle(long requestId) {
-        admissionLock.lock();
-        try {
-            DecodeRequestState current = shadowReservation(requestId);
-            if (current == null || current.reservationToken <= 0L) {
-                return null;
-            }
-            return new ReservationHandle(
-                    status.getGenerationId(),
-                    requestId,
-                    current.reservationToken);
-        } finally {
-            admissionLock.unlock();
-        }
-    }
-
     ReservationReleaseResult release(ReservationHandle reservation, ReleaseReason reason) {
         java.util.Objects.requireNonNull(reason, "reason");
         if (reservation == null) {

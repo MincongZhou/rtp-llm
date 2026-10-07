@@ -142,7 +142,7 @@ class DecodeRequestExpirationTest {
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(DecodeResources.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L), 9L, 100, 120, 70));
-        DecodeResources.ReservationHandle incoming = endpoint.reservationHandle(9L);
+        DecodeResources.ReservationHandle incoming = EndpointTestSupport.decodeReservation(endpoint, 9L);
         assertTrue(endpoint.release(incoming, DecodeResources.ReleaseReason.EXPIRED).released());
         assertFalse(endpoint.release(incoming, DecodeResources.ReleaseReason.EXPIRED).released());
         endpoint.abortPreemption(101L);
@@ -204,7 +204,7 @@ class DecodeRequestExpirationTest {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertTrue(pin != null);
             DecodeResources.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, requestId, hardKv, expectedKv, priority);
+                    EndpointTestSupport.reserveUnqueuedDecode(endpoint, pin, requestId, hardKv, expectedKv, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }

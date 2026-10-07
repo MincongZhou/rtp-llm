@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.DecodeResources;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.PlacementResult;
@@ -769,7 +770,7 @@ class DecodeSelectorTest {
             long expectedKvTokens,
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.reserveUnqueued(pin, requestId, kvTokens, expectedKvTokens, priority);
+            EndpointTestSupport.reserveUnqueuedDecode(endpoint, pin, requestId, kvTokens, expectedKvTokens, priority);
         }
     }
 

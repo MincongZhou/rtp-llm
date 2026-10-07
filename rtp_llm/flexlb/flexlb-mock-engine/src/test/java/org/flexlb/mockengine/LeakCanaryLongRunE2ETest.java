@@ -1,5 +1,6 @@
 package org.flexlb.mockengine;
 
+import org.flexlb.balance.scheduler.SchedulerTestSupport;
 import org.flexlb.dao.loadbalance.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -171,7 +172,7 @@ class LeakCanaryLongRunE2ETest {
             if (!"completed".equals(state)) { return; }
             long observedAt = completedAt.computeIfAbsent(requestId, ignored -> now);
             if (now - observedAt >= COMPLETION_SETTLEMENT_MS) {
-                assertTrue(h.decodeEndpoint(0).reservationHandle(requestId) == null,
+                assertTrue(SchedulerTestSupport.decodeReservation(h.decodeEndpoint(0), requestId) == null,
                         "completed request " + requestId + " must settle via WorkerStatus, before inactivity expiry");
             }
         });

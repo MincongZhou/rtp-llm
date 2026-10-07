@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.eviction.EngineCancelChannel;
@@ -113,7 +114,7 @@ class DeliverySettlementTest {
         var decode = spy(new DecodeEndpoint(WorkerStatus.createDiscovered(
                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), registry.requests));
         DecodeResources.ReservationHandle reservation;
-        try (var pin = decode.tryPinGeneration()) { reservation = decode.reserveUnqueued(pin, 2L, 1L, 1L, 50); }
+        try (var pin = decode.tryPinGeneration()) { reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 2L, 1L, 1L, 50); }
         Member member = member(2L, 12L, decode, reservation);
         ledger.commit(12L, List.of(member.item()));
         DeliverySettlementTestSupport.dispatchDecode(decode, reservation);
@@ -287,7 +288,7 @@ class DeliverySettlementTest {
         var decode = spy(new DecodeEndpoint(WorkerStatus.createDiscovered(
                 RoleType.DECODE, null, "127.0.0.1", 8180, 8181, null), registry.requests));
         DecodeResources.ReservationHandle reservation;
-        try (var pin = decode.tryPinGeneration()) { reservation = decode.reserveUnqueued(pin, 70L, 1L, 2L, 50); }
+        try (var pin = decode.tryPinGeneration()) { reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 70L, 1L, 2L, 50); }
         Member member = member(70L, 70L, decode, reservation);
         ledger.commit(70L, List.of(member.item()));
         DeliverySettlementTestSupport.dispatchDecode(decode, reservation);

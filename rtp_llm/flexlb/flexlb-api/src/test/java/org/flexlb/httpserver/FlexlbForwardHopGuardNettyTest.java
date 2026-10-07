@@ -175,7 +175,7 @@ class FlexlbForwardHopGuardNettyTest {
         for (var status : List.of(io.grpc.Status.UNAVAILABLE, io.grpc.Status.DEADLINE_EXCEEDED)) {
             var scheduleCalls = new AtomicInteger();
             var cancelCalls = new AtomicInteger();
-            Server master = NettyServerBuilder.forPort(0)
+            Server master = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
                     .addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
                         @Override
                         public void schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
