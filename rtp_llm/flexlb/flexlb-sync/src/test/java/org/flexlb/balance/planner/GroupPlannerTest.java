@@ -43,17 +43,28 @@ class GroupPlannerTest {
     }
 
     @Test
-    void paddedTokensMatchExactArithmeticAtOverflowBoundaries() {
+    void paddedTokensAndGroupGrowthRespectOverflowBoundaries() {
         long[] lengths = {0L, 1L, 2L, 1L << 31, 1L << 32, 1L << 62,
-                Long.MAX_VALUE / 3, Long.MAX_VALUE / 3 + 1, Long.MAX_VALUE};
-        int[] sizes = {1, 2, 3, 4, 16, 1 << 30, Integer.MAX_VALUE};
+                Long.MAX_VALUE / 3, Long.MAX_VALUE / 3 + 1, Long.MAX_VALUE / 7, Long.MAX_VALUE};
+        int[] sizes = {1, 2, 3, 4, 7, 16};
         var maximum = java.math.BigInteger.valueOf(Long.MAX_VALUE);
         for (long length : lengths) {
             for (int size : sizes) {
-                long expected = java.math.BigInteger.valueOf(length)
-                        .multiply(java.math.BigInteger.valueOf(size)).min(maximum).longValueExact();
-                long actual = GroupPlanner.saturatedMultiply(length, size);
-                assertEquals(expected, actual, "length=" + length + ", size=" + size);
+                var items = java.util.stream.LongStream.rangeClosed(1L, size)
+                        .mapToObj(id -> item(id, length, 0L)).toList();
+                var selected = GroupPlanner.selectWithPrediction(items,
+                        new Constraints(size, Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L), null);
+                int expectedSize = 1;
+                while (expectedSize < size && java.math.BigInteger.valueOf(length)
+                        .multiply(java.math.BigInteger.valueOf(expectedSize + 1L)).compareTo(maximum) < 0) {
+                    expectedSize++;
+                }
+                long expectedTokens = java.math.BigInteger.valueOf(length)
+                        .multiply(java.math.BigInteger.valueOf(expectedSize)).longValueExact();
+                String input = "length=" + length + ", size=" + size;
+                assertEquals(expectedSize, selected.items().size(), input);
+                assertEquals(expectedTokens, selected.paddedTokens(), input);
+                assertEquals(expectedTokens, selected.kvTokens(), input);
             }
         }
     }
@@ -156,7 +167,6 @@ class GroupPlannerTest {
             assertFalse(two.fitsKv(149L));
             assertTrue(two.fitsKv(Long.MAX_VALUE), "MAX means unlimited KV");
         }
-
 
     }
 

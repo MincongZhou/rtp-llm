@@ -8,6 +8,9 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalDouble;
 
+import static com.google.common.math.LongMath.saturatedAdd;
+import static com.google.common.math.LongMath.saturatedMultiply;
+
 /**
  * Pure fixed-window decision-group planning.
  *
@@ -234,17 +237,6 @@ public final class GroupPlanner {
                     "group prediction must be finite and non-negative");
         }
         return predictedMs;
-    }
-
-    static long saturatedMultiply(long value, int multiplier) {
-        long product = value * multiplier;
-        return Math.multiplyHigh(value, multiplier) != 0L || product < 0L
-                ? Long.MAX_VALUE : product;
-    }
-
-    private static long saturatedAdd(long left, long right) {
-        return right > 0L && left > Long.MAX_VALUE - right
-                ? Long.MAX_VALUE : left + right;
     }
 
 }

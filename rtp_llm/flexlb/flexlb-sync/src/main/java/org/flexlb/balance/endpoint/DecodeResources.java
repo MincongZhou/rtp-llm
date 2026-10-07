@@ -7,6 +7,8 @@ import org.flexlb.enums.DecodeTaskPhase;
 import java.util.Map;
 import java.util.function.Predicate;
 
+import static com.google.common.math.LongMath.saturatedAdd;
+
 /** Immutable Decode resource identities, capacity arithmetic, snapshots and observed facts. */
 public final class DecodeResources {
     private DecodeResources() { }
@@ -314,7 +316,7 @@ public final class DecodeResources {
             if (left < 0 || right < 0) {
                 throw new IllegalArgumentException("KV admission counters must be non-negative");
             }
-            return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+            return saturatedAdd(left, right);
         }
 
         public CapacityRelease plus(CapacityRelease other) {

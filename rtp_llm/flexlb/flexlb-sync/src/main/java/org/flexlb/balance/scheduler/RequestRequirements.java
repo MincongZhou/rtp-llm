@@ -1,12 +1,13 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.config.FlexlbConfig;
 
-import java.util.Objects;
 import java.util.List;
+import java.util.Objects;
+
+import static com.google.common.math.LongMath.saturatedAdd;
 
 /** Immutable request input and demand captured once at registration; owns no resources. */
 public record RequestRequirements(
@@ -40,8 +41,7 @@ public record RequestRequirements(
         long seqLen = request.getSeqLen();
         long promptTokens = Math.max(0L, seqLen);
         long outputTokens = Math.max(0L, request.getMaxNewTokens());
-        long expectedTokens = promptTokens > Long.MAX_VALUE - outputTokens
-                ? Long.MAX_VALUE : promptTokens + outputTokens;
+        long expectedTokens = saturatedAdd(promptTokens, outputTokens);
         var availability = config.getRouter().getRoles().getDecode().getAvailability();
         Long maxRequests = availability.getMaxEngineRequests();
         DecodeResources.AdmissionCapacity capacity = new DecodeResources.AdmissionCapacity(

@@ -11,9 +11,9 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.WorkerBatcher;
-import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -610,7 +610,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         PrefillBatchFeatures features = PrefillBatchFeatures.from(
                 survivingRequests,
                 item -> Math.max(0L, item.seqLen()),
-                item -> Math.max(0L, Math.min(item.hitCache(), item.seqLen())));
+                item -> Math.clamp(item.hitCache(), 0L, Math.max(0L, item.seqLen())));
         try {
             return PrefillPredictionBoundary.predictCommittedBatchMs(predictor.evaluator(), features);
         } catch (RuntimeException predictionFailure) {

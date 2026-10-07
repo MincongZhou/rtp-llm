@@ -12,6 +12,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
 
+import static com.google.common.math.LongMath.saturatedAdd;
+
 /** Thread-confined frozen-snapshot TTFT projector and invocation-scoped result view. */
 public final class RouteTimelineProjector implements RouteProjection.CandidateView {
 
@@ -476,11 +478,6 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
     @Override
     public long routingCacheMatchTokens() {
         return routingCacheMatchTokens;
-    }
-
-    private static long saturatedAdd(long left, long right) {
-        return right > 0L && left > Long.MAX_VALUE - right
-                ? Long.MAX_VALUE : left + right;
     }
 
     /**

@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeResources;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.opentelemetry.context.Context;
@@ -9,10 +8,11 @@ import lombok.Setter;
 import lombok.ToString;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ExpirationTimer.DecisionDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
@@ -38,6 +38,7 @@ import java.util.function.BiConsumer;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
+import static com.google.common.math.LongMath.saturatedAdd;
 import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 import static org.flexlb.dao.loadbalance.Response.buildSuccessResponse;
 
@@ -681,10 +682,10 @@ public class BalanceContext {
             } else if (!this.prefillObserved) {
                 OptionalLong precedingMs = precedingWork.totalRemainingWorkMsAt(nowMs);
                 if (precedingMs.isPresent()) {
-                    long remainingMs = addWork(precedingMs.getAsLong(), unstartedWorkMs);
+                    long remainingMs = saturatedAdd(precedingMs.getAsLong(), unstartedWorkMs);
                     double scaled = Math.ceil(remainingMs * lifetime);
                     long durationMs = scaled >= Long.MAX_VALUE ? Long.MAX_VALUE : (long) scaled;
-                    this.decisionExpiresAtMs = OptionalLong.of(deadlineAfter(nowMs, addWork(durationMs, DECODE_HANDOFF_GRACE_MS)));
+                    this.decisionExpiresAtMs = OptionalLong.of(deadlineAfter(nowMs, saturatedAdd(durationMs, DECODE_HANDOFF_GRACE_MS)));
                 }
             }
         }
@@ -883,15 +884,11 @@ public class BalanceContext {
         this.stage = next;
     }
 
-    private static long addWork(long precedingMs, long unstartedMs) {
-        return precedingMs > Long.MAX_VALUE - unstartedMs ? Long.MAX_VALUE : precedingMs + unstartedMs;
-    }
-
     private static long deadlineAfter(long startedAtMs, long durationMs) {
         if (startedAtMs < 0L || durationMs <= 0L) {
             throw new IllegalArgumentException("deadline requires a valid start and positive duration");
         }
-        return startedAtMs > Long.MAX_VALUE - durationMs ? Long.MAX_VALUE : startedAtMs + durationMs;
+        return saturatedAdd(startedAtMs, durationMs);
     }
 
     /**

@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalLong;
 
+import static com.google.common.math.LongMath.saturatedAdd;
+
 /**
  * Immutable view of Prefill work which has crossed an endpoint lifecycle boundary.
  *
@@ -216,7 +218,4 @@ public final class WorkSnapshot {
                 + ", unknownRequestCount=" + unknownRequestCount + ']';
     }
 
-    private static long saturatedAdd(long left, long right) {
-        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
-    }
 }

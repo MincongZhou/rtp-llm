@@ -43,7 +43,7 @@ public class LearningPredictor implements PrefillTimePredictor {
         @Override
         public long estimateMs(long totalTokens, long hitTokens) {
             long seq = Math.max(0L, totalTokens);
-            long hit = Math.max(0L, Math.min(hitTokens, seq));
+            long hit = Math.clamp(hitTokens, 0L, seq);
             double[] inputs = new double[LINEAR_PARAM_COUNT];
             appendInput(inputs, seq, hit);
             return (long) predict(inputs);

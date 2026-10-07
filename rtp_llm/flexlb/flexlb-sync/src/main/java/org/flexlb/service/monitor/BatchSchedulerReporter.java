@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 import java.util.List;
 
+import static com.google.common.math.LongMath.saturatedAdd;
 import static org.flexlb.constant.MetricConstant.ACK_TO_RESPONSE_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
@@ -138,8 +139,8 @@ public class BatchSchedulerReporter {
             for (RequestRoute item : items) {
                 reportBatchWaitTimeMs(role, engineIp, Math.max(0L, nowMs - item.enqueuedAtMs()), item.priority());
                 if (batchId != 0L) {
-                    hitTokens = saturatedAdd(hitTokens, item.hitCache());
-                    totalTokens = saturatedAdd(totalTokens, item.seqLen());
+                    hitTokens = saturatedAdd(hitTokens, Math.max(0L, item.hitCache()));
+                    totalTokens = saturatedAdd(totalTokens, Math.max(0L, item.seqLen()));
                 }
             }
             if (batchId != 0L) {
@@ -162,11 +163,6 @@ public class BatchSchedulerReporter {
                 // A diagnostic failure must not change already committed delivery ownership.
             }
         }
-    }
-
-    private static long saturatedAdd(long left, long right) {
-        long nonNegative = Math.max(0L, right);
-        return left > Long.MAX_VALUE - nonNegative ? Long.MAX_VALUE : left + nonNegative;
     }
 
     // ==================== Queue metrics ====================

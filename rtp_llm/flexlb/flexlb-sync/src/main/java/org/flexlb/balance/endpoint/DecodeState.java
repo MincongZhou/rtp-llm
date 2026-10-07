@@ -3,18 +3,18 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityUsage;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestStatus;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
 import org.flexlb.balance.endpoint.DecodeResources.DispatchOutcome;
 import org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitAcquireStatus;
 import org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitTransferStatus;
-import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
 import org.flexlb.balance.endpoint.DecodeResources.PreemptionBeginResult;
 import org.flexlb.balance.endpoint.DecodeResources.PreemptionUpdate;
 import org.flexlb.balance.endpoint.DecodeResources.ReleaseReason;
 import org.flexlb.balance.endpoint.DecodeResources.ReservationHandle;
 import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
-import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestStatus;
+import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.TaskPhase;
@@ -464,8 +464,6 @@ final class DecodeState {
         }
     }
 
-
-
     private void removeEngineDispatchPermitLocked(
             DecodeRequestState reservation) {
         DispatchLease removed = reservation.clearDispatchPermit();
@@ -537,7 +535,7 @@ final class DecodeState {
         int inflight = reservedUsage.requests;
         int queued = queuedUsage.requests;
         if (queued < 0 || queued > inflight) {
-            queued = Math.max(0, Math.min(queued, inflight));
+            queued = Math.clamp(queued, 0, Math.max(0, inflight));
         }
         return confirmedEngineOwnedCount + Math.max(0, inflight - queued);
     }
@@ -1211,8 +1209,6 @@ final class DecodeState {
         }
     }
 
-
-
     /** Called after the last resource/protocol owner has been removed. */
     private void rememberSettledLocked(long requestId, long settledAtMs) {
         settledHistory.put(requestId, settledAtMs);
@@ -1488,7 +1484,6 @@ final class DecodeState {
             dispatchPermit = null;
             return current;
         }
-
 
     }
 }

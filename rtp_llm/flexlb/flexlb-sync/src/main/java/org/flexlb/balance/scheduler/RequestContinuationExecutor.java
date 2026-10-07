@@ -27,7 +27,7 @@ final class RequestContinuationExecutor implements AutoCloseable {
     private boolean accepting = true;
 
     RequestContinuationExecutor() {
-        int count = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+        int count = Math.clamp(Runtime.getRuntime().availableProcessors(), 2, 8);
         workers = Executors.newFixedThreadPool(count,
                 Thread.ofPlatform().daemon().name("request-continuation-", 1).factory());
     }

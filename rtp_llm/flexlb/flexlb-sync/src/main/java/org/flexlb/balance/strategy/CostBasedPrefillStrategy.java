@@ -1,20 +1,20 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.config.FlexlbConfig;
-
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.BalanceContext;
+import org.flexlb.balance.scheduler.RequestRequirements;
+import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.config.VictimStage;
-import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.DebugInfo;
-import org.flexlb.balance.scheduler.RequestRequirements;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -22,16 +22,19 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
+
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+
+import static com.google.common.math.LongMath.saturatedAdd;
+import static com.google.common.math.LongMath.saturatedMultiply;
 
 @Component
 public class CostBasedPrefillStrategy {
@@ -215,7 +218,7 @@ public class CostBasedPrefillStrategy {
         if (cacheAffinity != null && survivors.hasKnownTtft) {
             long referenceHitTokens = 0L;
             long maxHitTokens = survivors.maximumCacheHit;
-            affinityCutoffMs = saturatingAdd(
+            affinityCutoffMs = saturatedAdd(
                     minProjectedTtftMs,
                     Math.max(0L, cacheAffinity.getMaxExtraTtftMs()));
             affinityReason = "NO_CACHE_LEAD";
@@ -507,14 +510,8 @@ public class CostBasedPrefillStrategy {
         if (blockSize <= 0L) {
             return CacheTokenMatch.NONE;
         }
-        long rawHit;
-        try {
-            rawHit = Math.multiplyExact(
-                    blockSize, prefixMatchLength.longValue());
-        } catch (ArithmeticException overflow) {
-            rawHit = seqLen;
-        }
-        long routingHit = Math.min(seqLen, Math.max(0L, rawHit));
+        long rawHit = saturatedMultiply(blockSize, prefixMatchLength.longValue());
+        long routingHit = Math.clamp(rawHit, 0L, seqLen);
         long effectiveHit = rawHit >= seqLen
                 ? Math.max(0L, seqLen - blockSize)
                 : routingHit;
@@ -600,17 +597,6 @@ public class CostBasedPrefillStrategy {
                 selectedPin.close();
             }
         }
-    }
-
-
-    private static long saturatingAdd(long left, long right) {
-        if (right > 0L && left > Long.MAX_VALUE - right) {
-            return Long.MAX_VALUE;
-        }
-        if (right < 0L && left < Long.MIN_VALUE - right) {
-            return Long.MIN_VALUE;
-        }
-        return left + right;
     }
 
 }

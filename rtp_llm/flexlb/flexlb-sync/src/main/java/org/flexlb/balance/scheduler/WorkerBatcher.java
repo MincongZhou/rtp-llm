@@ -562,7 +562,7 @@ public final class WorkerBatcher {
                 tokenCapacity = configuredTokens;
             }
             if (engine.totalKvCacheTokens() > 0L) {
-                kvCapacity = Math.min(engine.totalKvCacheTokens(), Math.max(0L, engine.availableKvCacheTokens()));
+                kvCapacity = Math.clamp(engine.availableKvCacheTokens(), 0L, engine.totalKvCacheTokens());
             }
         }
         return new GroupPlanner.Constraints(maxRequests, tokenCapacity, kvCapacity, predictionBudgetMs, windowMs);

@@ -15,7 +15,7 @@ final class PrefillTimeVariableBindings {
         BindingContext ctx = BINDING_CTX.get();
         ctx.reset();
         totalTokens = Math.max(0L, totalTokens);
-        hitCacheTokens = Math.max(0L, Math.min(hitCacheTokens, totalTokens));
+        hitCacheTokens = Math.clamp(hitCacheTokens, 0L, totalTokens);
         fillRequestVars(ctx.topLevelVars, totalTokens, hitCacheTokens);
         ctx.topLevelVars[PrefillTimeFormula.IDX_BATCH_SIZE] = 1.0;
         long inputTokens = (long) ctx.topLevelVars[PrefillTimeFormula.IDX_INPUT_TOKENS];

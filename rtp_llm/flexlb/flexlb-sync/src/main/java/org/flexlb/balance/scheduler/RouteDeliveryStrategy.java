@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalLong;
 
+import static com.google.common.math.LongMath.saturatedAdd;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.missingEndpoint;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.prepareMember;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollback;
@@ -118,8 +119,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 RequestRoute item = route.claim().item;
                 try {
                     long itemWorkMs = route.predictedMs();
-                    unstartedWorkMs = unstartedWorkMs > Long.MAX_VALUE - itemWorkMs
-                            ? Long.MAX_VALUE : unstartedWorkMs + itemWorkMs;
+                    unstartedWorkMs = saturatedAdd(unstartedWorkMs, itemWorkMs);
                     route.claim().item.ctx().scheduler().publishRoute(route.claim(), precedingWork, unstartedWorkMs);
                     delivered.add(item);
                 } catch (Throwable completionFailure) {
@@ -359,9 +359,5 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
         }
 
-        private static long saturatedAdd(long left, long right) {
-            return left > Long.MAX_VALUE - right
-                    ? Long.MAX_VALUE : left + right;
-        }
     }
 }

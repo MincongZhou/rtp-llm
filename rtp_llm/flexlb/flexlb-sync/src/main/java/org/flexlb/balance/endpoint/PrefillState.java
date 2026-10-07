@@ -26,6 +26,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.math.LongMath.saturatedAdd;
 
 /**
  * Canonical Prefill request ownership for one worker generation.
@@ -187,7 +188,7 @@ public final class PrefillState {
 
         private RouteReservation(PrefillState owner, RequestEntry originalOwner, long predictedWorkMs) {
             super(owner, originalOwner);
-            this.predictedWorkMs = boundedPrediction(predictedWorkMs);
+            this.predictedWorkMs = Math.clamp(predictedWorkMs, 0L, (long) Integer.MAX_VALUE);
         }
     }
 
@@ -327,7 +328,7 @@ public final class PrefillState {
                 throw new IllegalStateException(
                         "request is not an ACTIVE route request_id=" + item.requestId());
             }
-            remainingWorkMs = boundedPrediction(predictedMs);
+            remainingWorkMs = Math.clamp(predictedMs, 0L, (long) Integer.MAX_VALUE);
             phaseBaseMs = nowMs;
             queueMembership = QueueMembership.UNINDEXED;
             individualPhase = Phase.COMMITTED;
@@ -352,9 +353,17 @@ public final class PrefillState {
                 throw new IllegalStateException(
                         "request is not individual request_id=" + item.requestId());
             }
-            remainingWorkMs = individualRemaining(this, nowMs);
+            remainingWorkMs = remainingWorkAt(nowMs);
             phaseBaseMs = Math.max(phaseBaseMs, nowMs);
             individualPhase = next;
+        }
+
+        private long remainingWorkAt(long nowMs) {
+            if (individualPhase != Phase.ENGINE_RUNNING) {
+                return remainingWorkMs;
+            }
+            long elapsedMs = Math.max(0L, nowMs - phaseBaseMs);
+            return Math.max(0L, remainingWorkMs - elapsedMs);
         }
     }
 
@@ -547,7 +556,6 @@ public final class PrefillState {
             lock.unlock();
         }
     }
-
 
     long schedulingInputVersion() { return schedulingInputVersion; }
 
@@ -1473,7 +1481,7 @@ public final class PrefillState {
             if (excluded.contains(entry) || entry.batchWork != null) { continue; }
             if (!entry.isActive()) {
                 individual.add(new WorkSnapshot.RequestWork(entry.item.requestId(), entry.individualPhase,
-                        individualRemaining(entry, nowMs)));
+                        entry.remainingWorkAt(nowMs)));
             } else if (entry.queueMembership == QueueMembership.UNINDEXED
                     && entry.reservation instanceof RouteReservation route) {
                 individual.add(new WorkSnapshot.RequestWork(entry.item.requestId(), Phase.COMMITTED, route.predictedWorkMs));
@@ -1641,19 +1649,4 @@ public final class PrefillState {
                 "Prefill ownership requires queueLock");
     }
 
-    private static long individualRemaining(RequestEntry entry, long nowMs) {
-        if (entry.individualPhase != Phase.ENGINE_RUNNING) {
-            return entry.remainingWorkMs;
-        }
-        return Math.max(0L, entry.remainingWorkMs
-                - Math.max(0L, nowMs - entry.phaseBaseMs));
-    }
-
-    private static long boundedPrediction(long predictedMs) {
-        return Math.min(Integer.MAX_VALUE, Math.max(0L, predictedMs));
-    }
-
-    private static long saturatedAdd(long left, long right) {
-        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
-    }
 }
