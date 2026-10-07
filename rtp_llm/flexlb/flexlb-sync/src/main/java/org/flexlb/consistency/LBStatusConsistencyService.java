@@ -97,17 +97,11 @@ public class LBStatusConsistencyService implements MasterElectService {
         return zookeeperMasterElectService.isMaster();
     }
 
-    public void refreshMasterHost(boolean forceSync) {
-        if (isNeedConsistency() && forceSync) {
-            zookeeperMasterElectService.updateLatestMaster();
-        }
-    }
-
     public String getMasterHostIpPort() {
         if (!isNeedConsistency()) {
             return null;
         }
-        String masterHostIp = zookeeperMasterElectService.getMasterHostIp(false);
+        String masterHostIp = zookeeperMasterElectService.getMasterHostIp();
         if (masterHostIp == null) {
             return null;
         }
@@ -132,7 +126,7 @@ public class LBStatusConsistencyService implements MasterElectService {
             resp.setMsg("roleId not match this:" + roleId);
             return resp;
         }
-        this.refreshMasterHost(true);
+        zookeeperMasterElectService.updateLatestMaster();
         MasterChangeNotifyResp resp = new MasterChangeNotifyResp();
         resp.setSuccess(true);
         return resp;

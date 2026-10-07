@@ -74,14 +74,6 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         nameResolver.start(this);
     }
 
-    private <R> CompletableFuture<R> executeGrpcCallAsync(String ip, int port,
-                                                           Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
-                                                           long requestTimeoutMs,
-                                                           ServiceType serviceType) {
-        return executeGrpcCallAsync(ip, port, grpcCall, requestTimeoutMs, serviceType,
-                retriesBrokenConnections(serviceType));
-    }
-
     static boolean retriesBrokenConnections(ServiceType serviceType) {
         return serviceType != ServiceType.BATCH_ENQUEUE
                 && serviceType != ServiceType.ENGINE_CANCEL;
@@ -90,8 +82,8 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private <R> CompletableFuture<R> executeGrpcCallAsync(String ip, int port,
                                                            Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
                                                            long requestTimeoutMs,
-                                                           ServiceType serviceType,
-                                                           boolean retryOnBrokenConnection) {
+                                                           ServiceType serviceType) {
+        boolean retryOnBrokenConnection = retriesBrokenConnections(serviceType);
         CompletableFuture<R> resultFuture = new CompletableFuture<>();
         long startTime = System.nanoTime();
 
@@ -109,7 +101,6 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 invoker = replaceInvoker(channelKey, invoker, newChannel);
             }
 
-            invoker.updateLastUsedTime();
             final Invoker finalInvoker = invoker;
             GrpcFutureStubWrapper stubWrapper = new GrpcFutureStubWrapper(
                     RpcServiceGrpc.newFutureStub(finalInvoker.getChannel()),
@@ -251,17 +242,13 @@ public class EngineGrpcClient extends AbstractGrpcClient {
      */
     public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
             String ip, int port, EngineRpcService.EnqueueBatchRequestPB request) {
-        return batchEnqueueAsync(ip, port, request, enqueueTimeoutMillis);
-    }
-
-    public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(String ip, int port, EngineRpcService.EnqueueBatchRequestPB request, long requestTimeoutMs) {
         // EnqueueBatch is not safe to replay after an ambiguous connection
         // failure: the Engine may have accepted the first invocation even
         // though its ACK was lost. Reconciliation is owned by the scheduler's
         // request-id cancel fence, so this client must expose the ambiguity
         // instead of issuing a second EnqueueBatch automatically.
         return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().enqueueBatch(request),
-                requestTimeoutMs, ServiceType.BATCH_ENQUEUE);
+                enqueueTimeoutMillis, ServiceType.BATCH_ENQUEUE);
     }
 
     /**

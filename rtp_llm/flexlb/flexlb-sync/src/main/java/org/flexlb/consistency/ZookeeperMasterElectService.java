@@ -235,10 +235,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         return localIp.equals(cachedMasterHostIp);
     }
 
-    public String getMasterHostIp(boolean forceSync) {
-        if (forceSync) {
-            updateLatestMaster();
-        }
+    public String getMasterHostIp() {
         if (isMaster) {
             return localIp;
         }

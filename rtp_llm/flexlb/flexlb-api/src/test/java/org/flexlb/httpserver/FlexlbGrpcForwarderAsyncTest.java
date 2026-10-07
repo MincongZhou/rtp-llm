@@ -21,6 +21,7 @@ import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.InternalRuntimeSettings;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
@@ -410,11 +411,11 @@ class FlexlbGrpcForwarderAsyncTest {
             observer.onCompleted();
         })) {
             FlexlbGrpcForwarder forwarder = forwarder(
-                    fixture.channel, mock(EngineHealthReporter.class), "10.0.0.9:7001");
+                    fixture.channel, mock(EngineHealthReporter.class), "10.0.0.9:7001", 1000L);
 
             FlexlbGrpcForwarder.CancelForwardResult result = awaitCancel(
                     forwarder.forwardCompensatingCancelToMaster(
-                            cancelRequest(107L), MASTER_HTTP_ADDRESS, 1000L, io.opentelemetry.context.Context.current()));
+                            cancelRequest(107L), MASTER_HTTP_ADDRESS, io.opentelemetry.context.Context.current()));
 
             assertNotNull(result.response());
             assertTrue(result.response().getFound());
@@ -431,11 +432,11 @@ class FlexlbGrpcForwarderAsyncTest {
         try (RpcFixture fixture = RpcFixture.startCancel((request, observer) ->
                 masterReceivedRequest.countDown())) {
             EngineHealthReporter reporter = mock(EngineHealthReporter.class);
-            FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
+            FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter, MASTER_HTTP_ADDRESS, 100L);
 
             FlexlbGrpcForwarder.CancelForwardResult result = awaitCancel(
                     forwarder.forwardCompensatingCancelToMaster(
-                            cancelRequest(108L), MASTER_HTTP_ADDRESS, 100L, io.opentelemetry.context.Context.current()));
+                            cancelRequest(108L), MASTER_HTTP_ADDRESS, io.opentelemetry.context.Context.current()));
 
             assertTrue(masterReceivedRequest.await(2, TimeUnit.SECONDS));
             assertEquals("DEADLINE_EXCEEDED", result.failure());
@@ -467,11 +468,24 @@ class FlexlbGrpcForwarderAsyncTest {
             ManagedChannel channel,
             EngineHealthReporter reporter,
             String currentMaster) throws Exception {
+        return forwarder(channel, reporter, currentMaster,
+                new InternalRuntimeSettings().getMasterForwardRpcTimeoutMs());
+    }
+
+    private static FlexlbGrpcForwarder forwarder(
+            ManagedChannel channel,
+            EngineHealthReporter reporter,
+            String currentMaster,
+            long timeoutMs) throws Exception {
         LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
         when(consistency.getMasterHostIpPort()).thenReturn(currentMaster);
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         ConfigService config = mock(ConfigService.class);
-        when(config.loadBalanceConfig()).thenReturn(new org.flexlb.config.FlexlbConfig());
+        FlexlbConfig loadBalanceConfig = mock(FlexlbConfig.class);
+        InternalRuntimeSettings runtime = mock(InternalRuntimeSettings.class);
+        when(runtime.getMasterForwardRpcTimeoutMs()).thenReturn(timeoutMs);
+        when(loadBalanceConfig.getInternalRuntime()).thenReturn(runtime);
+        when(config.loadBalanceConfig()).thenReturn(loadBalanceConfig);
         FlexlbGrpcForwarder forwarder = new FlexlbGrpcForwarder(
                 consistency,
                 config,

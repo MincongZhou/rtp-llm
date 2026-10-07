@@ -121,9 +121,9 @@ class ZkLeaderElectionTest {
             // Leader identity: the leader sees itself; the follower sees the
             // leader after one view refresh (production refreshes every 5s).
             follower.service().updateLatestMaster();
-            assertEquals(master.localIp(), master.service().getMasterHostIp(false),
+            assertEquals(master.localIp(), master.service().getMasterHostIp(),
                     "leader must answer getMasterHostIp with its own identity");
-            assertEquals(master.localIp(), follower.service().getMasterHostIp(false),
+            assertEquals(master.localIp(), follower.service().getMasterHostIp(),
                     "follower must answer getMasterHostIp with the leader's identity");
 
             sampler.assertNeverSplitBrain();
@@ -194,7 +194,7 @@ class ZkLeaderElectionTest {
 
             // The restarted follower resolves the current leader's identity.
             rejoined.service().updateLatestMaster();
-            assertEquals(survivor.localIp(), rejoined.service().getMasterHostIp(false));
+            assertEquals(survivor.localIp(), rejoined.service().getMasterHostIp());
 
             sampler.assertNeverSplitBrain();
         }

@@ -6,7 +6,6 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.util.Prioritized;
 import java.util.concurrent.CompletableFuture;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
@@ -17,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * from earlier assignments after retries or preemption. It owns committed capacity
  * only after ProvisionalRoute transfers it at queue publication or direct handoff.
  */
-public final class RequestRoute implements Prioritized, GroupPlanner.Input {
+public final class RequestRoute implements GroupPlanner.Input {
 
     private static final AtomicLong WORKER_ENQUEUE_SEQUENCE = new AtomicLong();
 
@@ -98,20 +97,17 @@ public final class RequestRoute implements Prioritized, GroupPlanner.Input {
     }
 
     /**
-     * Normalized request priority. Satisfies {@link Prioritized#priority()}
-     * for the per-worker ordered active index.
+     * Normalized request priority for the per-worker ordered active index.
      */
-    @Override
     public int priority() {
         return requirements().priority();
     }
 
     /**
      * Unique monotonic enqueue sequence used by FIFO and as the same-priority
-     * tie-break in {@link org.flexlb.util.PriorityOrdering#STRICT}. A re-offer
+     * tie-break in {@link org.flexlb.util.PriorityOrdering}. A re-offer
      * keeps the original item and therefore the original queue position.
      */
-    @Override
     public long enqueueSeq() {
         return ctx.getWorkerEnqueueSequence();
     }

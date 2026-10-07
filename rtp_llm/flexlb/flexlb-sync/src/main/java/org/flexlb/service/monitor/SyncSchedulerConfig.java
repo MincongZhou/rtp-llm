@@ -21,8 +21,4 @@ public class SyncSchedulerConfig {
         return new ScheduledThreadPoolExecutor(4, new NamedThreadFactory("task-scheduler"));
     }
 
-    @Bean(name = "taskMetricScheduler")
-    public ScheduledThreadPoolExecutor taskMetricScheduler() {
-        return new ScheduledThreadPoolExecutor(1, new NamedThreadFactory("task-metric-scheduler"));
-    }
 }

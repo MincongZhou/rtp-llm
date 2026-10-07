@@ -226,7 +226,6 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         private final String channelKey;
         private final ManagedChannel channel;
         private final long createTime;
-        private volatile long lastUsedTime;
         private volatile long expireTime;
 
         public Invoker(String channelKey, ManagedChannel channel) {
@@ -234,12 +233,7 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
             this.channel = channel;
             long currentTime = System.nanoTime() / 1000;
             this.createTime = currentTime;
-            this.lastUsedTime = currentTime;
             this.expireTime = 0;
-        }
-
-        public void updateLastUsedTime() {
-            this.lastUsedTime = System.nanoTime() / 1000;
         }
 
         public void markExpired() {

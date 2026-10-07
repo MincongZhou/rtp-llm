@@ -165,15 +165,6 @@ public class FlexlbGrpcForwarder {
             Context traceContext) {
         long timeoutMs = configService.loadBalanceConfig().getInternalRuntime()
                 .getMasterForwardRpcTimeoutMs();
-        return forwardCompensatingCancelToMaster(
-                request, originalMasterHostIpPort, timeoutMs, traceContext);
-    }
-
-    CompletionStage<CancelForwardResult> forwardCompensatingCancelToMaster(
-            FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
-            String originalMasterHostIpPort,
-            long timeoutMs,
-            Context traceContext) {
         ForwardGuard guard = applyForwardGuard(
                 request.getRequestId(), request.getForwardHop(),
                 ForwardOperation.CANCEL, originalMasterHostIpPort);

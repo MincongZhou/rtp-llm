@@ -139,7 +139,7 @@ public final class WorkerBatcher {
 
     /**
      * PRIORITY queue order: delegates to
-     * {@link PriorityOrdering#STRICT} (priority desc → enqueue-seq asc for
+     * {@link PriorityOrdering} (priority desc → enqueue-seq asc for
      * same-priority FIFO) with {@code requestId} as the final deterministic
      * tie-break.
      *

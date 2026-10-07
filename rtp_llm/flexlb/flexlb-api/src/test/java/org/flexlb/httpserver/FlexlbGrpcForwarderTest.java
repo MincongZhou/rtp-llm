@@ -33,6 +33,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class FlexlbGrpcForwarderTest {
@@ -169,7 +170,9 @@ class FlexlbGrpcForwarderTest {
                 await(forwarder.forwardScheduleToMaster(request(7L)));
 
         assertEquals("SELF_FORWARD_BLOCKED", result.failure());
-        verify(consistency, never()).refreshMasterHost(true);
+        verify(consistency).getMasterHostIpPort();
+        verify(consistency).getLocalHostIp();
+        verifyNoMoreInteractions(consistency);
         assertTrue(channels(forwarder).isEmpty());
     }
 
