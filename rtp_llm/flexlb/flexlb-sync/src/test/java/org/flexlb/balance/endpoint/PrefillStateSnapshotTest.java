@@ -1225,6 +1225,42 @@ class PrefillStateSnapshotTest {
         }
     }
 
+    @Test
+    void heartbeatRenewsExecutionWithoutConsumingTerminalFactsOrInvalidatingUnchangedInputs() {
+        RequestRoute first = item(1), second = item(2);
+        commitBatch(List.of(first, second), 300L);
+        var worker = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.PREFILL);
+        TaskInfo running = task(1, TaskPhase.RUNNING, 0L, 0L);
+        running.setBatchId(10L);
+        response.setRunningTaskInfo(Map.of("1", running));
+        response.setFinishedTaskInfo(Map.of("1", task(1, null, 0L, 100L)));
+        var observation = worker.freezeStatusResponse(response);
+        var started = state.reconcileHeartbeat(observation);
+        assertEquals(1, started.requestStatuses().size());
+        assertEquals(PrefillState.PrefillRequestStatus.Kind.ACTIVE, started.requestStatuses().getFirst().kind());
+        assertTrue(started.batchCompletions().isEmpty(), "a heartbeat cannot complete a batch");
+        assertFalse(started.capacityReleased());
+        assertTrue(started.schedulingInputsChanged());
+        long version = state.mutationVersion();
+        clock.set(200L);
+        var renewed = state.reconcileHeartbeat(observation);
+        assertFalse(renewed.schedulingInputsChanged(), "same-phase renewal leaves the projection revision stable");
+        assertFalse(renewed.capacityReleased());
+        assertEquals(version, state.mutationVersion());
+        assertEquals(0L, state.stats().maxObservedAgeMs(), "same-phase renewal refreshes the activity timestamp");
+        assertEquals(200L, remainingWork(), "same-phase renewal still advances the execution clock");
+        assertEquals(List.of(1L, 2L), state.committedSnapshot().batches().getFirst().requestIds(),
+                "the heartbeat's terminal report remains unconsumed");
+        var completed = reconcile(Map.of("1", task(1, null, 0L, 100L), "2", task(2, null, 0L, 100L)),
+                Map.of(), unused -> { throw new AssertionError("a completed batch needs no prediction"); });
+        assertTrue(completed.schedulingInputsChanged());
+        assertTrue(completed.capacityReleased());
+        assertEquals(1, completed.batchCompletions().size());
+        assertTrue(state.committedSnapshot().batches().isEmpty());
+    }
+
     private void commitBatch(List<RequestRoute> members, long predictedMs) {
         members.forEach(this::enqueue);
         {

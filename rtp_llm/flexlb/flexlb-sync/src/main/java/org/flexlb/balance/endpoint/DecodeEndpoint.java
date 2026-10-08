@@ -1,21 +1,21 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.endpoint.DecodeResources.ReservationHandle;
-import org.flexlb.balance.endpoint.DecodeResources.ReleaseReason;
-import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
+import org.flexlb.balance.delivery.DeliveryResult;
+import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
+import org.flexlb.balance.endpoint.DecodeResources.AdmissionSummary;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestStatus;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
+import org.flexlb.balance.endpoint.DecodeResources.DispatchOutcome;
 import org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitAcquireStatus;
 import org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitTransferStatus;
-import org.flexlb.balance.endpoint.DecodeResources.DispatchOutcome;
 import org.flexlb.balance.endpoint.DecodeResources.PreemptionBeginResult;
 import org.flexlb.balance.endpoint.DecodeResources.PreemptionUpdate;
-import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestStatus;
+import org.flexlb.balance.endpoint.DecodeResources.ReleaseReason;
+import org.flexlb.balance.endpoint.DecodeResources.ReservationHandle;
+import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
 import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
-import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
-import org.flexlb.balance.endpoint.DecodeResources.AdmissionSummary;
-import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
-import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -253,21 +253,23 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         if (!prepared.observation().alive()) { beginRetirement(); }
-        DecodeState.CalibrationResult result;
+        List<DecodeRequestStatus> requestStatuses;
         boolean capacityImproved;
         var lock = state.ownershipLock();
         lock.lock();
         try {
-            result = state.calibrateLocked(prepared.observation());
+            checkArgument(prepared.observation().owner() == ws, "Status belongs to another Decode generation");
+            DecodeRoutingView before = state.routingView();
+            requestStatuses = state.calibrateLocked(prepared.observation());
             ws.publishPreparedStatus(prepared);
-            capacityImproved = DecodeState.placementCapacityImproved(result.before(), state.routingView());
+            capacityImproved = DecodeState.placementCapacityImproved(before, state.routingView());
         } catch (RuntimeException | Error failure) {
             beginRetirement();
             throw failure;
         } finally { lock.unlock(); }
         notifyEngineDispatchCapacityListeners();
         if (capacityImproved) { signalPlacementCapacityChanged(); }
-        return () -> notifyRequestStatuses(result.requestStatuses());
+        return () -> notifyRequestStatuses(requestStatuses);
     }
 
     public Runnable initializeFromPreparedStatus(WorkerStatus ws, WorkerStatus.StatusObservation observation) {

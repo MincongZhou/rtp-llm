@@ -96,6 +96,7 @@ public final class PrefillState {
     public record StatusReconciliation(
             List<PrefillRequestStatus> requestStatuses,
             List<BatchCompletion> batchCompletions,
+            boolean schedulingInputsChanged,
             boolean capacityReleased) {
         public StatusReconciliation {
             requestStatuses = List.copyOf(requestStatuses);
@@ -559,15 +560,6 @@ public final class PrefillState {
         return exact != null && !exact.requestExpired(nowMs) && removeQueuedLocked(exact);
     }
 
-    /** Finish queue mutations after a committed selection and capture the resulting depth. */
-    public SelectionRemainder finishPreparedSelectionLocked(RequestRoute failedMember, long nowMs) {
-        requireLock();
-        boolean removed = removeQueuedIfUnexpiredLocked(failedMember, nowMs);
-        return new SelectionRemainder(activeIndex.size(), removed);
-    }
-
-    public record SelectionRemainder(int queueDepth, boolean removedBoundary) { }
-
     /** The queue part of a worker wait; the worker owns stop and control wakeups. */
     public boolean queueWaitCurrentLocked(
             RequestRoute head, long queueVersion, long inputVersion,
@@ -980,75 +972,35 @@ public final class PrefillState {
         } finally { lock.unlock(); }
     }
 
-    public record HeartbeatReconciliation(List<PrefillRequestStatus> requestStatuses,
-                                          boolean schedulingInputsChanged, boolean capacityReleased) {
-        public HeartbeatReconciliation {
-            requestStatuses = List.copyOf(requestStatuses);
-        }
-    }
-
-    public HeartbeatReconciliation reconcileHeartbeat(WorkerStatus.StatusObservation observation) {
-        List<PrefillRequestStatus> requestStatuses = new ArrayList<>(observation.runningTasks().size());
-        boolean capacityReleased = false;
-        boolean schedulingInputsChanged;
+    /** Heartbeats renew activity but never consume terminal reports. */
+    public StatusReconciliation reconcileHeartbeat(WorkerStatus.StatusObservation observation) {
         lock.lock();
         try {
-            ActiveObservation active = prepareActiveObservationsLocked(observation.engine(), Map.of(), requestStatuses);
-            capacityReleased = active.unknownRequests < unknownEngineRequestCount;
-            schedulingInputsChanged = applyActiveObservationsLocked(active, clock.getAsLong());
-            if (schedulingInputsChanged) {
-                committedWorkCapture = null;
-                recordMutationLocked();
-            }
+            StatusReduction reduction = prepareReductionLocked(observation, false);
+            return commitStatusLocked(reduction, Map.of());
         } finally {
             lock.unlock();
         }
-        return new HeartbeatReconciliation(requestStatuses, schedulingInputsChanged, capacityReleased);
     }
 
-    private record ActiveObservation(long unknownRequests,
-                                     IdentityHashMap<RequestEntry, Phase> individuals,
-                                     IdentityHashMap<PrefillBatch, Phase> batches) { }
-
-    /** Both heartbeat and full status apply the same exact activity observations. */
-    private boolean applyActiveObservationsLocked(ActiveObservation active, long nowMs) {
-        boolean changed = active.unknownRequests != unknownEngineRequestCount;
-        for (var observed : active.individuals.entrySet()) {
-            changed |= observed.getKey().individualPhase != observed.getValue();
-            observed.getKey().updateExecutionProgress(observed.getValue(), nowMs);
-        }
-        for (var observed : active.batches.entrySet()) {
-            changed |= observed.getKey().servicePhase != observed.getValue();
-            observed.getKey().updateExecutionProgress(observed.getValue(), nowMs);
-        }
-        unknownEngineRequestCount = active.unknownRequests;
-        return changed;
-    }
-
-    /** A prepared reduction contains facts only; prediction and publication belong to Endpoint. */
+    /** Facts prepared under the lock, then read during prediction and exact-version commit. */
     public static final class StatusReduction {
         private final PrefillState owner;
-        private final long version;
-        private final long nowMs;
+        private long version;
         private final Map<Long, TerminalObservation> terminals;
-        private final ActiveObservation active;
-        private final Map<PrefillBatch, BatchOutcome> batches;
-        private final Map<Long, List<RequestRoute>> predictionInputs;
-        private final StatusReconciliation result;
+        private final Map<RequestEntry, Phase> individualPhases = new IdentityHashMap<>();
+        private final Map<PrefillBatch, Phase> batchPhases = new IdentityHashMap<>();
+        private final Map<PrefillBatch, BatchOutcome> batchOutcomes;
+        // Assigned before publication; only the owning State applies the facts under its lock.
+        private long nowMs;
+        private long unknownRequests;
+        private Map<Long, List<RequestRoute>> predictionInputs;
+        private StatusReconciliation result;
 
-        private StatusReduction(PrefillState owner, long version, long nowMs,
-                                Map<Long, TerminalObservation> terminals, ActiveObservation active,
-                                Map<PrefillBatch, BatchOutcome> batches,
-                                Map<Long, List<RequestRoute>> predictionInputs,
-                                StatusReconciliation result) {
+        private StatusReduction(PrefillState owner, Map<Long, TerminalObservation> terminals) {
             this.owner = owner;
-            this.version = version;
-            this.nowMs = nowMs;
             this.terminals = terminals;
-            this.active = active;
-            this.batches = batches;
-            this.predictionInputs = Map.copyOf(predictionInputs);
-            this.result = result;
+            this.batchOutcomes = terminals.isEmpty() ? Map.of() : new IdentityHashMap<>();
         }
 
         public Map<Long, List<RequestRoute>> predictionInputs() { return predictionInputs; }
@@ -1088,17 +1040,15 @@ public final class PrefillState {
         return Math.max(0L, remainingWorkMs - elapsedMs);
     }
 
-    private ActiveObservation prepareActiveObservationsLocked(
-            WorkerStatus.EngineObservation engine,
-            Map<Long, TerminalObservation> terminals,
-            List<PrefillRequestStatus> activeRequestStatuses) {
+    /** Capture exact activity into the same transaction that will commit it. */
+    private void prepareActiveObservationsLocked(WorkerStatus.EngineObservation engine,
+                                                StatusReduction reduction,
+                                                List<PrefillRequestStatus> activeRequestStatuses) {
         requireLock();
-        IdentityHashMap<RequestEntry, Phase> individualPhases = new IdentityHashMap<>();
-        IdentityHashMap<PrefillBatch, Phase> batchPhases = new IdentityHashMap<>();
         Set<Long> unknownDetailed = new HashSet<>();
         Set<Long> knownObserved = new HashSet<>();
         for (WorkerStatus.TaskObservation task : engine.runningTaskList().values()) {
-            if (terminals.containsKey(task.requestId())) {
+            if (reduction.terminals.containsKey(task.requestId())) {
                 continue;
             }
             RequestEntry entry = requests.get(task.requestId());
@@ -1120,9 +1070,9 @@ public final class PrefillState {
             Phase observed = task.phase() == TaskPhase.RUNNING
                     ? Phase.ENGINE_RUNNING : Phase.ENGINE_QUEUED;
             if (entry.batch == null) {
-                individualPhases.put(entry, observed);
+                reduction.individualPhases.put(entry, observed);
             } else {
-                batchPhases.merge(
+                reduction.batchPhases.merge(
                         entry.batch,
                         observed,
                         PrefillState::strongerEnginePhase);
@@ -1131,35 +1081,42 @@ public final class PrefillState {
         long reportedActive = saturatedAdd(Math.max(0L, engine.waitingQueryLen()),
                 Math.max(0L, engine.runningQueryLen()));
         long scalarUnknown = Math.max(0L, reportedActive - knownObserved.size());
-        return new ActiveObservation(Math.max(unknownDetailed.size(), scalarUnknown),
-                individualPhases, batchPhases);
+        reduction.unknownRequests = Math.max(unknownDetailed.size(), scalarUnknown);
     }
 
-    /** Prepare exact identities and aggregate each affected batch once, without effects. */
+    /** Full status captures its execution clock before scanning Worker terminal and activity facts. */
     public StatusReduction prepareStatusLocked(WorkerStatus.StatusObservation observation) {
         requireLock();
-        long nowMs = clock.getAsLong();
-        var terminals = terminalObservationsLocked(observation.finishedTasks());
-        List<PrefillRequestStatus> requestStatuses = new ArrayList<>(terminals.size()
+        return prepareReductionLocked(observation, true);
+    }
+
+    private StatusReduction prepareReductionLocked(WorkerStatus.StatusObservation observation, boolean fullStatus) {
+        requireLock();
+        long nowMs = fullStatus ? clock.getAsLong() : 0L;
+        StatusReduction reduction = new StatusReduction(this,
+                fullStatus ? terminalObservationsLocked(observation.finishedTasks()) : Map.of());
+        List<PrefillRequestStatus> requestStatuses = new ArrayList<>(reduction.terminals.size()
                 + observation.engine().runningTaskList().size());
-        Map<PrefillBatch, BatchOutcome> batchOutcomes = new IdentityHashMap<>();
-        for (TerminalObservation terminal : terminals.values()) {
+        for (TerminalObservation terminal : reduction.terminals.values()) {
             requestStatuses.add(terminalRequestStatus(terminal));
             PrefillBatch batch = terminal.owner.batch;
             if (batch != null) {
-                batchOutcomes.computeIfAbsent(batch, ignored -> batch.outcome.copy()).include(terminal);
+                reduction.batchOutcomes.computeIfAbsent(batch, ignored -> batch.outcome.copy()).include(terminal);
             }
         }
-        ActiveObservation active = prepareActiveObservationsLocked(observation.engine(), terminals, requestStatuses);
-        Map<Long, List<RequestRoute>> predictionInputs = new HashMap<>();
-        List<BatchCompletion> completions = new ArrayList<>(batchOutcomes.size());
-        for (var change : batchOutcomes.entrySet()) {
+        prepareActiveObservationsLocked(observation.engine(), reduction, requestStatuses);
+        boolean capacityReleased = !reduction.terminals.isEmpty()
+                || reduction.unknownRequests < unknownEngineRequestCount;
+        // Heartbeats historically measure time after the activity scan; keep that boundary.
+        reduction.nowMs = fullStatus ? nowMs : clock.getAsLong();
+        Map<Long, List<RequestRoute>> predictionInputs = reduction.batchOutcomes.isEmpty() ? Map.of() : new HashMap<>();
+        List<BatchCompletion> completions = reduction.batchOutcomes.isEmpty() ? List.of() : new ArrayList<>(reduction.batchOutcomes.size());
+        for (var change : reduction.batchOutcomes.entrySet()) {
             PrefillBatch batch = change.getKey();
             BatchOutcome outcome = change.getValue();
-            outcome.executionStarted |= active.batches.get(batch) == Phase.ENGINE_RUNNING;
             List<RequestRoute> survivors = new ArrayList<>(batch.members.size());
             for (RequestEntry member : batch.members) {
-                if (!terminals.containsKey(member.route.requestId())) {
+                if (!reduction.terminals.containsKey(member.route.requestId())) {
                     survivors.add(member.route);
                 }
             }
@@ -1167,14 +1124,23 @@ public final class PrefillState {
                 completions.add(new BatchCompletion(batch.batchId, batch.originalFeatures,
                         batch.originalPredictionMs, outcome.maxExecutionTimeMs,
                         outcome.successfulCompletion, outcome.learningEligible));
-            } else if (!outcome.executionStarted) {
+            } else if (!outcome.executionStarted && reduction.batchPhases.get(batch) != Phase.ENGINE_RUNNING) {
                 survivors.sort(Comparator.comparingLong(RequestRoute::enqueueSeq).thenComparingLong(RequestRoute::requestId));
                 predictionInputs.put(batch.batchId, List.copyOf(survivors));
             }
         }
-        boolean capacityReleased = !terminals.isEmpty() || active.unknownRequests < unknownEngineRequestCount;
-        return new StatusReduction(this, mutationVersion, nowMs, terminals, active, batchOutcomes,
-                predictionInputs, new StatusReconciliation(requestStatuses, completions, capacityReleased));
+        boolean activityChanged = reduction.unknownRequests != unknownEngineRequestCount;
+        for (var phase : reduction.individualPhases.entrySet()) {
+            activityChanged |= phase.getKey().individualPhase != phase.getValue();
+        }
+        for (var phase : reduction.batchPhases.entrySet()) {
+            activityChanged |= phase.getKey().servicePhase != phase.getValue();
+        }
+        reduction.version = mutationVersion;
+        reduction.predictionInputs = Map.copyOf(predictionInputs);
+        reduction.result = new StatusReconciliation(requestStatuses, completions,
+                activityChanged || !reduction.terminals.isEmpty() || !predictionInputs.isEmpty(), capacityReleased);
+        return reduction;
     }
 
     /** Null means the out-of-lock prediction was invalidated; no fact has changed. */
@@ -1188,21 +1154,26 @@ public final class PrefillState {
             checkArgument(prediction >= 0L, "Negative batch prediction");
         }
         // The version check also validates the capacity facts captured in the prepared result.
-        for (var change : reduction.batches.entrySet()) {
+        for (var change : reduction.batchOutcomes.entrySet()) {
             PrefillBatch batch = change.getKey();
             batch.outcome = change.getValue();
             batch.touch(reduction.nowMs);
         }
         for (TerminalObservation terminal : reduction.terminals.values()) { removeCommittedLocked(terminal.owner); }
-        boolean workChanged = applyActiveObservationsLocked(reduction.active, reduction.nowMs)
-                || !reduction.terminals.isEmpty() || !predictions.isEmpty();
+        for (var phase : reduction.individualPhases.entrySet()) {
+            phase.getKey().updateExecutionProgress(phase.getValue(), reduction.nowMs);
+        }
+        for (var phase : reduction.batchPhases.entrySet()) {
+            phase.getKey().updateExecutionProgress(phase.getValue(), reduction.nowMs);
+        }
+        unknownEngineRequestCount = reduction.unknownRequests;
         for (long batchId : reduction.predictionInputs.keySet()) {
             PrefillBatch batch = batches.get(batchId);
             batch.remainingWorkMs = predictions.get(batchId);
             batch.phaseBaseMs = reduction.nowMs;
             batch.touch(reduction.nowMs);
         }
-        if (workChanged) {
+        if (reduction.result.schedulingInputsChanged()) {
             committedWorkCapture = null;
             recordMutationLocked();
         }

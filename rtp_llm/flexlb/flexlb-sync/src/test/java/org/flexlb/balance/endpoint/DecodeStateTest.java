@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestStatus;
 import org.flexlb.balance.endpoint.DecodeResources.DispatchOutcome;
 import org.flexlb.balance.endpoint.DecodeResources.ReleaseReason;
 import org.flexlb.dao.master.TaskInfo;
@@ -15,6 +16,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
@@ -156,7 +158,7 @@ class DecodeStateTest {
         task.setRequestId(2L);
         task.setPhase(TaskPhase.KV_ALLOCATED);
         var accepted = calibrate(state, status, Map.of("2", task), Map.of());
-        assertEquals(reservation, accepted.requestStatuses().getFirst().reservation());
+        assertEquals(reservation, accepted.getFirst().reservation());
         assertTrue(state.isAcceptedByEngine(reservation));
         assertEquals(1, state.routingView().engineCapacityUsed());
         assertEquals(0, state.resourceSnapshot().activeDispatchPermits());
@@ -164,8 +166,8 @@ class DecodeStateTest {
         assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
 
         var finished = calibrate(state, status, Map.of(), Map.of("2", task));
-        assertEquals(DecodeResources.DecodeRequestStatus.Kind.TERMINAL, finished.requestStatuses().getFirst().kind());
-        assertEquals(reservation, finished.requestStatuses().getFirst().reservation());
+        assertEquals(DecodeResources.DecodeRequestStatus.Kind.TERMINAL, finished.getFirst().kind());
+        assertEquals(reservation, finished.getFirst().reservation());
         assertFalse(state.hasOwnedResources(reservation));
         assertEquals(0, state.routingView().engineCapacityUsed());
         assertEquals(OWNERSHIP_LOST, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
@@ -235,7 +237,7 @@ class DecodeStateTest {
         assertFalse(EndpointTestSupport.evictDecode(state, Long.MAX_VALUE, ignored -> false).capacityReleased());
         calibrate(state, status, Map.of(), Map.of("1", task(1, TaskPhase.RUNNING)));
         var late = calibrate(state, status, Map.of("1", task(1, TaskPhase.RUNNING)), Map.of());
-        assertTrue(late.requestStatuses().isEmpty());
+        assertTrue(late.isEmpty());
         assertEquals(0, state.routingView().totalLoad());
 
         assertTrue(EndpointTestSupport.evictDecode(state, -1L, ignored -> false).capacityReleased());
@@ -307,16 +309,16 @@ class DecodeStateTest {
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         for (int i = 0; i < 2; i++) {
             var observation = calibrate(state, status, Map.of("10", task(10, regressed)), Map.of());
-            assertEquals(1, observation.requestStatuses().size(), "each live report must renew the exact request");
-            assertEquals(reservation, observation.requestStatuses().getFirst().reservation());
+            assertEquals(1, observation.size(), "each live report must renew the exact request");
+            assertEquals(reservation, observation.getFirst().reservation());
             assertTrue(state.hasOwnedResources(reservation), "live snapshot membership must preserve ownership");
         }
         var resumed = calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
-        assertEquals(reservation, resumed.requestStatuses().getFirst().reservation());
+        assertEquals(reservation, resumed.getFirst().reservation());
         assertEquals(1, state.routingView().engineCapacityUsed());
         var terminal = calibrate(state, status, Map.of(), Map.of("10", task(10, TaskPhase.RECEIVED)));
-        assertEquals(reservation, terminal.requestStatuses().getFirst().reservation());
-        assertEquals(DecodeResources.DecodeRequestStatus.Kind.TERMINAL, terminal.requestStatuses().getFirst().kind());
+        assertEquals(reservation, terminal.getFirst().reservation());
+        assertEquals(DecodeResources.DecodeRequestStatus.Kind.TERMINAL, terminal.getFirst().kind());
         assertFalse(state.hasOwnedResources(reservation));
         assertEquals(0, state.routingView().engineCapacityUsed());
     }
@@ -353,9 +355,9 @@ class DecodeStateTest {
         }
         var terminal = calibrate(state, status, Map.of("10", task(10, TaskPhase.RECEIVED)),
                 Map.of("10", task(10, TaskPhase.RECEIVED)));
-        assertEquals(1, terminal.requestStatuses().size());
-        assertEquals(DecodeResources.DecodeRequestStatus.Kind.TERMINAL, terminal.requestStatuses().getFirst().kind());
-        assertEquals(victim, terminal.requestStatuses().getFirst().reservation());
+        assertEquals(1, terminal.size());
+        assertEquals(DecodeResources.DecodeRequestStatus.Kind.TERMINAL, terminal.getFirst().kind());
+        assertEquals(victim, terminal.getFirst().reservation());
         assertFalse(state.hasOwnedResources(victim));
         assertNotNull(state.finishPreemption(1, true));
         assertEquals(1, state.routingView().engineCapacityUsed());
@@ -383,13 +385,13 @@ class DecodeStateTest {
         assertEquals(0, state.resourceSnapshot().queuedCount());
         assertEquals(1, state.routingView().engineCapacityUsed());
         if (locallyReserved) {
-            assertEquals(reservation, first.requestStatuses().getFirst().reservation());
-            assertEquals(reservation, repeated.requestStatuses().getFirst().reservation());
+            assertEquals(reservation, first.getFirst().reservation());
+            assertEquals(reservation, repeated.getFirst().reservation());
             assertTrue(state.isAcceptedByEngine(reservation));
         } else {
             assertEquals(0L, owner.reservationToken());
-            assertTrue(first.requestStatuses().isEmpty());
-            assertTrue(repeated.requestStatuses().isEmpty());
+            assertTrue(first.isEmpty());
+            assertTrue(repeated.isEmpty());
         }
     }
 
@@ -407,8 +409,8 @@ class DecodeStateTest {
         assertEquals(9_800L, state.routingView().realKvAvailable());
         var observed = calibrate(state, status, Map.of("allocated", task(10, TaskPhase.KV_ALLOCATED),
                 "regressed", task(10, regressed)), Map.of());
-        assertEquals(2, observed.requestStatuses().size());
-        assertTrue(observed.requestStatuses().stream().allMatch(event -> event.reservation().equals(victim)));
+        assertEquals(2, observed.size());
+        assertTrue(observed.stream().allMatch(event -> event.reservation().equals(victim)));
         assertEquals(2, state.routingView().engineCapacityUsed());
         assertEquals(9_900L, state.routingView().realKvAvailable(),
                 "any allocation evidence in the full snapshot removes the synthetic hold");
@@ -433,7 +435,7 @@ class DecodeStateTest {
         return status;
     }
 
-    private static DecodeState.CalibrationResult calibrate(DecodeState state, WorkerStatus status,
+    private static List<DecodeRequestStatus> calibrate(DecodeState state, WorkerStatus status,
                                                            Map<String, TaskInfo> running,
                                                            Map<String, TaskInfo> finished) {
         WorkerStatusResponse response = response();

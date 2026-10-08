@@ -532,11 +532,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         reduction = current;
                     }
                     if (reduction.predictionInputs().isEmpty() || !predictions.isEmpty()) {
-                        long version = prefillState.mutationVersion();
                         result = prefillState.commitStatusLocked(reduction, predictions);
                         checkState(result != null, "Locked Prefill reduction changed during commit");
                         if (prepared != null && !observation.alive()) { beginRetirement(); }
-                        if (prefillState.mutationVersion() != version) { signalSchedulingInputsChanged(); }
+                        if (result.schedulingInputsChanged()) { signalSchedulingInputsChanged(); }
                         if (prepared != null) { ws.publishPreparedStatus(prepared); }
                     }
                 } catch (Throwable failure) {
@@ -570,7 +569,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         checkArgument(observation.owner() == ws, "Status observation belongs to another Prefill generation");
-        PrefillState.HeartbeatReconciliation reconciliation =
+        PrefillState.StatusReconciliation reconciliation =
                 prefillState.reconcileHeartbeat(observation);
         if (reconciliation.capacityReleased()) { notifyCapacityAvailable(); }
         if (reconciliation.schedulingInputsChanged()) {

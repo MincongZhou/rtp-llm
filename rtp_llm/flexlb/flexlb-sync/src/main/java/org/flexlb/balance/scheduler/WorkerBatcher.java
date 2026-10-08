@@ -623,10 +623,8 @@ public final class WorkerBatcher {
                     return BatcherCycleResult.NO_ACTION;
                 }
                 precedingWork = transaction.commitLocked();
-                PrefillState.SelectionRemainder remainder = prefillState.finishPreparedSelectionLocked(
-                        failedMember, nowMs);
-                removedBoundary = remainder.removedBoundary();
-                remainingQueueDepth = remainder.queueDepth();
+                removedBoundary = prefillState.removeQueuedIfUnexpiredLocked(failedMember, nowMs);
+                remainingQueueDepth = prefillState.queueDepth();
             } finally {
                 queueLock.unlock();
             }

@@ -885,12 +885,11 @@ final class DecodeState {
 
     ReentrantLock ownershipLock() { return admissionLock; }
 
-    CalibrationResult calibrateLocked(WorkerStatus.StatusObservation observation) {
+    List<DecodeRequestStatus> calibrateLocked(WorkerStatus.StatusObservation observation) {
         checkState(admissionLock.isHeldByCurrentThread(), "Decode calibration requires ownershipLock");
         checkArgument(observation.owner() == status, "Status belongs to another Decode generation");
-        DecodeRoutingView before = routingViewLocked();
         List<DecodeRequestStatus> requestStatuses = doCalibrate(observation.engine(), observation.finishedTasks());
-        return new CalibrationResult(List.copyOf(requestStatuses), before);
+        return List.copyOf(requestStatuses);
     }
 
     void initialize(WorkerStatus.StatusObservation observation) {
@@ -1074,8 +1073,6 @@ final class DecodeState {
                 || after.realKvAvailable() > before.realKvAvailable()
                 || after.realKvUsed() < before.realKvUsed();
     }
-
-    record CalibrationResult(List<DecodeRequestStatus> requestStatuses, DecodeRoutingView before) { }
 
     // Generation cleanup: drain resources and expire orphan/history records.
 
