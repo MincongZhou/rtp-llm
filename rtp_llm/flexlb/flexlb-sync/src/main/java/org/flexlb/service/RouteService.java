@@ -38,12 +38,13 @@ public class RouteService {
      */
     public CompletableFuture<Response> route(BalanceContext balanceContext) {
         if (balanceContext.getRequest() != null && balanceContext.getRequest().isVitRouteOnly()) {
-            return CompletableFuture.completedFuture(router.routeVit(balanceContext));
+            return CompletableFuture.completedFuture(router == null
+                    ? Response.error(StrategyErrorType.NO_VIT_WORKER) : router.routeVit(balanceContext));
         }
         // Reject stale metadata before the scheduler creates request lifecycle ownership.
         if (balanceContext.getRequest() != null && balanceContext.getRequest().getSelectedVit() != null
                 && getRequestState(balanceContext.getRequestId(), 0) == null
-                && !router.selectedVitIsValid(balanceContext)) {
+                && (router == null || !router.selectedVitIsValid(balanceContext))) {
             return CompletableFuture.completedFuture(Response.error(StrategyErrorType.VIT_ROUTE_STALE));
         }
         FlexlbConfig flexlbConfig = balanceContext.getConfig();

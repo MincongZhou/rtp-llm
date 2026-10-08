@@ -1,6 +1,7 @@
 import asyncio
 import struct
 import unittest
+from concurrent import futures
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -10,18 +11,25 @@ import torch
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
+    iter_multimodal_inputs,
     multimodal_cache_keys,
     trans_input,
     trans_multimodal_input,
+)
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+    FlexlbScheduleRequestPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     ErrorDetailsPB,
     GenerateInputPB,
     MultimodalHashRequestPB,
     MultimodalHashResponsePB,
+    MultimodalInputsPB,
+    MultimodalOutputPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceServicer,
+    MultimodalRpcServiceStub,
     add_MultimodalRpcServiceServicer_to_server,
 )
 from rtp_llm.multimodal.multimodal_util import trans_config
@@ -33,6 +41,11 @@ from rtp_llm.server.master_client import (
     MasterClient,
 )
 from rtp_llm.server.mm_cache_routing import multimodal_routing_tokens
+from rtp_llm.server.vit_proxy_server import (
+    LoadBalancer,
+    VitProxyRpcServer,
+    WorkerConnectionPool,
+)
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
 
@@ -64,6 +77,14 @@ def hash_response(keys, hashes):
 
 
 class MMCacheRoutingTest(unittest.TestCase):
+    def test_affinity_keys_preserve_legacy_wire_encoding(self):
+        # Fields 16 (media_keys="image") and 18 (vit_route_only=true).
+        legacy_wire = b"\x82\x01\x05image\x90\x01\x01"
+        request = FlexlbScheduleRequestPB.FromString(legacy_wire)
+        self.assertEqual(list(request.cache_affinity_keys), ["image"])
+        self.assertTrue(request.vit_route_only)
+        self.assertEqual(request.SerializeToString(), legacy_wire)
+
     def test_shared_key_resolves_request_overrides_and_ignores_timeout(self):
         item = MultimodalInput(
             "https://example/image",
@@ -306,13 +327,73 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_missing_or_invalid_required_hashes_stop_before_prefill_routing(self):
-        for data in (None, {"entries": [{}]}):
+        for data in ({"entries": [{}]},):
             await self.asyncSetUp()
             self.visitor.master_client.get_vit_cache_metadata.return_value = data
             with self.assertRaises(FtRuntimeException):
                 await self.visitor.get_master_route_addrs(self.request)
             calls = self.visitor.master_client.get_backend_role_addrs.call_args_list
             self.assertEqual(len(calls), 1)
+
+    async def test_frontend_falls_back_through_vit_proxy_to_worker(self):
+        received = []
+
+        class Worker(MultimodalRpcServiceServicer):
+            def RemoteMultimodalEmbedding(self, request, context):
+                received.append(request)
+                return MultimodalOutputPB(split_size=[1])
+
+        worker_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+        add_MultimodalRpcServiceServicer_to_server(Worker(), worker_server)
+        worker_port = worker_server.add_insecure_port("127.0.0.1:0")
+        worker_server.start()
+        worker_address = f"127.0.0.1:{worker_port}"
+        pool = WorkerConnectionPool([worker_address])
+        proxy_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+        add_MultimodalRpcServiceServicer_to_server(
+            VitProxyRpcServer(LoadBalancer([worker_address]), pool), proxy_server
+        )
+        proxy_port = proxy_server.add_insecure_port("127.0.0.1:0")
+        proxy_server.start()
+        client = MasterClient()
+        vit = self.vit.model_copy(update={"grpc_port": proxy_port})
+        status = {**self.status, "grpc_port": proxy_port}
+        client.get_backend_role_addrs = AsyncMock(
+            side_effect=[
+                FlexlbResponse(role_addrs=[vit], result={"server_status": [status]}),
+                FlexlbResponse.ok([self.prefill, vit]),
+            ]
+        )
+        self.visitor.master_client = client
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{proxy_port}")
+        try:
+            self.assertIsNone(await self.visitor.get_master_route_addrs(self.request))
+            route_calls = client.get_backend_role_addrs.call_args_list
+            self.assertEqual(len(route_calls), 2)
+            self.assertTrue(route_calls[0].kwargs["vit_only"])
+            self.assertNotIn("selected_vit", route_calls[1].kwargs)
+            self.assertNotIn("seq_len", route_calls[1].kwargs)
+            self.assertEqual(
+                list(route_calls[1].kwargs["input_pb"].token_ids), [1, 99, 2]
+            )
+            self.assertIsNone(self.request.mm_token_expansion)
+
+            wire = MultimodalInputsPB(request_id=self.request.request_id)
+            wire.multimodal_inputs.add().CopyFrom(
+                next(iter_multimodal_inputs(self.request, self.request.generate_config))
+            )
+            result = await MultimodalRpcServiceStub(channel).RemoteMultimodalEmbedding(
+                wire, timeout=2
+            )
+            self.assertEqual(list(result.split_size), [1])
+            self.assertEqual(len(received), 1)
+            self.assertEqual(received[0].request_id, self.request.request_id)
+        finally:
+            await channel.close()
+            await client.close()
+            proxy_server.stop(0).wait()
+            worker_server.stop(0).wait()
+            pool.close_all()
             self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
 
     async def test_required_hash_miss_submits_only_missing_distinct_inputs(self):
@@ -334,11 +415,15 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         filled = metadata(keys[1:2], [[21, 22, 23]])
         client = MasterClient()
         client._get_vit_metadata = AsyncMock(side_effect=[probe, filled])
-        result = await client.get_vit_cache_metadata(self.vit, keys, input=self.request)
+        with patch.dict("os.environ", {"VIT_HASH_PROBE_TIMEOUT_MS": "1200"}):
+            result = await client.get_vit_cache_metadata(
+                self.vit, keys, input=self.request
+            )
         self.assertEqual(
             [e["feature_hashes"] for e in result["entries"]], [[-10, 11], [21, 22, 23]]
         )
         calls = client._get_vit_metadata.call_args_list
+        self.assertEqual(calls[0].args[2], 1.2)
         self.assertEqual(list(calls[0].args[1].keys), keys[:2])
         self.assertFalse(calls[0].args[1].HasField("inputs"))
         payload = calls[1].args[1]
@@ -480,6 +565,9 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             metadata(keys, [[31, 32, 33, 34]]),
         ]
         self.assertIsNone(await self.visitor.get_master_route_addrs(self.request))
+        retry = self.visitor.master_client.get_backend_role_addrs.call_args_list[2]
+        self.assertTrue(retry.kwargs["vit_only"])
+        self.assertNotIn("seq_len", retry.kwargs)
         last = self.visitor.master_client.get_backend_role_addrs.call_args.kwargs
         self.assertEqual(last["selected_vit"], new_status)
         self.assertTrue(last["block_cache_keys"])
@@ -524,7 +612,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             return_value=FlexlbScheduleResponsePB(code=200)
         )
         await client.get_backend_role_addrs(
-            [], 2, self.request, 123, media_keys=["image"], vit_only=True
+            [], 2, self.request, 123, cache_affinity_keys=["image"], vit_only=True
         )
         call = client._send_schedule_request.call_args
         self.assertEqual(call.args[1].generate_timeout, 30000)
@@ -585,8 +673,10 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
                             (
                                 "grpc-status-details-bin",
                                 ErrorDetailsPB(
-                                    error_code=int(
-                                        ExceptionType.CONCURRENCY_LIMIT_ERROR
+                                    error_code=(
+                                        0
+                                        if reject == 2
+                                        else int(ExceptionType.CONCURRENCY_LIMIT_ERROR)
                                     ),
                                     error_message="full",
                                 ).SerializeToString(),
@@ -628,6 +718,12 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 await client.get_vit_cache_metadata(vit, keys, input=self.request)
             self.assertEqual(
                 raised.exception.exception_type, ExceptionType.CONCURRENCY_LIMIT_ERROR
+            )
+            reject = 2
+            with self.assertRaises(FtRuntimeException) as malformed:
+                await client.get_vit_cache_metadata(vit, keys, input=self.request)
+            self.assertEqual(
+                malformed.exception.exception_type, ExceptionType.MM_PROCESS_ERROR
             )
         finally:
             await client.close()
@@ -822,22 +918,38 @@ class MMCacheApiTest(unittest.TestCase):
     def test_rdma_response_keeps_inline_feature_hashes(self):
         from unittest.mock import Mock
 
-        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MMRdmaDescPB
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MMRdmaSlotPB
         from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+        from rtp_llm.multimodal.transport.base import MMOutputTransport
+        from rtp_llm.multimodal.transport.rdma.backend import RdmaOutputBackend
         from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
         from rtp_llm.utils.grpc_util import trans_tensor
 
-        server = MultimodalRpcServer.__new__(MultimodalRpcServer)
-        server._rdma = Mock()
-        server._rdma.export_embedding.return_value = [
-            MMRdmaDescPB(handle="handle").SerializeToString()
-        ]
+        exporter = Mock()
+        slot = MMRdmaSlotPB(roles=[MMRdmaSlotPB.EMBEDDING])
+        slot.rdma_descriptor.lease_id = "handle"
+        slot.rdma_descriptor.tensors.add(shape=[2, 4], nbytes=32)
+        exporter.export_embedding.return_value = [slot.SerializeToString()]
         hashes = torch.tensor([-4, 5], dtype=torch.int32)
         result = MMEmbeddingRes(
             [torch.ones(2, 4, device="cuda")], feature_hashes=[hashes]
         )
-        response = server._trans_output_rdma(result)
-        self.assertEqual(response.output_rdma.handle, "handle")
+        engine = Mock()
+        engine.get_embedding_result.return_value = [result]
+        server = MultimodalRpcServer(engine)
+        server._transport = MMOutputTransport(RdmaOutputBackend(exporter))
+        context = Mock()
+        context.time_remaining.return_value = None
+        context.invocation_metadata.return_value = []
+        response = server.RemoteMultimodalEmbedding(
+            MultimodalInputsPB(support_rdma=True), context
+        )
+        self.assertEqual(
+            response.output_rdma_slots[0].rdma_descriptor.lease_id, "handle"
+        )
+        self.assertEqual(list(response.split_size), [2])
+        exporter.export_embedding.assert_called_once()
+        context.abort.assert_not_called()
         self.assertTrue(
             torch.equal(trans_tensor(response.multimodal_feature_hash), hashes)
         )

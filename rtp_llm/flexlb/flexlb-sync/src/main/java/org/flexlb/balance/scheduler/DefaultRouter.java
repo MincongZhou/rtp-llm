@@ -16,7 +16,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
-import org.flexlb.service.VitCacheDirectory;
+import org.flexlb.service.VitCacheSelector;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -34,7 +34,7 @@ public class DefaultRouter {
     private final ConfigService configService;
     private final List<RoleType> requiredRoles;
     @Autowired
-    private VitCacheDirectory vitCacheDirectory;
+    private VitCacheSelector vitCacheSelector;
 
     @Autowired
     public DefaultRouter(
@@ -79,8 +79,10 @@ public class DefaultRouter {
     public Response routeVit(BalanceContext context) {
         Response invalid = validateRequest(context);
         if (invalid != null) { return invalid; }
-        if (!requiredRoles.contains(RoleType.VIT)) { return Response.error(StrategyErrorType.NO_VIT_WORKER); }
-        ServerStatus vit = vitCacheDirectory.select(context, resolvePolicyGroup(context));
+        if (!requiredRoles.contains(RoleType.VIT) || vitCacheSelector == null) {
+            return Response.error(StrategyErrorType.NO_VIT_WORKER);
+        }
+        ServerStatus vit = vitCacheSelector.select(context, resolvePolicyGroup(context));
         if (vit.isSuccess()) { return buildSuccessResponse(List.of(vit)); }
         Response failure = new Response();
         failure.setSuccess(false);
@@ -91,8 +93,8 @@ public class DefaultRouter {
 
     public boolean selectedVitIsValid(BalanceContext context) {
         if (context.getRequest() == null || context.getRequest().getSelectedVit() == null) { return true; }
-        return requiredRoles.contains(RoleType.VIT)
-                && vitCacheDirectory.validate(context, resolvePolicyGroup(context)).isSuccess();
+        return vitCacheSelector != null && requiredRoles.contains(RoleType.VIT)
+                && vitCacheSelector.validate(context, resolvePolicyGroup(context)).isSuccess();
     }
 
     private Response validateRequest(BalanceContext context) {
@@ -117,7 +119,10 @@ public class DefaultRouter {
 
         try {
             if (context.getRequest().getSelectedVit() != null) {
-                SelectedRole vit = vitCacheDirectory.selectPinned(context, policyGroup);
+                if (vitCacheSelector == null) {
+                    return new PinnedRouting(selected, null, Response.error(StrategyErrorType.VIT_ROUTE_STALE), null);
+                }
+                SelectedRole vit = vitCacheSelector.selectPinned(context, policyGroup);
                 if (vit == null) {
                     return new PinnedRouting(selected, null, Response.error(StrategyErrorType.VIT_ROUTE_STALE), null);
                 }

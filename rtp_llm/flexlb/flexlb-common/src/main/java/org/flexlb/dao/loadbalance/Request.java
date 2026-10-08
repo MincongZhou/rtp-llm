@@ -23,8 +23,9 @@ public class Request {
     private List<Long> blockCacheKeys;
 
     @ToString.Exclude
-    @JsonProperty("media_keys")
-    private List<String> mediaKeys;
+    @JsonProperty("cache_affinity_keys")
+    @JsonAlias("media_keys")
+    private List<String> cacheAffinityKeys;
 
     @JsonProperty("selected_vit")
     private ServerStatus selectedVit;

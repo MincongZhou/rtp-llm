@@ -148,7 +148,7 @@ class RealVitRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.visitor.get_master_route_addrs(request))
         calls = self.client.get_backend_role_addrs.call_args_list
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0].kwargs["media_keys"], keys)
+        self.assertEqual(calls[0].kwargs["cache_affinity_keys"], keys)
         self.assertTrue(calls[0].kwargs["vit_only"])
         self.assertEqual(calls[1].kwargs["selected_vit"], self.status)
         wire = calls[1].kwargs["input_pb"]

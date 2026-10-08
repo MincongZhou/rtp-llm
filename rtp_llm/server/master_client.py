@@ -2,12 +2,14 @@
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import grpc
 import grpc.aio
+from google.protobuf.message import DecodeError
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -38,10 +40,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
 from rtp_llm.server.mm_cache_metadata import MAX_METADATA_BYTES, metadata_from_proto
-from rtp_llm.server.request_headers import (
-    dashscope_greennet_metadata,
-    normalize_request_headers,
-)
+from rtp_llm.server.request_headers import dashscope_greennet_metadata
 from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.telemetry import start_client_span
@@ -49,7 +48,9 @@ from rtp_llm.utils.base_model_datatypes import GenerateInput
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 DEFAULT_REQUEST_TIMEOUT_SEC = 0.5
+DEFAULT_VIT_HASH_PROBE_TIMEOUT_MS = 2_000
 VIT_ROUTE_STALE_CODE = 8408
+_HASH_RPC_UNSUPPORTED = object()
 
 route_logger = logging.getLogger("route_logger")
 
@@ -345,7 +346,7 @@ class MasterClient:
         request_id: int,
         input_pb: Optional["GenerateInputPB"] = None,
         *,
-        media_keys: Optional[List[str]] = None,
+        cache_affinity_keys: Optional[List[str]] = None,
         selected_vit: Optional[Dict[str, Any]] = None,
         seq_len: Optional[int] = None,
         vit_only: bool = False,
@@ -388,7 +389,7 @@ class MasterClient:
             cache_key_block_size=cache_key_block_size,
             priority=priority,
         )
-        request_pb.media_keys.extend(media_keys or [])
+        request_pb.cache_affinity_keys.extend(cache_affinity_keys or [])
         request_pb.vit_route_only = vit_only
         if selected_vit is not None:
             for name in (
@@ -529,17 +530,55 @@ class MasterClient:
     async def get_vit_cache_metadata(
         self, address: RoleAddr, keys: List[str], input: Optional[GenerateInput] = None
     ):
-        """Probe hashes, then submit only missing media when routing requires them."""
+        """Probe hashes, then submit only missing media when routing requires them.
+
+        With media input, an unsupported hash RPC returns None so the caller can
+        clear the ViT affinity pin and use the legacy embedding route. Required
+        hash acquisition errors and timeouts still fail the request.
+        """
         started = time.monotonic()
         unique_keys = list(dict.fromkeys(keys))
+        probe_timeout = DEFAULT_REQUEST_TIMEOUT_SEC
         if input is not None:
             input.greennet_verified_vit = None
+            configured_timeout = input.generate_config.mm_timeout_ms
+            if not configured_timeout or configured_timeout <= 0:
+                configured_timeout = max(
+                    (
+                        i.mm_preprocess_config.mm_timeout_ms
+                        for i in input.mm_inputs
+                        if i.mm_preprocess_config.mm_timeout_ms > 0
+                    ),
+                    default=120000,
+                )
+            limits = [configured_timeout]
+            for name in ("ttft_timeout_ms", "timeout_ms"):
+                limit = getattr(input.generate_config, name, None)
+                if limit and limit > 0:
+                    limits.append(limit)
+            try:
+                configured_probe_ms = int(
+                    os.environ.get(
+                        "VIT_HASH_PROBE_TIMEOUT_MS", DEFAULT_VIT_HASH_PROBE_TIMEOUT_MS
+                    )
+                )
+            except ValueError:
+                configured_probe_ms = DEFAULT_VIT_HASH_PROBE_TIMEOUT_MS
+            probe_timeout = min(max(1, configured_probe_ms), min(limits)) / 1000.0
         metadata = await self._get_vit_metadata(
             address,
             MultimodalHashRequestPB(keys=unique_keys),
-            DEFAULT_REQUEST_TIMEOUT_SEC,
+            probe_timeout,
             headers=input.headers if input is not None else None,
+            fallback_on_unimplemented=input is not None,
         )
+        if metadata is _HASH_RPC_UNSUPPORTED:
+            route_logger.info(
+                "ViT hash RPC unavailable at %s:%s; using legacy multimodal routing",
+                address.ip,
+                address.grpc_port,
+            )
+            return None
         if input is None:
             return metadata
         entries = {
@@ -574,21 +613,6 @@ class MasterClient:
             raise FtRuntimeException(
                 ExceptionType.MM_PROCESS_ERROR, "Missing ViT submission inputs"
             )
-        configured_timeout = input.generate_config.mm_timeout_ms
-        if not configured_timeout or configured_timeout <= 0:
-            configured_timeout = max(
-                (
-                    i.mm_preprocess_config.mm_timeout_ms
-                    for i in input.mm_inputs
-                    if i.mm_preprocess_config.mm_timeout_ms > 0
-                ),
-                default=120000,
-            )
-        limits = [configured_timeout]
-        for name in ("ttft_timeout_ms", "timeout_ms"):
-            limit = getattr(input.generate_config, name, None)
-            if limit and limit > 0:
-                limits.append(limit)
         remaining = min(limits) / 1000.0 - (time.monotonic() - started)
         if remaining <= 0:
             raise FtRuntimeException(
@@ -604,7 +628,10 @@ class MasterClient:
             remaining,
             required=True,
             headers=input.headers,
+            fallback_on_unimplemented=True,
         )
+        if filled is _HASH_RPC_UNSUPPORTED:
+            return None
         if metadata and filled.get("worker_instance") != metadata.get(
             "worker_instance"
         ):
@@ -642,6 +669,7 @@ class MasterClient:
         timeout_sec,
         required=False,
         headers=None,
+        fallback_on_unimplemented=False,
     ):
         started = time.monotonic()
         try:
@@ -653,6 +681,11 @@ class MasterClient:
             )
             return metadata_from_proto(response)
         except grpc.RpcError as error:
+            if (
+                fallback_on_unimplemented
+                and error.code() == grpc.StatusCode.UNIMPLEMENTED
+            ):
+                return _HASH_RPC_UNSUPPORTED
             if required:
                 code = (
                     ExceptionType.GENERATE_TIMEOUT
@@ -662,9 +695,12 @@ class MasterClient:
                 message = error.details() or "ViT hash acquisition failed"
                 for key, value in error.trailing_metadata() or ():
                     if key == "grpc-status-details-bin":
-                        details = ErrorDetailsPB.FromString(value)
-                        code = ExceptionType(details.error_code)
-                        message = details.error_message
+                        try:
+                            details = ErrorDetailsPB.FromString(value)
+                            code = ExceptionType(details.error_code)
+                            message = details.error_message or message
+                        except (DecodeError, ValueError):
+                            pass  # Keep the gRPC-derived error for malformed or unknown codes.
                         break
                 raise FtRuntimeException(code, message) from error
             route_logger.warning(

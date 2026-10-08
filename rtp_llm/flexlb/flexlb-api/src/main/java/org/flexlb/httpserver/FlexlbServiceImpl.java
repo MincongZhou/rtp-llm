@@ -114,7 +114,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             if (forwardToMaster) {
                 if (request.getForwardHop() != 0) {
                     completeOnce(request.getRequestId(), context,
-                            notMasterResponse(request.getRequestId()),
+                            notMasterResponse(request.getRequestId(), isAdmissionRequest(context)),
                             responseObserver, ScheduleOrigin.ENTRY_ERROR, completionClaimed);
                     return;
                 }
@@ -142,8 +142,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
-    private FlexlbScheduleProtocol.FlexlbScheduleResponsePB notMasterResponse(long requestId) {
-        RequestState owned = routeService.getRequestState(requestId, 0);
+    private FlexlbScheduleProtocol.FlexlbScheduleResponsePB notMasterResponse(long requestId, boolean admissionRequest) {
+        RequestState owned = admissionRequest ? routeService.getRequestState(requestId, 0) : null;
         if (owned != null) {
             // A repeated request must not be advertised as unaccepted after leadership changes.
             return buildMasterForwardFailureResponse("REQUEST_ALREADY_OWNED", "")
@@ -293,7 +293,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             if (!completionClaimed.compareAndSet(false, true)) {
                 return;
             }
-            cancelUndeliveredRoute(request.getRequestId());
+            if (isAdmissionRequest(context)) {
+                cancelUndeliveredRoute(request.getRequestId());
+            }
         };
         inboundContext.addListener(cancellationListener, Runnable::run);
         Runnable removeCancellationListener =
@@ -617,7 +619,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         return routeService.route(ctx).thenApply(response -> {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                     toProtoResponse(response).toBuilder();
-            RequestState lifecycle = routeService.getRequestState(ctx.getRequestId(), 0);
+            RequestState lifecycle = isAdmissionRequest(ctx) ? routeService.getRequestState(ctx.getRequestId(), 0) : null;
             if (lifecycle != null) {
                 builder.setLifecycle(toLifecycleProto(lifecycle));
             }
@@ -656,7 +658,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             observer.onNext(response);
             observer.onCompleted();
         } catch (RuntimeException deliveryError) {
-            if (response.getSuccess() && ctx != null) {
+            if (response.getSuccess() && ctx != null && isAdmissionRequest(ctx)) {
                 if (ownsLocalRoute(origin)) {
                     cancelUndeliveredRoute(ctx.getRequestId());
                 } else if (origin == ScheduleOrigin.FORWARDED_TO_MASTER) {
@@ -691,6 +693,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             Logger.warn("FlexlbService.schedule cancellation failed, request_id={}",
                     requestId, error);
         }
+    }
+
+    private static boolean isAdmissionRequest(BalanceContext ctx) {
+        return ctx == null || ctx.getRequest() == null || !ctx.getRequest().isVitRouteOnly();
     }
 
     private static boolean ownsLocalRoute(ScheduleOrigin origin) {
@@ -833,7 +839,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         Request request = new Request();
         request.setRequestId(pb.getRequestId());
         request.setBlockCacheKeys(pb.getBlockCacheKeysList());
-        request.setMediaKeys(pb.getMediaKeysList());
+        request.setCacheAffinityKeys(pb.getCacheAffinityKeysList());
         request.setVitRouteOnly(pb.getVitRouteOnly());
         if (pb.hasSelectedVit()) {
             var selected = pb.getSelectedVit();

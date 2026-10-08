@@ -37,6 +37,14 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
     public static final String CONNECT_TIMEOUT_PROPERTY =
             "flexlb.engine-grpc.connect-timeout-ms";
+    public static final String VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY =
+            "flexlb.engine-grpc.vit-cache-max-inbound-message-bytes";
+    private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 8 * 1024 * 1024;
+    private static final int DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
+
+    @Value("${" + VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY + ":"
+            + DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES + "}")
+    private int vitCacheMaxInboundMessageBytes = DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES;
 
     @Getter
     private final Executor executor;
@@ -278,18 +286,13 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 requestTimeoutMs, ServiceType.ENGINE_CANCEL);
     }
 
-    public EngineRpcService.CacheStatusPB getMultimodalCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
-        // A directory with 100k hashes plus residency keys can exceed the channel's 8 MiB default.
-        return executeGrpcCallAsync(ip, port, stub -> stub.getMultimodalFutureStub()
-                .withMaxInboundMessageSize(16 * 1024 * 1024).getCacheStatus(request),
-                requestTimeoutMs, ServiceType.MULTIMODAL_CACHE_STATUS).join();
-    }
-
     @Override
     protected ManagedChannel createChannel(String channelKey) {
         String[] parts = parseServiceKey(channelKey);
         String ip = parts[0];
         int port = Integer.parseInt(parts[1]);
+        int maxInboundMessageBytes = ServiceType.MULTIMODAL_CACHE_STATUS.getSuffix().equals(parts[2])
+                ? vitCacheMaxInboundMessageBytes : DEFAULT_MAX_INBOUND_MESSAGE_BYTES;
         Logger.info("Creating new channel for ip: {}, port: {}", ip, port);
         return NettyChannelBuilder.forAddress(ip, port)
                 .channelType(NioSocketChannel.class)
@@ -304,8 +307,8 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 // Receive/send buffer size
                 .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
                 .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
-                // Maximum message size limit (8MB)
-                .maxInboundMessageSize(8 * 1024 * 1024)
+                // ViT directory snapshots have a separate configurable message limit.
+                .maxInboundMessageSize(maxInboundMessageBytes)
                 // HTTP/2 initial flow control window: prevents transmission issues due to flow control
                 .initialFlowControlWindow(2 * 1024 * 1024)
                 // gRPC keepalive configuration: keeps connection active, prevents disconnection by intermediate devices

@@ -286,7 +286,7 @@ class BackendRPCServerVisitor:
                     cache_key_block_size=self._cache_key_block_size(),
                     input=input,
                     request_id=input.request_id,
-                    media_keys=keys,
+                    cache_affinity_keys=keys,
                     vit_only=True,
                 )
                 if vit_result.is_ok:
@@ -324,6 +324,11 @@ class BackendRPCServerVisitor:
                     metadata = await self.master_client.get_vit_cache_metadata(
                         selected_vit, keys, input=input
                     )
+                    if metadata is None:
+                        # A proxy without the hash RPC uses the normal embedding
+                        # route, which preserves inference without ViT cache affinity.
+                        selected_vit = None
+                        route_args.pop("selected_vit")
                 elif not vit_result.connection_failed and vit_result.error_code not in (
                     404,
                     405,
@@ -370,6 +375,9 @@ class BackendRPCServerVisitor:
             # Retain only compact int32 ids and segment offsets for the model RPC.
             # Drop the much larger metadata representation before scheduling.
             metadata = None
+        # Without ViT metadata, token_ids is only the text prefix before the
+        # first media tag. Hashing the original media placeholder or tokens
+        # after it would claim KV cache hits for content not yet expanded.
         # Keep hash generation at the physical KV block granularity. Page-RR
         # routing samples canonical keys from this full logical-block key list;
         # it must not recompute request hashes with the virtual block size.
@@ -397,6 +405,7 @@ class BackendRPCServerVisitor:
                 # only hints for the old worker and must not survive re-routing.
                 retry_vit_route = True
                 route_args.pop("selected_vit")
+                route_args.pop("seq_len", None)
                 selected_vit = None
                 token_expansion = None
                 input.mm_token_expansion = None
@@ -405,7 +414,7 @@ class BackendRPCServerVisitor:
                     cache_key_block_size=self._cache_key_block_size(),
                     input=input,
                     request_id=input.request_id,
-                    media_keys=keys,
+                    cache_affinity_keys=keys,
                     vit_only=True,
                     **route_args,
                 )
@@ -450,20 +459,26 @@ class BackendRPCServerVisitor:
                     compact=True,
                     expanded_spans=expanded_spans,
                 )
-                if full_length is None:
+                if full_length is None and metadata is not None:
                     raise FtRuntimeException(
                         ExceptionType.MM_PROCESS_ERROR,
                         "Incomplete replacement ViT routing hashes",
                     )
-                token_expansion = MultimodalTokenExpansion(token_ids, expanded_spans)
                 block_cache_keys = self._route_cache_keys(
                     get_block_cache_keys(token_ids, self.seq_size_per_block)
                 )
+                if full_length is None:
+                    selected_vit = None
+                    route_args.pop("seq_len", None)
+                else:
+                    token_expansion = MultimodalTokenExpansion(
+                        token_ids, expanded_spans
+                    )
+                    route_args.update(
+                        selected_vit=status, seq_len=full_length - input.prefix_length
+                    )
+                    input.mm_token_expansion = token_expansion
                 del metadata, original_tokens, token_ids
-                route_args.update(
-                    selected_vit=status, seq_len=full_length - input.prefix_length
-                )
-                input.mm_token_expansion = token_expansion
                 route_result = await self.master_client.get_backend_role_addrs(
                     block_cache_keys=block_cache_keys,
                     cache_key_block_size=self._cache_key_block_size(),
