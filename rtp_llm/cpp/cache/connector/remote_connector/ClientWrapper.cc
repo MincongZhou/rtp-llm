@@ -39,9 +39,8 @@ private:
 
 }  // namespace
 
-std::unique_ptr<kv_cache_manager::TransferClient> ClientWrapper::transfer_client_;
-std::unique_ptr<Subscriber>                       ClientWrapper::subscriber_;
-std::unique_ptr<ClientFactory>                    ClientWrapper::client_factory_ = std::make_unique<ClientFactory>();
+std::unique_ptr<Subscriber>    ClientWrapper::subscriber_;
+std::unique_ptr<ClientFactory> ClientWrapper::client_factory_ = std::make_unique<ClientFactory>();
 
 ClientWrapper::~ClientWrapper() = default;
 
@@ -72,7 +71,8 @@ bool ClientWrapper::init(const ConfigMap&                                  confi
             return false;
         }
     }
-    // init static transfer client
+    // The transfer client owns registrations for this connector's host/GPU
+    // pools, so its lifetime must remain tied to this ClientWrapper.
     init_params_.storage_configs = meta_client_map_.begin()->second->GetStorageConfig();
     RTP_LLM_LOG_INFO("transfer client storage config [%s]", init_params_.storage_configs.c_str());
     if (init_params_.role_type == kv_cache_manager::RoleType::SCHEDULER) {

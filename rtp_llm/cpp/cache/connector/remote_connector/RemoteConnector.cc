@@ -223,6 +223,10 @@ RemoteConnector::~RemoteConnector() {
         thread_pool_.reset();
     }
     broadcaster_.reset();
+    // TransferClient destruction drains its SDK workers and deregisters all
+    // external host/GPU regions. It must happen while allocator_ and the
+    // memory connector's host BlockPool are still alive.
+    client_wrapper_.reset();
 }
 
 std::pair<std::shared_ptr<RemoteConnectorConfig::LocationSpecInfoMap>,

@@ -77,9 +77,9 @@ private:
     // when slaver reaches 3, need reinitAllMetaClients
     std::atomic<int> grpc_error_count_{0};
 
-    static std::unique_ptr<ClientFactory>                    client_factory_;
-    static std::unique_ptr<kv_cache_manager::TransferClient> transfer_client_;
-    static std::unique_ptr<remote_connector::Subscriber>     subscriber_;
+    static std::unique_ptr<ClientFactory>                client_factory_;
+    std::unique_ptr<kv_cache_manager::TransferClient>    transfer_client_;
+    static std::unique_ptr<remote_connector::Subscriber> subscriber_;
 };
 
 }  // namespace remote_connector
