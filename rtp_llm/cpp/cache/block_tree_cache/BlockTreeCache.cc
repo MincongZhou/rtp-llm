@@ -112,7 +112,7 @@ bool BlockTreeCache::init() {
 BlockTreeCache::~BlockTreeCache() {
     full_prefix_scanner_.reset();
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
-    loader_.shutdown();
+    shutdownLoads();
     if (storage_backend_) {
         storage_backend_->shutdown();
     }
@@ -132,6 +132,10 @@ BlockTreeCache::~BlockTreeCache() {
     transfer_dispatcher_.reset();
     task_pool_.reset();
     RTP_LLM_LOG_INFO("destroyed");
+}
+
+void BlockTreeCache::shutdownLoads() {
+    loader_.shutdown();
 }
 
 bool BlockTreeCache::executeTransfer(TransferTask task) {

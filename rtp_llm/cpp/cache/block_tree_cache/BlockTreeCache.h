@@ -119,6 +119,8 @@ public:
 
     ~BlockTreeCache();
     bool init();
+    // Reject pending loads and wait for allocator callbacks before its members are destroyed.
+    void shutdownLoads();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
     void                 insert(const CacheKeysType&                              cache_keys,
