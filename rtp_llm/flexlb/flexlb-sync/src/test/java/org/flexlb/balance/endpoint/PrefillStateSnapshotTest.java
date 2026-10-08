@@ -3,7 +3,6 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.balance.scheduler.RequestRoute;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -598,8 +597,7 @@ class PrefillStateSnapshotTest {
         var retired = state.retireGenerationOwnership();
         assertEquals(0, drained.get(), "State returns cleanup capabilities without executing them");
         for (var handoff : retired.orphanedHandoffs()) {
-            if (callbackFails) { assertThrows(IllegalStateException.class, handoff::close); }
-            else { handoff.close(); }
+            if (callbackFails) { assertThrows(IllegalStateException.class, handoff::close); } else { handoff.close(); }
         }
         assertEquals("retirement reached an OPEN Prefill batch lease", retired.invariantFailure().getMessage());
         assertEquals(List.of(request), retired.ownedItems());
@@ -1103,6 +1101,103 @@ class PrefillStateSnapshotTest {
                 .map(PrefillState.BatchCompletion::batchId).toList());
         assertEquals(0, state.captureQueueCounters().batchSlots());
         assertEquals(0, state.stats().locallyOwnedRequests());
+    }
+
+    @Test
+    void directGroupValidationPreservesArgumentAndOwnershipErrorPrecedence() {
+        RequestRoute request = routeItem(101);
+        var lease = state.reserveUnqueuedRoute(request, 30L, 10L).reservation();
+        try (var preparation = EndpointTestSupport.preparation(lease);
+             var permit = generation.tryAcquireHandoff()) {
+            assertThrows(IllegalArgumentException.class, () -> EndpointTestSupport.commitRoutes(state,
+                    List.of(), List.of(), permit));
+            assertThrows(IllegalStateException.class, () -> EndpointTestSupport.commitRoutes(state,
+                    List.of(request, routeItem(102)), List.of(lease), permit));
+            assertThrows(IllegalArgumentException.class, () -> EndpointTestSupport.commitRoutes(state,
+                    List.of(request), List.of(lease, lease), permit));
+            assertEquals(30L, remainingWork());
+            assertEquals(1L, state.observedRequestCount());
+        }
+        assertEquals(0L, state.observedRequestCount());
+    }
+
+    @Test
+    void directGroupLeaseMismatchLeavesEveryReservationRetryable() {
+        RequestRoute first = routeItem(101), second = routeItem(102);
+        var firstLease = state.reserveUnqueuedRoute(first, 30L, 10L).reservation();
+        var secondLease = state.reserveUnqueuedRoute(second, 40L, 10L).reservation();
+        try (var firstPreparation = EndpointTestSupport.preparation(firstLease);
+             var secondPreparation = EndpointTestSupport.preparation(secondLease);
+             var permit = generation.tryAcquireHandoff()) {
+            assertThrows(IllegalStateException.class, () -> EndpointTestSupport.commitRoutes(state,
+                    List.of(first, second), List.of(firstLease, firstLease), permit));
+            assertEquals(70L, remainingWork());
+            assertEquals(2L, state.observedRequestCount());
+            try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(first, second),
+                    List.of(firstLease, secondLease), permit)) {
+                assertEquals(0L, handoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
+            }
+        }
+        assertEquals(PrefillState.RequestRelease.COMMITTED, state.releaseRequest(first));
+        assertEquals(PrefillState.RequestRelease.COMMITTED, state.releaseRequest(second));
+        assertEquals(0L, state.observedRequestCount());
+    }
+
+    @Test
+    void duplicateTerminalReportsMergeBeforeBatchAggregationAndReleaseOnce() {
+        commitBatch(List.of(item(1), item(2)), 300L);
+        var finished = Map.of("first-success", task(1, null, 0L, 100L),
+                "first-failure", task(1, null, 500L, 700L),
+                "second-success", task(2, null, 0L, 200L));
+        ToLongFunction<List<RequestRoute>> noRepacking = unused -> {
+            throw new AssertionError("a completed batch needs no prediction");
+        };
+        var result = reconcile(finished, Map.of(), noRepacking);
+        assertEquals(2, result.requestStatuses().size());
+        assertEquals(1L, result.requestStatuses().stream()
+                .filter(status -> status.kind() == PrefillState.PrefillRequestStatus.Kind.FAILED).count());
+        assertEquals(1, result.batchCompletions().size());
+        var completion = result.batchCompletions().getFirst();
+        assertEquals(700L, completion.actualWorkMs());
+        assertTrue(completion.successfulCompletion());
+        assertFalse(completion.learningEligible());
+        assertTrue(result.capacityReleased());
+        assertEquals(0L, state.observedRequestCount());
+        var repeated = reconcile(finished, Map.of(), noRepacking);
+        assertTrue(repeated.batchCompletions().isEmpty());
+        assertTrue(repeated.requestStatuses().isEmpty());
+        assertFalse(repeated.capacityReleased());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void preparedCapacityReleaseTracksUnknownOwnershipAndRejectsStaleCounts(boolean invalidate) {
+        var worker = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.PREFILL);
+        response.setRunningQueryLen(4L);
+        state.reconcileHeartbeat(worker.freezeStatusResponse(response));
+        assertEquals(4L, state.observedRequestCount());
+        response.setRunningQueryLen(2L);
+        var observation = worker.freezeStatusResponse(response);
+        lock.lock();
+        try {
+            var reduction = state.prepareStatusLocked(observation);
+            assertEquals(4L, state.observedRequestCount(), "preparation must not release capacity");
+            if (invalidate) {
+                response.setRunningQueryLen(1L);
+                state.reconcileHeartbeat(worker.freezeStatusResponse(response));
+                assertNull(state.commitStatusLocked(reduction, Map.of()));
+                assertEquals(1L, state.observedRequestCount());
+                reduction = state.prepareStatusLocked(observation);
+            }
+            var result = state.commitStatusLocked(reduction, Map.of());
+            assertEquals(!invalidate, result.capacityReleased(),
+                    "only a decrease from the current unknown ownership releases capacity");
+            assertEquals(2L, state.observedRequestCount());
+        } finally {
+            lock.unlock();
+        }
     }
 
     private void commitBatch(List<RequestRoute> members, long predictedMs) {
