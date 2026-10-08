@@ -893,7 +893,11 @@ async def iter_real_model_stream_infer(
             else ThinkingMode.DISABLED
         )
         begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
-        env_budget = getattr(generate_env_config, "max_thinking_tokens", None)
+        env_budget = (
+            generate_env_config.max_thinking_tokens
+            if generate_env_config is not None
+            else None
+        )
         if env_budget is not None:
             generate_config.max_thinking_tokens = (
                 _INT32_MAX if int(env_budget) < 0 else int(env_budget)

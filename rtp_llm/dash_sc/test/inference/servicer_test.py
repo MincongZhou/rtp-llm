@@ -283,6 +283,7 @@ class _FakeTokenizer:
 
 
 class _GenerateEnvCfg:
+    max_thinking_tokens = None
     think_mode = "adaptive"
     think_end_token_id = -1
     think_start_tag = "<think>\n"
