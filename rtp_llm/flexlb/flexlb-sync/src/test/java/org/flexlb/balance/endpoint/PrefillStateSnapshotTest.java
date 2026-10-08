@@ -939,6 +939,52 @@ class PrefillStateSnapshotTest {
         assertEquals(300L, remainingWork());
         assertEquals(2, state.stats().locallyOwnedRequests());
         assertEquals(List.of(queued), waitingItems());
+        var completed = reconcile(Map.of("1", task(1, null, 0L, 200L),
+                "2", task(2, null, 0L, 300L)), Map.of(), unused -> {
+                    throw new AssertionError("a completed batch needs no prediction");
+                });
+        assertEquals(1, completed.batchCompletions().size());
+        assertTrue(completed.batchCompletions().getFirst().learningEligible(),
+                "a failed prediction must not retain the speculative failure outcome");
+        assertEquals(300L, completed.batchCompletions().getFirst().actualWorkMs());
+    }
+
+    @Test
+    void invalidatedStatusReductionDoesNotPolluteBatchResults() {
+        RequestRoute first = item(1), second = item(2), queued = item(3);
+        commitBatch(List.of(first, second), 300L);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.PREFILL);
+        response.setFinishedTaskInfo(Map.of("1", task(1, null, 500L, 0L)));
+        response.setRunningTaskInfo(Map.of("2", task(2, TaskPhase.RECEIVED, 0L, 0L)));
+        var observation = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
+                .freezeStatusResponse(response);
+        PrefillState.StatusReduction reduction;
+        lock.lock();
+        try {
+            reduction = state.prepareStatusLocked(observation);
+        } finally {
+            lock.unlock();
+        }
+        assertEquals(Map.of(10L, List.of(second)), reduction.predictionInputs());
+        enqueue(queued);
+        lock.lock();
+        try {
+            assertNull(state.commitStatusLocked(reduction, Map.of(10L, 200L)));
+        } finally {
+            lock.unlock();
+        }
+        assertEquals(List.of(1L, 2L), state.committedSnapshot().batches().getFirst().requestIds());
+        assertEquals(300L, remainingWork());
+        var completed = reconcile(Map.of("1", task(1, null, 0L, 200L),
+                "2", task(2, null, 0L, 300L)), Map.of(), unused -> {
+                    throw new AssertionError("a completed batch needs no prediction");
+                });
+        assertEquals(1, completed.batchCompletions().size());
+        assertTrue(completed.batchCompletions().getFirst().learningEligible(),
+                "a stale reduction must not retain the speculative failure outcome");
+        assertEquals(300L, completed.batchCompletions().getFirst().actualWorkMs());
+        assertEquals(List.of(queued), waitingItems());
     }
 
     @Test
