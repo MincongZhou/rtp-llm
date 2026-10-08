@@ -516,6 +516,29 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route["selected_vit"], self.status)
         self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
 
+    async def test_unknown_media_hints_match_completed_model_prefix_blocks(self):
+        from rtp_llm.ops import get_block_cache_keys
+
+        # The media starts inside a physical KV block. Its unknown placeholder
+        # and the incomplete text block must not contribute a routing cache key.
+        original = [10, 11, 12, 13, 14, 99, 20, 21, 22]
+        self.request.token_ids = torch.tensor(original, dtype=torch.int32)
+        self.visitor.master_client.get_backend_role_addrs.side_effect = [
+            FlexlbResponse.error_response(404),
+            FlexlbResponse.ok([self.prefill, self.vit]),
+        ]
+        await self.visitor.get_master_route_addrs(self.request)
+        route = self.visitor.master_client.get_backend_role_addrs.call_args.kwargs
+        hints = route["block_cache_keys"]
+        expanded_model_tokens = [10, 11, 12, 13, 14, -10, 11, 12, 20, 21, 22]
+        model_keys = get_block_cache_keys(expanded_model_tokens, 2)
+        self.assertEqual(len(hints), 2)
+        self.assertEqual(hints, model_keys[:2])
+        self.assertEqual(list(route["input_pb"].token_ids), original)
+        self.assertEqual(self.request.token_ids.tolist(), original)
+        self.assertIsNone(self.request.mm_token_expansion)
+        self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
+
     async def test_old_master_falls_back_to_ordinary_schedule(self):
         self.visitor.master_client.get_backend_role_addrs.side_effect = [
             FlexlbResponse.error_response(404),
