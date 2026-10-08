@@ -161,3 +161,9 @@ py_test(
     srcs = ["cuda_graph_gate_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "qwen3_vl_embedding_test",
+    srcs = ["qwen3_vl_embedding_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
