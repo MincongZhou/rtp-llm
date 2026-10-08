@@ -1,3 +1,4 @@
+import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -60,11 +61,11 @@ public class ProjectionDifferential {
                     ? List.of(new WorkSnapshot.RequestWork(9999, WorkSnapshot.Phase.ENGINE_RUNNING, 500))
                     : List.of(), List.of(), 0);
             var inputs = new RouteProjection.Inputs(new QueueSnapshot(1000, true, org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW, order, limits, items, null), committed, 0L);
-            var probe = new RouteProjection.Probe(trial % 50 == 0 ? 1 : 999999,
+            var probe = new RouteProjectionTestSupport.Probe(trial % 50 == 0 ? 1 : 999999,
                     random.nextInt(10), 1000, trial % 7 == 0 ? 1015 : Long.MAX_VALUE,
                     2048, 256, 256);
             for (var policy : List.of(batchPolicy, routePolicy)) {
-                var candidate = RouteProjection.project(inputs, probe, model, policy,
+                var candidate = RouteProjectionTestSupport.project(inputs, probe, model, policy,
                         new long[]{1000, 1001, 1010, 1020}[trial % 4]);
                 add(digest, candidate);
                 states.merge(candidate.state().name(), 1, Integer::sum);

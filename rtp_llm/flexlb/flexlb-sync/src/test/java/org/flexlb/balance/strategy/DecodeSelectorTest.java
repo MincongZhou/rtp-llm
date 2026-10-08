@@ -514,7 +514,7 @@ class DecodeSelectorTest {
 
         Assertions.assertTrue(endpoint.routingView().realKvUsed()
                 > new DecodeResources.AdmissionCapacity(0L, 90L).kvBudget(endpoint.routingView().totalKv()));
-        Assertions.assertEquals(0L, endpoint.routingView().engineFacingKvUsed());
+        Assertions.assertEquals(0L, endpoint.routingView().dispatchUsage().expectedKvUsed());
 
         DecodeSelector strategy = new DecodeSelector(
                 registry);
@@ -530,7 +530,7 @@ class DecodeSelectorTest {
         ServerStatus fifoResult = fifoSelection.serverStatus();
         Assertions.assertTrue(fifoResult.isSuccess());
         Assertions.assertEquals(request.getRequestId(), fifoResult.getRequestId());
-        Assertions.assertFalse(endpoint.resourceSnapshot().isQueued(3L),
+        Assertions.assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 3L),
                 "selection must not mutate Decode reservation ownership");
         fifoSelection.close();
 
@@ -544,7 +544,7 @@ class DecodeSelectorTest {
                 strategy.select(RequestRequirements.capture(context), null);
         Assertions.assertEquals(
                 PlacementResult.Status.SUCCESS, priorityPlacement.status());
-        Assertions.assertFalse(endpoint.resourceSnapshot().isQueued(4L),
+        Assertions.assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 4L),
                 "priority planning must leave capacity acquisition to commit");
         priorityPlacement.value().close();
     }
@@ -612,9 +612,9 @@ class DecodeSelectorTest {
             Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
             try (SelectedRole selected = result.value()) {
                 counts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
-                Assertions.assertFalse(decodeEndpoint(registry,
+                Assertions.assertFalse(EndpointTestSupport.isQueued(decodeEndpoint(registry,
                         selected.serverStatus().getServerIp() + ":8080")
-                        .resourceSnapshot().isQueued(requestId), "selection cannot claim capacity");
+                        .resourceSnapshot(), requestId), "selection cannot claim capacity");
             }
         }
         Assertions.assertEquals(Map.of("127.0.0.1", 5, "127.0.0.2", 5), counts);

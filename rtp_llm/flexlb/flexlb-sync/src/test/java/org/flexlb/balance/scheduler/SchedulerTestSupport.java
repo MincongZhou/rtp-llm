@@ -106,4 +106,18 @@ public final class SchedulerTestSupport {
         }
         return owner;
     }
+
+    static DefaultBatchDispatcher createDispatcher(org.flexlb.engine.grpc.EngineGrpcClient client,
+                                                   org.flexlb.config.ConfigService service,
+                                                   int threads, int queueCapacity) {
+        var config = org.mockito.Mockito.spy(service.loadBalanceConfig());
+        var sizing = org.mockito.Mockito.spy(config.getInternalRuntime());
+        org.mockito.Mockito.doReturn(threads).when(sizing).getBatchDispatchThreads();
+        org.mockito.Mockito.doReturn(queueCapacity).when(sizing).getBatchDispatchQueueCapacity();
+        org.mockito.Mockito.doReturn(sizing).when(config).getInternalRuntime();
+        var dispatcherService = org.mockito.Mockito.mock(org.flexlb.config.ConfigService.class,
+                org.mockito.AdditionalAnswers.delegatesTo(service));
+        org.mockito.Mockito.doReturn(config).when(dispatcherService).loadBalanceConfig();
+        return new DefaultBatchDispatcher(client, dispatcherService, null);
+    }
 }

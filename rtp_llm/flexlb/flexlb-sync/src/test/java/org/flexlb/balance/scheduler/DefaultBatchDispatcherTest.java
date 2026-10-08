@@ -449,7 +449,7 @@ class DefaultBatchDispatcherTest {
     void shutdownWakesCapacityWaiterAndNextReservationReturnsAdmissionFailure()
             throws Exception {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        dispatcher = SchedulerTestSupport.createDispatcher(grpcClient, configService, 1, 1);
         PreparedSubmission running = reservePermit();
         PreparedSubmission queued = reservePermit();
         CapacityBoundary unavailable = unavailableBoundary();
@@ -542,7 +542,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void acceptedRpcCompletesNormallyAfterShutdown() throws Exception {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
+        dispatcher = SchedulerTestSupport.createDispatcher(grpcClient, configService, 1, 0);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture = new CompletableFuture<>();
@@ -827,7 +827,7 @@ class DefaultBatchDispatcherTest {
     void logicalCapacityRejectsAndUnusedReservationRestoresCapacity()
             throws Exception {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        dispatcher = SchedulerTestSupport.createDispatcher(grpcClient, configService, 1, 1);
         PreparedSubmission running = reservePermit();
         PreparedSubmission queued = reservePermit();
         CapacityBoundary unavailable = unavailableBoundary();
@@ -851,7 +851,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void closingAnyUnusedReservationSignalsAndRestoresCapacity() throws Exception {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        dispatcher = SchedulerTestSupport.createDispatcher(grpcClient, configService, 1, 1);
         PreparedSubmission running = reservePermit();
         PreparedSubmission queued = reservePermit();
         CapacityBoundary unavailable = unavailableBoundary();
@@ -875,7 +875,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void acceptedReservationsSubmitWithoutSecondCapacityCheck() {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        dispatcher = SchedulerTestSupport.createDispatcher(grpcClient, configService, 1, 1);
         PrefillEndpoint endpoint = createPrefillEndpoint();
         RequestRoute firstItem = createRequestRoute(1L, 500, 200, endpoint);
         RequestRoute secondItem = createRequestRoute(2L, 500, 200, endpoint);
@@ -942,7 +942,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void submittedReservationReleasesCapacityAfterRpcHandoff() throws Exception {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
+        dispatcher = SchedulerTestSupport.createDispatcher(grpcClient, configService, 1, 0);
         PrefillEndpoint endpoint = createPrefillEndpoint();
         RequestRoute item = createRequestRoute(1L, 500, 200, endpoint);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture =

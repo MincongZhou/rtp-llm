@@ -92,11 +92,11 @@ class PreemptionPhasesE2ETest {
             h.setDecodeKvCapacity(0, 255, 256);
             CompletableFuture<Response> low = h.scheduler.submit(h.context(201, 30));
             AutoTpmE2EHarness.await(
-                    () -> decodeEp.resourceSnapshot().isReserved(201L),
+                    () -> MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 201L),
                     5_000,
                     "low-priority request must publish its Decode reservation");
             assertFalse(low.isDone());
-            assertTrue(decodeEp.resourceSnapshot().isReserved(201L));
+            assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 201L));
             // victim 仍由 Master 排队持有，因此走本地 queued eviction，无需 Engine Cancel。
             long hardKvBefore = decodeEp.routingView().inflightHardKv();
             assertTrue(hardKvBefore > 0);
@@ -104,7 +104,7 @@ class PreemptionPhasesE2ETest {
             CompletableFuture<Response> high = h.scheduler.submit(h.context(202, 70));
 
             AutoTpmE2EHarness.await(
-                    () -> decodeEp.resourceSnapshot().isReserved(202L),
+                    () -> MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 202L),
                     5_000, "the higher-priority request must acquire the withdrawn capacity");
             // Schema v3 withdraws the queued route, not the request: no terminal error or Engine Cancel.
             assertFalse(low.isDone(), "the original low-priority future must remain pending");
@@ -113,8 +113,8 @@ class PreemptionPhasesE2ETest {
 
             // 账目正确：victim 影子预留释放，高优恰好占据一份
             assertFalse(high.isDone(), "high-priority request should sit in the queue after eviction");
-            assertFalse(decodeEp.resourceSnapshot().isReserved(201L));
-            assertTrue(decodeEp.resourceSnapshot().isReserved(202L));
+            assertFalse(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 201L));
+            assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 202L));
             assertEquals(1, decodeEp.getInflightCount());
             assertEquals(hardKvBefore, decodeEp.routingView().inflightHardKv(),
                     "hard KV must transfer 1:1 from victim to incoming");
@@ -215,7 +215,7 @@ class PreemptionPhasesE2ETest {
                                 + victim.getErrorMessage());
 
                 // 顺序断言第 2 段：确认后高优才拿到容量（reserve 成功、进入队列待派发）
-                assertTrue(decodeEp.resourceSnapshot().isReserved(302L),
+                assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 302L),
                         "incoming may take the freed capacity only after confirmed release");
                 assertFalse(decodeEp.resourceSnapshot().requests().values().stream()
                 .filter(request -> request.phase().isEngineConfirmed())
@@ -274,7 +274,7 @@ class PreemptionPhasesE2ETest {
                         highResp.getAdmissionRejectReason());
                 assertTrue(highResp.getErrorMessage().contains("cancel_terminal_unknown"),
                         "timeout must be explicit: " + highResp.getErrorMessage());
-                assertFalse(decodeEp.resourceSnapshot().isReserved(312L),
+                assertFalse(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 312L),
                         "incoming must NOT take capacity on cancel timeout");
 
                 // victim 保持 CANCEL_REQUESTED，等 WorkerStatus 迟到确认 → 8429 late confirm
@@ -321,11 +321,11 @@ class PreemptionPhasesE2ETest {
             // P50 占据 decode 唯一槽位
             CompletableFuture<Response> holder = h.scheduler.submit(h.context(501, 50));
             AutoTpmE2EHarness.await(
-                    () -> decodeEp.resourceSnapshot().isReserved(501L),
+                    () -> MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 501L),
                     5_000,
                     "equal-priority holder must publish its Decode reservation");
             assertFalse(holder.isDone());
-            assertTrue(decodeEp.resourceSnapshot().isReserved(501L));
+            assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 501L));
 
             // 同优新请求不能抢占，也不能把瞬时容量不足变成终态 8403；
             // 它保持未绑定，等待精确 Decode 容量变化。
@@ -334,7 +334,7 @@ class PreemptionPhasesE2ETest {
 
             // victim 完全不受影响
             assertFalse(holder.isDone());
-            assertTrue(decodeEp.resourceSnapshot().isReserved(501L));
+            assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 501L));
             assertEquals(1, h.prefillEndpoint(0).queuedRequestCount());
             verify(h.requestReporter, never()).reportVictim(anyInt(), anyInt(),
                     anyString(), anyString());

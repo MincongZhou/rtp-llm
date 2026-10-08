@@ -1,3 +1,4 @@
+import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
 import static org.mockito.Mockito.mock;
 import com.sun.management.ThreadMXBean;
 import java.lang.management.ManagementFactory;
@@ -27,7 +28,7 @@ public class SnapshotBench {
     static volatile long sink;
     static FormulaPredictor model;
     static BatchDeliveryStrategy strategy;
-    static final RouteProjection.Probe PROBE = new RouteProjection.Probe(
+    static final RouteProjectionTestSupport.Probe PROBE = new RouteProjectionTestSupport.Probe(
             Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
     record Endpoint(PrefillEndpoint endpoint, PrefillState state, ReentrantLock lock, RequestRoute member) {
@@ -118,8 +119,8 @@ public class SnapshotBench {
             for (var endpoint : endpoints) {
                 var inputs = endpoint.endpoint.captureRouteProjectionInputs();
                 checksum += inputs.queue().activeItems().size();
-                if (project) checksum += RouteProjection.project(inputs, PROBE, model,
-                        strategy.projectionPolicy()).projectedTtftMs().orElseThrow();
+                if (project) checksum += RouteProjectionTestSupport.project(inputs, PROBE, model,
+                        strategy.projectionPolicy()).projectedTtftMsValue();
             }
         }
         return new Sample(System.nanoTime() - started, CPU.getCurrentThreadCpuTime() - cpu,

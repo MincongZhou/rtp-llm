@@ -68,7 +68,7 @@ class DecodeStateTest {
         var reservation = state.tryReserveQueuedRequest(1, 100, 200, 50, CAPACITY);
         var first = state.acquireDispatchPermit(reservation, CAPACITY).permit();
         assertTrue(state.dispatch(first, DispatchOutcome.ABANDONED).capacityReleased());
-        assertTrue(state.resourceSnapshot().isQueued(1));
+        assertTrue(EndpointTestSupport.isQueued(state.resourceSnapshot(), 1));
 
         var replacement = state.acquireDispatchPermit(reservation, CAPACITY).permit();
         assertEquals(OWNERSHIP_LOST, state.dispatch(first, DispatchOutcome.ENGINE_OWNED).status());

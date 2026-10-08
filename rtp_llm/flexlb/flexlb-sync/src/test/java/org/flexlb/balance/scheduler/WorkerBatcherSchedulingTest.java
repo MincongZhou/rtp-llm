@@ -430,7 +430,7 @@ class WorkerBatcherSchedulingTest {
         RouteProjection.DeliveryProjection projection = new BatchDeliveryStrategy(() -> {
             throw new AssertionError("projection cannot prepare delivery");
         }, () -> 0L, mock(BatchSchedulerReporter.class)).projectionPolicy();
-        RouteProjection.Candidate candidate = RouteProjection.project(inputs, new RouteProjection.Probe(22L, 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L), endpoint.getPredictor().evaluator(), projection, now);
+        RouteProjection.Candidate candidate = RouteProjectionTestSupport.project(inputs, new RouteProjectionTestSupport.Probe(22L, 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L), endpoint.getPredictor().evaluator(), projection, now);
         assertTrue(candidate.selectable(), "a delivery-only wait must leave incoming backlog selectable");
         RequestRoute backlog = item(config, endpoint, 22L, 50, now + 1L);
         assertTrue(runtime.offer(backlog));

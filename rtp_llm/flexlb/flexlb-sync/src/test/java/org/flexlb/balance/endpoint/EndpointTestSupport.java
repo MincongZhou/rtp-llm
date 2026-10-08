@@ -24,6 +24,16 @@ public final class EndpointTestSupport {
     private EndpointTestSupport() {
     }
 
+    public static boolean isQueued(DecodeResources.ResourceSnapshot snapshot, long requestId) {
+        var request = snapshot.requests().get(requestId);
+        return request != null && request.queued();
+    }
+
+    public static boolean isReserved(DecodeResources.ResourceSnapshot snapshot, long requestId) {
+        var request = snapshot.requests().get(requestId);
+        return request != null && !request.phase().isEngineConfirmed();
+    }
+
     /** Build a real local reservation without publishing it to the master queue. */
     public static DecodeResources.ReservationHandle reserveUnqueuedDecode(
             DecodeEndpoint endpoint, WorkerEndpoint.GenerationPin pin, long requestId,

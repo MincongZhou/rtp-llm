@@ -186,7 +186,7 @@ class RouteProjectionTest {
                                 3L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
                 List.of(new WorkSnapshot.BatchWork(
                         7L, List.of(4L, 5L),
-                        WorkSnapshot.Phase.ENGINE_RUNNING, 40L)),
+                        WorkSnapshot.Phase.ENGINE_RUNNING, OptionalLong.of(40L))),
                 0L);
 
         RouteProjection.Candidate result = project(
@@ -215,7 +215,7 @@ class RouteProjectionTest {
         List<GroupPlanner.Item> active = List.of(
                 item(1L, 100, 1L, 10L),
                 item(2L, 10, 2L, 100L));
-        RouteProjection.Probe probe = probe(
+        RouteProjectionTestSupport.Probe probe = probe(
                 99L, 90, 20L, 0L);
 
         RouteProjection.Candidate fifo = project(
@@ -265,10 +265,10 @@ class RouteProjectionTest {
 
     @Test
     void endpointCacheHitChangesServiceAndCandidateMetadata() {
-        RouteProjection.Probe coldProbe = new RouteProjection.Probe(
+        RouteProjectionTestSupport.Probe coldProbe = new RouteProjectionTestSupport.Probe(
                 99L, 50, NOW_MS, Long.MAX_VALUE,
                 1_000L, 0L, 123L);
-        RouteProjection.Probe warmProbe = new RouteProjection.Probe(
+        RouteProjectionTestSupport.Probe warmProbe = new RouteProjectionTestSupport.Probe(
                 100L, 50, NOW_MS, Long.MAX_VALUE,
                 1_000L, 800L, 900L);
 
@@ -282,11 +282,11 @@ class RouteProjectionTest {
                 warmProbe, ROUTE);
 
         assertEquals(1_000L, cold.incomingPrefillMs());
-        assertEquals(OptionalLong.of(1_000L), cold.projectedTtftMs());
+        assertEquals(1_000L, cold.projectedTtftMsValue());
         assertEquals(0L, cold.cacheHitTokens());
         assertEquals(123L, cold.routingCacheMatchTokens());
         assertEquals(440L, warm.incomingPrefillMs());
-        assertEquals(OptionalLong.of(440L), warm.projectedTtftMs());
+        assertEquals(440L, warm.projectedTtftMsValue());
         assertEquals(800L, warm.cacheHitTokens());
         assertEquals(900L, warm.routingCacheMatchTokens());
     }
@@ -303,7 +303,7 @@ class RouteProjectionTest {
 
         assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, result.state());
         assertEquals("SINGLE_PREDICTION_FAILED", result.detail());
-        assertEquals(OptionalLong.empty(), result.projectedTtftMs());
+        assertEquals(RouteProjection.Candidate.UNKNOWN, result.projectedTtftMsValue());
     }
 
     @Test
@@ -570,7 +570,7 @@ class RouteProjectionTest {
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(30L), result.projectedTtftMs());
+        assertEquals(30L, result.projectedTtftMsValue());
         assertEquals("SERIAL_FROZEN_QUEUE", result.detail());
     }
 
@@ -584,7 +584,7 @@ class RouteProjectionTest {
                 BATCH);
 
         assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
+        assertEquals(20L, result.projectedTtftMsValue());
     }
 
     @Test
@@ -596,7 +596,7 @@ class RouteProjectionTest {
                         2, 150L, 1_000_000L, 0L, 30L);
         QueueSnapshot snapshot = queue(
                 true, splitByComputeShape, List.of(expiringSuffix));
-        RouteProjection.Probe probe = probe(
+        RouteProjectionTestSupport.Probe probe = probe(
                 99L, 90, NOW_MS - 30L, Long.MAX_VALUE, 20L, 0L);
         RouteProjection.Candidate result = project(
                 snapshot, noCommittedWork(), TOKEN_EVALUATOR, probe, ROUTE);
@@ -617,7 +617,7 @@ class RouteProjectionTest {
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
+        assertEquals(20L, result.projectedTtftMsValue());
         assertEquals(RouteProjection.Candidate.InitialHeadDisposition.AFTER_PROBE,
                 result.initialHeadDisposition());
     }
@@ -674,7 +674,7 @@ class RouteProjectionTest {
                 probe(99L, 50, 20L, 0L),
                 BATCH);
 
-        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
+        assertEquals(20L, result.projectedTtftMsValue());
         assertEquals(1, singleCalls.get());
         assertEquals(1, batchCalls.get(),
                 "singleton projection evaluates one frozen predictor exactly once");
@@ -695,7 +695,7 @@ class RouteProjectionTest {
                         1, 1_000_000L, 1_000_000L,
                         500L, 0L),
                 List.of());
-        RouteProjection.Probe probe = probe(
+        RouteProjectionTestSupport.Probe probe = probe(
                 100L, 50, 20L, 0L);
 
         assertTrue(project(empty, noCommittedWork(), first, probe, BATCH)
@@ -736,14 +736,14 @@ class RouteProjectionTest {
             RouteProjection.Candidate result,
             long ttftMs) {
         assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(ttftMs), result.projectedTtftMs());
+        assertEquals(ttftMs, result.projectedTtftMsValue());
         assertTrue(result.selectable());
     }
 
     private static void assertInvalidPrediction(RouteProjection.Candidate result) {
         assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, result.state());
         assertEquals("PREDICTOR_RETURNED_INVALID_VALUE", result.detail());
-        assertEquals(OptionalLong.empty(), result.projectedTtftMs());
+        assertEquals(RouteProjection.Candidate.UNKNOWN, result.projectedTtftMsValue());
         assertFalse(result.selectable());
     }
 

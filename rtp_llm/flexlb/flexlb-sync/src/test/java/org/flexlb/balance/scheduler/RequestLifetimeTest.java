@@ -73,8 +73,8 @@ class RequestLifetimeTest {
                 new WorkSnapshot.RequestWork(1L, WorkSnapshot.Phase.ENGINE_RUNNING, 20_000L),
                 new WorkSnapshot.RequestWork(2L, WorkSnapshot.Phase.ENGINE_QUEUED, 7_000L),
                 new WorkSnapshot.RequestWork(3L, WorkSnapshot.Phase.COMMITTED, 3_000L)), List.of(
-                new WorkSnapshot.BatchWork(4L, List.of(4L), WorkSnapshot.Phase.ENGINE_RUNNING, 8_000L),
-                new WorkSnapshot.BatchWork(5L, List.of(5L), WorkSnapshot.Phase.ENGINE_QUEUED, 4_000L)), 0L);
+                new WorkSnapshot.BatchWork(4L, List.of(4L), WorkSnapshot.Phase.ENGINE_RUNNING, OptionalLong.of(8_000L)),
+                new WorkSnapshot.BatchWork(5L, List.of(5L), WorkSnapshot.Phase.ENGINE_QUEUED, OptionalLong.of(4_000L))), 0L);
         assertEquals(63_500L, visibilityDeadline(preceding, 11_000L, 1, 500L).orElseThrow());
         assertEquals(56_000L, visibilityDeadline(preceding, 11_000L, 1, 11_000L).orElseThrow());
         assertEquals(66_000L, visibilityDeadline(preceding, 11_000L, 1, 31_000L).orElseThrow());

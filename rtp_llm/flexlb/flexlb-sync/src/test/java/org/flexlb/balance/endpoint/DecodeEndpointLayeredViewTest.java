@@ -257,7 +257,7 @@ class DecodeEndpointLayeredViewTest {
         assertNotNull(endpoint.commitPreemption(102L));
 
         assertFalse(isConfirmed(1L));
-        assertTrue(endpoint.resourceSnapshot().isReserved(9L));
+        assertTrue(EndpointTestSupport.isReserved(endpoint.resourceSnapshot(), 9L));
         assertEquals(1, endpoint.routingView().totalLoad());
         // The same late Decode sample rejected by typed-CANCELED fencing must
         // also be rejected after the stronger absent+terminal record proof.
@@ -297,7 +297,7 @@ class DecodeEndpointLayeredViewTest {
         // reservation is provisional until typed Prefill CANCELED settles it.
         assertTrue(isConfirmed(2L));
         assertTrue(confirmedView(2L).claimedForPreemption());
-        assertTrue(endpoint.resourceSnapshot().isReserved(9L));
+        assertTrue(EndpointTestSupport.isReserved(endpoint.resourceSnapshot(), 9L));
         assertEquals(700, endpoint.routingView().inflightHardKv());
         assertTrue(EndpointTestSupport.handoffPreemption(endpoint, 101L));
         assertTrue(isConfirmed(2L));
@@ -354,7 +354,7 @@ class DecodeEndpointLayeredViewTest {
 
         assertEquals(DecodeResources.PreemptionBeginResult.VICTIM_GONE, result);
         assertFalse(confirmedView(1L).claimedForPreemption());
-        assertFalse(endpoint.resourceSnapshot().isReserved(9L));
+        assertFalse(EndpointTestSupport.isReserved(endpoint.resourceSnapshot(), 9L));
     }
 
     @ParameterizedTest
@@ -373,7 +373,7 @@ class DecodeEndpointLayeredViewTest {
 
         assertEquals(version, endpoint.placementVersion());
         assertFalse(confirmedView(1L).claimedForPreemption());
-        assertFalse(endpoint.resourceSnapshot().isReserved(9L));
+        assertFalse(EndpointTestSupport.isReserved(endpoint.resourceSnapshot(), 9L));
     }
 
     @Test
@@ -408,7 +408,7 @@ class DecodeEndpointLayeredViewTest {
                 beginPreemption(101L, List.of(2L, 999L),
                         9L, 700, 708, 70));
         assertFalse(confirmedView(2L).claimedForPreemption());
-        assertFalse(endpoint.resourceSnapshot().isReserved(9L));
+        assertFalse(EndpointTestSupport.isReserved(endpoint.resourceSnapshot(), 9L));
         assertEquals(version, endpoint.routingView().admissionVersion());
     }
 
@@ -445,16 +445,16 @@ class DecodeEndpointLayeredViewTest {
 
         assertEquals(0, endpoint.evictExpiredRequests(
                 100, requestId -> false));
-        assertTrue(endpoint.resourceSnapshot().isReserved(1L),
+        assertTrue(EndpointTestSupport.isReserved(endpoint.resourceSnapshot(), 1L),
                 "generic TTL cleanup must not deduct a claimed victim");
         assertEquals(1_200, endpoint.routingView().inflightHardKv(),
                 "victim and provisional incoming remain fully charged");
 
         endpoint.abortPreemption(101L);
         assertEquals(0, endpoint.evictExpiredRequests(100, requestId -> false));
-        assertTrue(endpoint.resourceSnapshot().isReserved(1L), "uncertain Cancel survives attempt rollback");
+        assertTrue(EndpointTestSupport.isReserved(endpoint.resourceSnapshot(), 1L), "uncertain Cancel survives attempt rollback");
         assertTrue(endpoint.release(reservations.get(1L), DecodeResources.ReleaseReason.EXPIRED).released());
-        assertFalse(endpoint.resourceSnapshot().isReserved(1L));
+        assertFalse(EndpointTestSupport.isReserved(endpoint.resourceSnapshot(), 1L));
         assertEquals(0, endpoint.routingView().inflightHardKv());
     }
 

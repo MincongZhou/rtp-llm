@@ -301,7 +301,7 @@ class DecodeEndpointAdmissionTest {
 
         assertEquals(900, endpoint.routingView().realKvUsed(),
                 "placement scoring must retain queued expected KV");
-        assertEquals(0, endpoint.routingView().engineFacingKvUsed(),
+        assertEquals(0, endpoint.routingView().dispatchUsage().expectedKvUsed(),
                 "queued expected KV must not poison the dispatch gate");
         assertEquals(600, endpoint.routingView().realKvAvailable());
         assertEquals(1_000, endpoint.routingView().dispatchUsage().hardKvAvailable());
@@ -311,7 +311,7 @@ class DecodeEndpointAdmissionTest {
         assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
                 first.status());
         assertNotNull(first.permit());
-        assertTrue(endpoint.resourceSnapshot().isQueued(1L),
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L),
                 "capacity is occupied before queued ownership is transferred");
         assertEquals(0, endpoint.routingView().engineLoad(),
                 "a pre-delivery permit is not engine-facing load");
@@ -323,12 +323,12 @@ class DecodeEndpointAdmissionTest {
                 second.status(),
                 "a permit already occupying the 90% KV fence must prevent oversubscription");
         assertNull(second.permit());
-        assertTrue(endpoint.resourceSnapshot().isQueued(2L));
-        assertEquals(900, endpoint.routingView().engineFacingKvUsed(),
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 2L));
+        assertEquals(900, endpoint.routingView().dispatchUsage().expectedKvUsed(),
                 "the failed candidate must not add KV beyond the first acquired permit");
 
         assertEquals(TRANSFERRED, first.permit().dispatch());
-        assertEquals(900, endpoint.routingView().engineFacingKvUsed());
+        assertEquals(900, endpoint.routingView().dispatchUsage().expectedKvUsed());
         assertEquals(600, endpoint.routingView().dispatchUsage().hardKvAvailable());
     }
 
@@ -368,7 +368,7 @@ class DecodeEndpointAdmissionTest {
                 acquisition.status());
         assertNull(acquisition.permit());
         assertEquals(versionBeforeAcquire, endpoint.routingView().admissionVersion());
-        assertTrue(endpoint.resourceSnapshot().isQueued(1L));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
         assertEquals(1, endpoint.routingView().engineLoad());
     }
 
@@ -392,8 +392,8 @@ class DecodeEndpointAdmissionTest {
         assertEquals(0, endpoint.routingView().engineLoad(),
                 "a pre-delivery permit is not engine-facing load");
         assertEquals(2, endpoint.resourceSnapshot().queuedCount());
-        assertTrue(endpoint.resourceSnapshot().isQueued(1L));
-        assertTrue(endpoint.resourceSnapshot().isQueued(2L));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 2L));
         assertTrue(first.release());
     }
 
@@ -411,8 +411,8 @@ class DecodeEndpointAdmissionTest {
 
         DecodeEndpoint.EngineDispatchPermit second = acquirePermit(2L, 1);
         assertEquals(2, endpoint.resourceSnapshot().queuedCount());
-        assertTrue(endpoint.resourceSnapshot().isQueued(1L));
-        assertTrue(endpoint.resourceSnapshot().isQueued(2L));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 2L));
         assertTrue(second.release());
     }
 
@@ -524,7 +524,7 @@ class DecodeEndpointAdmissionTest {
 
         assertEquals(TRANSFERRED, permit.dispatch());
         assertNull(EndpointTestSupport.decodeReservation(endpoint, requestId));
-        assertFalse(endpoint.resourceSnapshot().isQueued(requestId));
+        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
         assertEquals(0, endpoint.routingView().engineLoad(),
                 "retirement clears canonical generation ownership without reversing the permit result");
         assertFalse(releaseLocalShadow(requestId));
@@ -545,7 +545,7 @@ class DecodeEndpointAdmissionTest {
         assertEquals(TRANSFERRED, permit.dispatch(),
                 "ownership transfer must be idempotent after handoff");
         assertFalse(permit.release());
-        assertFalse(endpoint.resourceSnapshot().isQueued(1L));
+        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
         assertEquals(2, endpoint.routingView().engineLoad());
     }
 
@@ -560,7 +560,7 @@ class DecodeEndpointAdmissionTest {
 
         assertEquals(TRANSFERRED, first.dispatch());
         assertReservationIdentity(firstReservation, reserved().get(1L));
-        assertFalse(endpoint.resourceSnapshot().isQueued(1L));
+        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
         assertEquals(1, endpoint.routingView().engineLoad());
         assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
                 endpoint.acquireDispatchPermit(reservations.get(2L), new DecodeResources.AdmissionCapacity(1, 100L)).status());
@@ -568,7 +568,7 @@ class DecodeEndpointAdmissionTest {
         assertFalse(first.release(),
                 "committed Decode ownership is irreversible through the permit");
         assertReservationIdentity(firstReservation, reserved().get(1L));
-        assertFalse(endpoint.resourceSnapshot().isQueued(1L));
+        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
         assertEquals(1, endpoint.routingView().engineLoad());
 
         settleFromWorkerStatus(1L);
@@ -590,7 +590,7 @@ class DecodeEndpointAdmissionTest {
         }
         assertFalse(first.release());
         assertReservationIdentity(reservation, reserved().get(requestId));
-        assertFalse(endpoint.resourceSnapshot().isQueued(requestId));
+        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
         assertEquals(1, endpoint.routingView().engineLoad());
     }
 
@@ -602,7 +602,7 @@ class DecodeEndpointAdmissionTest {
 
         markQueued(requestId);
         assertEquals(versionBeforeFirstMark + 1, endpoint.routingView().admissionVersion());
-        assertTrue(endpoint.resourceSnapshot().isQueued(requestId));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
 
         markQueued(requestId);
         assertEquals(versionBeforeFirstMark + 1, endpoint.routingView().admissionVersion(),
@@ -638,14 +638,14 @@ class DecodeEndpointAdmissionTest {
                 "a committed old generation must not change its replacement");
         assertFalse(stale.release(), "a stale release must stay idempotent");
         assertReservationIdentity(replacement, reserved().get(requestId));
-        assertTrue(endpoint.resourceSnapshot().isQueued(requestId));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
         assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ALREADY_ACQUIRED,
                 endpoint.acquireDispatchPermit(reservations.get(requestId), new DecodeResources.AdmissionCapacity(1, 100L)).status());
 
         assertEquals(TRANSFERRED, current.dispatch(),
                 "the stale token must not release or invalidate the new permit");
         assertReservationIdentity(replacement, reserved().get(requestId));
-        assertFalse(endpoint.resourceSnapshot().isQueued(requestId));
+        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
     }
 
     @Test
@@ -666,11 +666,11 @@ class DecodeEndpointAdmissionTest {
         assertFalse(stale.release(), "the old token must not remove the new permit");
         assertEquals(OWNERSHIP_LOST, stale.dispatch());
         assertReservationIdentity(replacement, reserved().get(requestId));
-        assertTrue(endpoint.resourceSnapshot().isQueued(requestId));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
         assertEquals(TRANSFERRED, current.dispatch(),
                 "the replacement generation keeps its permit");
         assertReservationIdentity(replacement, reserved().get(requestId));
-        assertFalse(endpoint.resourceSnapshot().isQueued(requestId));
+        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
     }
 
     @Test

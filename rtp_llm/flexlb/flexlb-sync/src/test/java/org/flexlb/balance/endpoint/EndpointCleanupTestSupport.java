@@ -97,7 +97,7 @@ public final class EndpointCleanupTestSupport {
             assertEquals(batch ? 1 : 0, stats.batchCount());
             var work = state.committedSnapshot();
             assertEquals(predictedMs, work.totalRemainingWorkMs().orElseThrow());
-            assertEquals(0, work.unknownRequestCount());
+            assertFalse(work.hasUnknownWork());
             if (batch) {
                 assertTrue(work.requests().isEmpty());
                 assertEquals(1, work.batches().size());

@@ -304,7 +304,7 @@ class DecodeEndpointTest {
         assertEquals(0, endpoint.routingView().totalLoad());
         assertEquals(0, endpoint.routingView().inflightHardKv());
         assertEquals(0, endpoint.routingView().inflightExpectedKv());
-        assertEquals(0, endpoint.routingView().engineFacingKvUsed());
+        assertEquals(0, endpoint.routingView().dispatchUsage().expectedKvUsed());
     }
 
     /** Directly mutate the private counter to simulate drift. */

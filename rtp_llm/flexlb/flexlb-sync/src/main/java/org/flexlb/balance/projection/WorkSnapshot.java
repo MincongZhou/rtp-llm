@@ -104,10 +104,6 @@ public final class WorkSnapshot {
         return batches;
     }
 
-    public long unknownRequestCount() {
-        return unknownRequestCount;
-    }
-
     /** Lifecycle phase visible to a projection. Only ENGINE_RUNNING consumes time. */
     public enum Phase {
         COMMITTED,
@@ -135,14 +131,6 @@ public final class WorkSnapshot {
             requestIds = List.copyOf(requestIds);
             checkArgument(!remainingWorkMs.isPresent() || remainingWorkMs.getAsLong() >= 0L,
                     "remaining batch work must be non-negative");
-        }
-
-        /** Convenience constructor for a batch with a known work estimate. */
-        public BatchWork(long batchId,
-                         List<Long> requestIds,
-                         Phase phase,
-                         long remainingWorkMs) {
-            this(batchId, requestIds, phase, OptionalLong.of(remainingWorkMs));
         }
     }
 

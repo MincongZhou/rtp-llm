@@ -13,11 +13,12 @@ import java.util.Comparator;
 import java.util.List;
 
 import static org.mockito.Mockito.mock;
+import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  * Frozen-value builders shared by canonical route-projection tests.
  */
-final class RouteProjectionTestSupport {
+public final class RouteProjectionTestSupport {
 
     static final long NOW_MS = 10_000L;
 
@@ -119,7 +120,7 @@ final class RouteProjectionTestSupport {
                 0L);
     }
 
-    static RouteProjection.Probe probe(
+    static Probe probe(
             long requestId,
             int priority,
             long sequenceLength,
@@ -128,14 +129,14 @@ final class RouteProjectionTestSupport {
                 sequenceLength, hitCache);
     }
 
-    static RouteProjection.Probe probe(
+    static Probe probe(
             long requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
             long sequenceLength,
             long hitCache) {
-        return new RouteProjection.Probe(
+        return new Probe(
                 requestId,
                 priority,
                 enqueuedAtMs,
@@ -161,13 +162,67 @@ final class RouteProjectionTestSupport {
             QueueSnapshot queue,
             WorkSnapshot work,
             PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.Probe probe,
+            Probe probe,
             RouteProjection.DeliveryProjection deliveryProjection) {
-        return RouteProjection.project(
+        return project(
                 new RouteProjection.Inputs(
                         queue, work, 0L),
                 probe,
                 evaluator,
                 deliveryProjection);
+    }
+
+    /** Virtual request evaluated against one frozen endpoint snapshot. */
+    public record Probe(
+            long requestId,
+            int priority,
+            long enqueuedAtMs,
+            long expiresAtMs,
+            long seqLen,
+            long hitCache,
+            long routingCacheMatchTokens) {
+
+        public Probe {
+            checkArgument(seqLen >= 0L, "seqLen must be non-negative");
+            checkArgument(hitCache >= 0L && hitCache <= seqLen, "hitCache must be in [0, seqLen]");
+            checkArgument(routingCacheMatchTokens >= 0L, "routingCacheMatchTokens must be non-negative");
+        }
+    }
+
+    public static RouteProjection.Candidate project(
+            RouteProjection.Inputs inputs,
+            Probe probe,
+            PrefillTimePredictor.Evaluator evaluator,
+            RouteProjection.DeliveryProjection deliveryProjection) {
+        return project(inputs, probe, evaluator, deliveryProjection,
+                inputs.queue().capturedAtMs());
+    }
+
+    public static RouteProjection.Candidate project(
+            RouteProjection.Inputs inputs,
+            Probe probe,
+            PrefillTimePredictor.Evaluator evaluator,
+            RouteProjection.DeliveryProjection deliveryProjection,
+            long planningAtMs) {
+        RouteProjection.CandidateView view = RouteProjection.projector().projectView(
+                inputs, probe.requestId(), probe.priority(),
+                probe.enqueuedAtMs(), probe.expiresAtMs(), probe.seqLen(),
+                probe.hitCache(), probe.routingCacheMatchTokens(),
+                evaluator, deliveryProjection, planningAtMs);
+        return immutable(view);
+    }
+
+    private static RouteProjection.Candidate immutable(RouteProjection.CandidateView source) {
+        return source instanceof RouteProjection.Candidate candidate
+                ? candidate
+                : new RouteProjection.Candidate(
+                        source.state(),
+                        source.projectedTtftMsValue(),
+                        source.incomingPrefillMs(),
+                        source.initialHeadDisposition(),
+                        source.detail(),
+                        source.blockerRole(),
+                        source.cacheHitTokens(),
+                        source.routingCacheMatchTokens());
     }
 }

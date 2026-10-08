@@ -86,7 +86,7 @@ class QueuedBatchDeliveryTest {
             sent.add(call.getArgument(2));
             return reply;
         });
-        dispatcher = new DefaultBatchDispatcher(grpc, service, null, 1, 1);
+        dispatcher = SchedulerTestSupport.createDispatcher(grpc, service, 1, 1);
         strategy = new BatchDeliveryStrategy(dispatcher::tryPrepareSubmission, () -> 201L, reporter);
         prefill = mock(PrefillEndpoint.class);
         when(prefill.getIp()).thenReturn("127.0.0.1");

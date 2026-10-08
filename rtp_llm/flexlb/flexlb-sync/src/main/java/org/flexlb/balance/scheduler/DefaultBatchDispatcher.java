@@ -109,16 +109,8 @@ public class DefaultBatchDispatcher {
     @Autowired
     public DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
                                   @Autowired(required = false) MeterRegistry meterRegistry) {
-        this(grpcClient, configService, meterRegistry,
-                configService.loadBalanceConfig().getInternalRuntime()
-                        .getBatchDispatchThreads(),
-                configService.loadBalanceConfig().getInternalRuntime()
-                        .getBatchDispatchQueueCapacity());
-    }
-
-    /** Package-visible sizing injection keeps integration fixtures bounded and deterministic. */
-    DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
-                           MeterRegistry meterRegistry, int poolSize, int queueSize) {
+        int poolSize = configService.loadBalanceConfig().getInternalRuntime().getBatchDispatchThreads();
+        int queueSize = configService.loadBalanceConfig().getInternalRuntime().getBatchDispatchQueueCapacity();
         this.grpcClient = grpcClient;
         this.configService = configService;
         this.admissionCapacity = Math.addExact(poolSize, queueSize);

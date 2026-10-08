@@ -152,16 +152,6 @@ public final class DecodeResources {
             return routing.engineCapacityUsed();
         }
 
-        public boolean isQueued(long requestId) {
-            DecodeRequestView request = requests.get(requestId);
-            return request != null && request.queued();
-        }
-
-        public boolean isReserved(long requestId) {
-            DecodeRequestView request = requests.get(requestId);
-            return request != null && !request.phase().isEngineConfirmed();
-        }
-
         private int phaseCount(Predicate<DecodeTaskPhase> matches) {
             int count = 0;
             for (DecodeRequestView task : requests.values()) {
@@ -189,7 +179,6 @@ public final class DecodeResources {
         public int engineCapacityUsed() { return Math.toIntExact(dispatchUsage.occupiedRequests()); }
         public long realKvUsed() { return placementUsage.expectedKvUsed(); }
         public long realKvAvailable() { return placementUsage.hardKvAvailable(); }
-        public long engineFacingKvUsed() { return dispatchUsage.expectedKvUsed(); }
         public long totalKv() { return placementUsage.totalKvTokens(); }
 
         public DecodeRoutingView {

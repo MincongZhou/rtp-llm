@@ -5,7 +5,6 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
-import java.util.OptionalLong;
 import java.util.OptionalDouble;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -100,23 +99,6 @@ public final class RouteProjection {
         }
     }
 
-    /** Virtual request evaluated against one frozen endpoint snapshot. */
-    public record Probe(
-            long requestId,
-            int priority,
-            long enqueuedAtMs,
-            long expiresAtMs,
-            long seqLen,
-            long hitCache,
-            long routingCacheMatchTokens) {
-
-        public Probe {
-            checkArgument(seqLen >= 0L, "seqLen must be non-negative");
-            checkArgument(hitCache >= 0L && hitCache <= seqLen, "hitCache must be in [0, seqLen]");
-            checkArgument(routingCacheMatchTokens >= 0L, "routingCacheMatchTokens must be non-negative");
-        }
-    }
-
     /** Read-only projection result. Invocation-scoped views must not be retained. */
     public interface CandidateView {
         Candidate.State state();
@@ -170,11 +152,6 @@ public final class RouteProjection {
                     "cache token counts must be non-negative");
         }
 
-        public OptionalLong projectedTtftMs() {
-            return projectedTtftMsValue == UNKNOWN
-                    ? OptionalLong.empty() : OptionalLong.of(projectedTtftMsValue);
-        }
-
         public enum InitialHeadDisposition {
             NONE,
             BEFORE_PROBE,
@@ -203,29 +180,6 @@ public final class RouteProjection {
                     "work snapshot cannot be newer than its queue capture");
             checkArgument(ownershipVersion >= 0L, "ownershipVersion must be non-negative");
         }
-    }
-
-    public static Candidate project(
-            Inputs inputs,
-            Probe probe,
-            PrefillTimePredictor.Evaluator evaluator,
-            DeliveryProjection deliveryProjection) {
-        return project(inputs, probe, evaluator, deliveryProjection,
-                inputs.queue().capturedAtMs());
-    }
-
-    public static Candidate project(
-            Inputs inputs,
-            Probe probe,
-            PrefillTimePredictor.Evaluator evaluator,
-            DeliveryProjection deliveryProjection,
-            long planningAtMs) {
-        CandidateView view = projector().projectView(
-                inputs, probe.requestId(), probe.priority(),
-                probe.enqueuedAtMs(), probe.expiresAtMs(), probe.seqLen(),
-                probe.hitCache(), probe.routingCacheMatchTokens(),
-                evaluator, deliveryProjection, planningAtMs);
-        return immutable(view);
     }
 
     /** Reusable projector owned by the current planner thread. */
@@ -272,19 +226,5 @@ public final class RouteProjection {
                 semantics.afterProbe() == AfterProbeAdmission.UNAVAILABLE ? semantics.blockerRole() : null,
                 candidate.cacheHitTokens(),
                 candidate.routingCacheMatchTokens());
-    }
-
-    private static Candidate immutable(CandidateView source) {
-        return source instanceof Candidate candidate
-                ? candidate
-                : new Candidate(
-                        source.state(),
-                        source.projectedTtftMsValue(),
-                        source.incomingPrefillMs(),
-                        source.initialHeadDisposition(),
-                        source.detail(),
-                        source.blockerRole(),
-                        source.cacheHitTokens(),
-                        source.routingCacheMatchTokens());
     }
 }

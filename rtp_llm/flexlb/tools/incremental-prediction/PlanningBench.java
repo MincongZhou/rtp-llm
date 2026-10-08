@@ -1,3 +1,4 @@
+import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
 
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import com.sun.management.ThreadMXBean;
@@ -77,16 +78,16 @@ public class PlanningBench {
                         constraints(64), items(depth, i), null),
                         new WorkSnapshot(1000, List.of(), List.of(), 0), 0L));
             }
-            var probes = new ArrayList<RouteProjection.Probe>();
-            for (int i = 0; i < 64; i++) probes.add(new RouteProjection.Probe(99999, 0, 1000, 61_000,
+            var probes = new ArrayList<RouteProjectionTestSupport.Probe>();
+            for (int i = 0; i < 64; i++) probes.add(new RouteProjectionTestSupport.Probe(99999, 0, 1000, 61_000,
                     1024 + i * 32, i * 8, i * 8));
             int[] index = {0};
             bench("fleet5_depth_" + depth, () -> {
                 var probe = probes.get(index[0]++ & 63);
                 double total = 0;
                 for (var endpoint : endpoints) {
-                    var candidate = RouteProjection.project(endpoint, probe, model, policy);
-                    total += candidate.projectedTtftMs().orElseThrow();
+                    var candidate = RouteProjectionTestSupport.project(endpoint, probe, model, policy);
+                    total += candidate.projectedTtftMsValue();
                 }
                 return total;
             });

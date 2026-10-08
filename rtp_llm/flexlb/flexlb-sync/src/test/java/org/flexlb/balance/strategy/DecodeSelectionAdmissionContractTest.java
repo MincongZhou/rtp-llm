@@ -1,5 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.endpoint.EndpointTestSupport;
+
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 
@@ -66,7 +68,7 @@ class DecodeSelectionAdmissionContractTest {
                     assertNotNull(reservation, "the selected endpoint must pass the same placement gate");
                     try {
                         assertEquals(requestId, reservation.requestId());
-                        assertTrue(endpoint.resourceSnapshot().isQueued(requestId));
+                        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
                         var reserved = endpoint.resourceSnapshot().requests().get(requestId);
                         assertEquals(70, reserved.priority());
                         assertEquals(PROMPT_TOKENS, reserved.kvTokens());
@@ -189,8 +191,8 @@ class DecodeSelectionAdmissionContractTest {
                 DecodeResources.CapacityUsage queuedUsage, DecodeResources.CapacityUsage freeUsage) {
             assertEquals(queuedUsage, queued.routingView().placementUsage());
             assertEquals(freeUsage, free.routingView().placementUsage());
-            assertFalse(queued.resourceSnapshot().isQueued(requestId));
-            assertFalse(free.resourceSnapshot().isQueued(requestId));
+            assertFalse(EndpointTestSupport.isQueued(queued.resourceSnapshot(), requestId));
+            assertFalse(EndpointTestSupport.isQueued(free.resourceSnapshot(), requestId));
         }
 
         @Override
