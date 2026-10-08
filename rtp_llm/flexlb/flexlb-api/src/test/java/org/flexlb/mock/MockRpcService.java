@@ -74,12 +74,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     /** Counter for GetWorkerStatus calls. */
     final AtomicLong workerStatusCallCount = new AtomicLong(0);
 
-    /** Counter for GetCacheStatus calls. */
-    final AtomicLong cacheStatusCallCount = new AtomicLong(0);
-
-    /** Counter for CheckHealth calls. */
-    final AtomicLong healthCheckCount = new AtomicLong(0);
-
     // ==================== Behavior (volatile, hot-swappable) ====================
 
     private volatile MockWorkerBehavior behavior = MockWorkerBehavior.builder().build();
@@ -89,10 +83,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
      */
     public void setBehavior(MockWorkerBehavior behavior) {
         this.behavior = behavior;
-    }
-
-    public MockWorkerBehavior getBehavior() {
-        return behavior;
     }
 
     // ==================== Accessors for test assertions ====================
@@ -109,20 +99,10 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         return workerStatusCallCount.get();
     }
 
-    public long getCacheStatusCallCount() {
-        return cacheStatusCallCount.get();
-    }
-
-    public long getHealthCheckCount() {
-        return healthCheckCount.get();
-    }
-
     /** Clear all call records (useful between test cases sharing a worker). */
     public void resetRecords() {
         enqueuedRequests.clear();
         workerStatusCallCount.set(0);
-        cacheStatusCallCount.set(0);
-        healthCheckCount.set(0);
     }
 
     // ==================== RPC implementations ====================
@@ -234,7 +214,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     @Override
     public void getCacheStatus(EngineRpcService.CacheVersionPB request,
                                StreamObserver<EngineRpcService.CacheStatusPB> responseObserver) {
-        cacheStatusCallCount.incrementAndGet();
         MockWorkerBehavior beh = behavior;
 
         EngineRpcService.CacheStatusPB.Builder builder = EngineRpcService.CacheStatusPB.newBuilder()
@@ -250,7 +229,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     @Override
     public void checkHealth(EngineRpcService.EmptyPB request,
                             StreamObserver<EngineRpcService.CheckHealthResponsePB> responseObserver) {
-        healthCheckCount.incrementAndGet();
         responseObserver.onNext(EngineRpcService.CheckHealthResponsePB.newBuilder()
                 .setHealth("ok")
                 .build());

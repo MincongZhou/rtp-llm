@@ -1187,8 +1187,8 @@ public final class PrefillState {
      * cleared. Once clearing starts, the remaining operations are allocation-
      * free field updates; no failure can leave a partially retired registry.
      *
-     * <p>Ordinarily {@link WorkerBatcher#stopAndAwait()} has already reduced every
-     * ACTIVE item. Including a defensively remaining ACTIVE identity here makes
+     * <p>Ordinarily the worker batcher has already reduced every ACTIVE item.
+     * Including a defensively remaining ACTIVE identity here makes
      * endpoint close total if that earlier invariant check failed.</p>
      */
     public Retirement retireGenerationOwnership() {

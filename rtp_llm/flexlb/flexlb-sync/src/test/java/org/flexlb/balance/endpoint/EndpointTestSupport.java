@@ -1,20 +1,18 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.BalanceContext.DeliveryClaim;
 import org.flexlb.balance.scheduler.RequestRoute;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -463,8 +461,6 @@ public final class EndpointTestSupport {
         private final AbstractRequestScheduler events = requests;
         private final List<PrefillRetirement> prefillRetirements =
                 new CopyOnWriteArrayList<>();
-        private final List<RequestRoute> offerFailures =
-                new CopyOnWriteArrayList<>();
         TestRequestRuntime() {
             org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.stubRouteDelivery(requests, this::onCompleted);
             org.mockito.Mockito.doAnswer(invocation -> {
@@ -497,15 +493,10 @@ public final class EndpointTestSupport {
         void onQueueOfferFailure(
                 RequestRoute item,
                 Throwable error) {
-            offerFailures.add(item);
         }
 
         List<PrefillRetirement> prefillRetirements() {
             return List.copyOf(prefillRetirements);
-        }
-
-        List<RequestRoute> offerFailures() {
-            return List.copyOf(offerFailures);
         }
 
     }

@@ -1,10 +1,10 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.DecodeCostFormula;
@@ -25,7 +25,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.function.BiConsumer;
-import java.util.function.BooleanSupplier;
 
 /** Exact-capability fakes for final delivery-strategy tests. */
 public final class DeliveryStrategyTestSupport {
@@ -443,7 +442,6 @@ public final class DeliveryStrategyTestSupport {
     static final class TestBatchSubmission {
 
         private CapacityBoundary prepareBoundary;
-        private int prepareCount;
         private int closeCount;
         private int totalCloseCount;
         private SubmittedBatch command;
@@ -454,7 +452,6 @@ public final class DeliveryStrategyTestSupport {
 
         CapacityBoundary.Attempt<BatchDeliveryStrategy.PreparedSubmission>
                 tryPrepareSubmission() {
-            prepareCount++;
             if (prepareBoundary != null) {
                 return CapacityBoundary.Attempt.rejected(prepareBoundary);
             }
@@ -507,10 +504,6 @@ public final class DeliveryStrategyTestSupport {
                 RequestRoute item,
                 DeliveryResult completion) {
             observer.accept(item, completion);
-        }
-
-        int prepareCount() {
-            return prepareCount;
         }
 
         int closeCount() {

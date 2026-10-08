@@ -3,48 +3,14 @@ package org.flexlb.mock;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Assertion utilities for verifying three-layer inflight resource cleanup.
- *
- * <p>FlexLB has three layers of inflight tracking:
- * <ol>
- *   <li>scheduler-level request lifecycle tracking</li>
- *   <li>{@link PrefillEndpoint#ownershipStats()} — per-worker batch tracking</li>
- *   <li>{@link DecodeEndpoint#resourceSnapshot()} — per-worker decode reservation</li>
- * </ol>
+ * Assertion utilities for verifying Prefill and Decode resource cleanup.
  */
 public final class InflightAssertions {
 
     private InflightAssertions() {
-    }
-
-    /**
-     * Assert that the PrefillEndpoint for the given ip:port has no inflight batches.
-     */
-    public static void assertPrefillInflightEmpty(PrefillEndpoint prefillEp) {
-        int batchCount = prefillEp.ownershipStats().batchCount();
-        assertEquals(0, batchCount,
-                "PrefillEndpoint inflightBatches should be empty but has " + batchCount + " batches");
-    }
-
-    /**
-     * Assert that the DecodeEndpoint for the given ip:port has no inflight requests.
-     */
-    public static void assertDecodeInflightEmpty(DecodeEndpoint decodeEp) {
-        int count = decodeEp.resourceSnapshot().reservedCount();
-        assertEquals(0, count,
-                "DecodeEndpoint inflightRequests should be empty but has " + count + " requests");
-    }
-
-    /**
-     * Assert that both prefill and decode endpoints have released all resources.
-     */
-    public static void assertAllResourcesReleased(PrefillEndpoint prefillEp, DecodeEndpoint decodeEp) {
-        assertPrefillInflightEmpty(prefillEp);
-        assertDecodeInflightEmpty(decodeEp);
     }
 
     /**

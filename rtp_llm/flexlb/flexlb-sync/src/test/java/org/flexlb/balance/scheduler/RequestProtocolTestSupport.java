@@ -144,8 +144,6 @@ final class RequestProtocolTestSupport {
         return future;
     }
 
-    static AbstractRequestScheduler directOwner(AbstractRequestScheduler requests) { return requests; }
-
     /** Isolates queue ordering from the common request protocol. */
     static AbstractRequestScheduler schedulerMock() {
         var config = SchedulingTestConfig.batchConfig();

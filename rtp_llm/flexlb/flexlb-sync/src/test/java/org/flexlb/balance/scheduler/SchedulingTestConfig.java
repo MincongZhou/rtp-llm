@@ -113,15 +113,6 @@ public final class SchedulingTestConfig {
         preemption.setAllowedVictimStages(stages);
     }
 
-    public static void disallowVictim(FlexlbConfig config, VictimStage stage) {
-        PreemptionConfig preemption = preemption(config);
-        EnumSet<VictimStage> stages = preemption.getAllowedVictimStages().isEmpty()
-                ? EnumSet.noneOf(VictimStage.class)
-                : EnumSet.copyOf(preemption.getAllowedVictimStages());
-        stages.remove(stage);
-        preemption.setAllowedVictimStages(stages);
-    }
-
     public static FlexlbConfig newConfig() {
         FlexlbConfig config = new FlexlbConfig();
         config.getDispatcher().setMaxInflightPerPrefillWorker(2);
