@@ -53,7 +53,7 @@ class RequestSchedulerModeTest {
             assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), original.get(3, TimeUnit.SECONDS).getCode());
             f.requests.awaitAdmissionMutations();
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.requests).liveRequestCount());
-            if (f.queue != null) { assertEquals(0, f.queue.size()); }
+            if (f.queue != null) { assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue)); }
             verify(f.router, never()).select(f.context, null);
         }
     }
@@ -106,7 +106,7 @@ class RequestSchedulerModeTest {
             assertSame(future, laterDirect.getFuture());
             assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), future.get(3, TimeUnit.SECONDS).getCode());
             verify(queued.router, times(1)).select(laterDirect, null);
-            assertEquals(0, queued.queue.size());
+            assertEquals(0, RequestProtocolTestSupport.queuedCount(queued.queue));
         }
     }
 
@@ -138,7 +138,7 @@ class RequestSchedulerModeTest {
             SchedulerTestSupport.runtime(f.scheduler).stopAccepting();
             SchedulerTestSupport.runtime(f.scheduler).shutdown();
 
-            if (f.queue != null) { assertEquals(0, f.queue.size()); }
+            if (f.queue != null) { assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue)); }
         }
     }
 

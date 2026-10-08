@@ -274,8 +274,8 @@ class PrefillStateSnapshotTest {
                     var replacement = state.reserveBatch(next, 10, 4,
                         generation.tryAcquireHandoff()).reservation();
                     try (var preparationReplacement = EndpointTestSupport.preparation(replacement)) {
-                        assertEquals(10, replacement.batchId());
                         try (var handoff = EndpointTestSupport.commitBatch(state, replacement, List.of(next), 20)) {
+                            assertEquals(10, state.committedSnapshot().batches().getFirst().batchId());
                             assertEquals(1, state.stats().batchCount());
                         }
                         assertTrue(EndpointTestSupport.releaseRequest(state, next));

@@ -52,7 +52,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
                 "the worker records EnqueueBatch before delaying its ACK");
         assertEquals(1, getPrefillEndpoint().ownershipStats().batchCount());
         assertEquals(1, getPrefillEndpoint().ownershipStats().locallyOwnedRequests());
-        assertEquals(1, getDecodeEndpoint().getInflightCount());
+        assertEquals(1, getDecodeEndpoint().resourceSnapshot().reservedCount());
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
 
         Response expired = future.get(5, TimeUnit.SECONDS);
@@ -63,7 +63,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         assertEquals(0, requestRegistry().liveRequestCount());
         assertEquals(0, getPrefillEndpoint().ownershipStats().batchCount());
         assertEquals(0, getPrefillEndpoint().ownershipStats().locallyOwnedRequests());
-        assertEquals(0, getDecodeEndpoint().getInflightCount());
+        assertEquals(0, getDecodeEndpoint().resourceSnapshot().reservedCount());
 
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
         Response recovered = submitRequest(10002).get(5, TimeUnit.SECONDS);

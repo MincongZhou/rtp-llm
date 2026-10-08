@@ -37,7 +37,7 @@ class QueueRegistrationCancellationTest {
             var result = f.queue.submit(context, () -> {
                 assertSame(f.queue, context.scheduler());
                 assertNotNull(context.getFuture());
-                assertEquals(0, f.queue.size());
+                assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
                 verify(f.router, never()).select(any(), nullable(String.class));
                 listening.set(true);
             });
@@ -55,7 +55,7 @@ class QueueRegistrationCancellationTest {
                 assertNotNull(f.queue.cancel(902L, 0L, CancelReason.CLIENT_CANCELLED));
             });
             assertFalse(result.get(2L, TimeUnit.SECONDS).isSuccess());
-            assertEquals(0, f.queue.size());
+            assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
             verify(f.router, never()).select(any(), nullable(String.class));
         }
     }

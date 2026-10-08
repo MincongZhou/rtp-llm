@@ -26,7 +26,7 @@ public final class EndpointTestSupport {
 
     public static boolean isQueued(DecodeResources.ResourceSnapshot snapshot, long requestId) {
         var request = snapshot.requests().get(requestId);
-        return request != null && request.queued();
+        return request != null && request.phase().isMasterQueued();
     }
 
     public static boolean isReserved(DecodeResources.ResourceSnapshot snapshot, long requestId) {

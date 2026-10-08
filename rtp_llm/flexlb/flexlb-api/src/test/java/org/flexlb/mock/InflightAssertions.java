@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <ol>
  *   <li>scheduler-level request lifecycle tracking</li>
  *   <li>{@link PrefillEndpoint#ownershipStats()} — per-worker batch tracking</li>
- *   <li>{@link DecodeEndpoint#getInflightCount()} — per-worker decode reservation</li>
+ *   <li>{@link DecodeEndpoint#resourceSnapshot()} — per-worker decode reservation</li>
  * </ol>
  */
 public final class InflightAssertions {
@@ -34,7 +34,7 @@ public final class InflightAssertions {
      * Assert that the DecodeEndpoint for the given ip:port has no inflight requests.
      */
     public static void assertDecodeInflightEmpty(DecodeEndpoint decodeEp) {
-        int count = decodeEp.getInflightCount();
+        int count = decodeEp.resourceSnapshot().reservedCount();
         assertEquals(0, count,
                 "DecodeEndpoint inflightRequests should be empty but has " + count + " requests");
     }
@@ -62,7 +62,7 @@ public final class InflightAssertions {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
             boolean prefillOk = prefillEp == null || prefillEp.ownershipStats().batchCount() == 0;
-            boolean decodeOk = decodeEp == null || decodeEp.getInflightCount() == 0;
+            boolean decodeOk = decodeEp == null || decodeEp.resourceSnapshot().reservedCount() == 0;
             if (prefillOk && decodeOk) {
                 return true;
             }
@@ -85,6 +85,6 @@ public final class InflightAssertions {
         assertTrue(waitForResourcesReleased(prefillEp, decodeEp, timeoutMs, 50),
                 "Inflight resources not released within " + timeoutMs + "ms"
                         + " (prefill batches=" + (prefillEp != null ? prefillEp.ownershipStats().batchCount() : "null")
-                        + ", decode inflight=" + (decodeEp != null ? decodeEp.getInflightCount() : "null") + ")");
+                        + ", decode inflight=" + (decodeEp != null ? decodeEp.resourceSnapshot().reservedCount() : "null") + ")");
     }
 }

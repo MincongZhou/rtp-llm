@@ -19,9 +19,9 @@ class SchedulerRuntimeTest {
     @Test
     void directStartupUsesOneSchedulerAndSharedConfiguration() {
         try (var f = new Fixture(false)) {
-            var scheduler = (AbstractRequestScheduler) f.runtime.scheduler();
+            var scheduler = (AbstractRequestScheduler) SchedulerTestSupport.initializedScheduler(f.runtime);
             assertInstanceOf(DirectRequestScheduler.class, scheduler);
-            assertSame(scheduler, f.runtime.scheduler());
+            assertSame(scheduler, SchedulerTestSupport.initializedScheduler(f.runtime));
             assertSame(f.config, scheduler.config);
             assertSame(f.config, new BalanceContext(f.config).getConfig());
             verify(f.endpoints, never()).configureQueue(any());
@@ -33,8 +33,8 @@ class SchedulerRuntimeTest {
     @Test
     void queueStartupConfiguresSharedExecutionSettingsOnce() {
         try (var f = new Fixture(true)) {
-            assertInstanceOf(QueuedRequestScheduler.class, f.runtime.scheduler());
-            assertSame(f.runtime.scheduler(), f.runtime.scheduler());
+            assertInstanceOf(QueuedRequestScheduler.class, SchedulerTestSupport.initializedScheduler(f.runtime));
+            assertSame(SchedulerTestSupport.initializedScheduler(f.runtime), SchedulerTestSupport.initializedScheduler(f.runtime));
             verify(f.endpoints, times(1)).configureQueue(QueueExecutionSettings.capture(f.config));
         }
     }

@@ -296,8 +296,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public long placementVersion() { return state.placementVersion(); }
 
-    public int getInflightCount() { return state.getInflightCount(); }
-
     public OptionalLong getLoadMetric() { return OptionalLong.of(state.getTotalLoad()); }
 
     // Retirement and orphan cleanup.

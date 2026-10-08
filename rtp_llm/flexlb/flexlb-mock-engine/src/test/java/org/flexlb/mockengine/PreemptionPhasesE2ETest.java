@@ -115,7 +115,7 @@ class PreemptionPhasesE2ETest {
             assertFalse(high.isDone(), "high-priority request should sit in the queue after eviction");
             assertFalse(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 201L));
             assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 202L));
-            assertEquals(1, decodeEp.getInflightCount());
+            assertEquals(1, decodeEp.resourceSnapshot().reservedCount());
             assertEquals(hardKvBefore, decodeEp.routingView().inflightHardKv(),
                     "hard KV must transfer 1:1 from victim to incoming");
 
@@ -126,7 +126,7 @@ class PreemptionPhasesE2ETest {
             assertTrue(high.get(5, TimeUnit.SECONDS).isSuccess());
             assertTrue(low.get(5, TimeUnit.SECONDS).isSuccess());
             assertEquals(List.of(202L, 201L), new java.util.ArrayList<>(h.engineArrivalOrder));
-            AutoTpmE2EHarness.await(() -> decodeEp.getInflightCount() == 0,
+            AutoTpmE2EHarness.await(() -> decodeEp.resourceSnapshot().reservedCount() == 0,
                     5_000, "both requests must release their Decode ownership");
         }
     }
@@ -221,7 +221,7 @@ class PreemptionPhasesE2ETest {
                 .filter(request -> request.phase().isEngineConfirmed())
                         .anyMatch(task -> task.requestId() == 301L));
                 assertFalse(high.isDone(), "high request waits for dispatch capacity");
-                assertEquals(1, decodeEp.getInflightCount());
+                assertEquals(1, decodeEp.resourceSnapshot().reservedCount());
 
                 // Decode's duplicate terminal is stale after the authoritative
                 // Prefill priority terminal and must not reopen any ownership.
@@ -291,7 +291,7 @@ class PreemptionPhasesE2ETest {
                 .filter(request -> request.phase().isEngineConfirmed())
                         .anyMatch(task -> task.requestId() == 311L));
                 assertEquals(0, decodeEngine.getRunningCount());
-                assertEquals(0, decodeEp.getInflightCount());
+                assertEquals(0, decodeEp.resourceSnapshot().reservedCount());
                 assertEquals(0L, decodeEp.routingView().inflightHardKv());
                 assertEquals(0, prefillEngine.getDownstreamOwnershipCount());
                 assertEquals(0, decodeEngine.getUpstreamOwnershipCount());

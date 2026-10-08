@@ -26,12 +26,18 @@ public final class SchedulerTestSupport {
             long hardKv, long expectedKv, int priority) {
         endpoint.requirePinnedGeneration(pin);
         Object state = ReflectionTestUtils.getField(endpoint, "state");
-        DecodeResources.ReservationHandle reservation = ReflectionTestUtils.invokeMethod(
-                state, "reserve", requestId, hardKv, expectedKv, priority, false, null);
-        if (reservation == null) {
-            throw new IllegalStateException("Decode request id is already owned: " + requestId);
+        var lock = (java.util.concurrent.locks.ReentrantLock) ReflectionTestUtils.getField(state, "admissionLock");
+        lock.lock();
+        try {
+            if (!Boolean.TRUE.equals(ReflectionTestUtils.invokeMethod(
+                    state, "requestIdAvailableForReservationLocked", requestId))) {
+                throw new IllegalStateException("Decode request id is already owned: " + requestId);
+            }
+            return ReflectionTestUtils.invokeMethod(state, "createReservationLocked", requestId,
+                    hardKv, expectedKv, priority, org.flexlb.enums.DecodeTaskPhase.LOCAL_RESERVED);
+        } finally {
+            lock.unlock();
         }
-        return reservation;
     }
 
     /** Read shadow ownership for assertions, without granting a production lookup capability. */

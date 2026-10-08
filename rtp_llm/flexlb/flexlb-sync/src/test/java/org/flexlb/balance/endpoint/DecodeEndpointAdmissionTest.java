@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
@@ -745,7 +746,7 @@ class DecodeEndpointAdmissionTest {
         // Confirmed by the engine: no longer a reserved (evictable) entry,
         // but still counted in the total load via confirmed Engine ownership.
         assertTrue(reserved().isEmpty());
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
         assertEquals(1, endpoint.routingView().totalLoad());
         assertEquals(0, endpoint.routingView().inflightHardKv());
     }
@@ -1056,7 +1057,7 @@ class DecodeEndpointAdmissionTest {
         DecodeResources.ReservationHandle reservation =
                 reservations.get(requestId);
         return reservation != null
-                && endpoint.release(reservation, DecodeResources.ReleaseReason.COUNTERPART_FINISHED).released();
+                && (endpoint.release(reservation, DecodeResources.ReleaseReason.COUNTERPART_FINISHED) == ReservationReleaseResult.RELEASED);
     }
 
     private Map<Long, DecodeResources.DecodeRequestView> reserved() {

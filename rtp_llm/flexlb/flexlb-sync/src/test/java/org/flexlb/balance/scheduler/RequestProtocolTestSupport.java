@@ -119,7 +119,19 @@ final class RequestProtocolTestSupport {
     }
 
     static int queuedCount(RequestScheduler scheduler) {
-        return scheduler instanceof QueuedRequestScheduler queue ? queue.size() : 0;
+        if (!(scheduler instanceof QueuedRequestScheduler queue)) { return 0; }
+        var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
+        lock.lock();
+        try {
+            var ordered = (OrderedRequestQueue) ReflectionTestUtils.getField(queue, "orderedQueue");
+            var events = (java.util.Deque<?>) ReflectionTestUtils.getField(queue, "events");
+            return ordered.size() + (int) events.stream().filter(event -> {
+                var kind = (Enum<?>) ReflectionTestUtils.getField(event, "kind");
+                return kind.name().equals("SUBMIT") || kind.name().equals("REQUEUE");
+            }).count();
+        } finally {
+            lock.unlock();
+        }
     }
 
     static CompletableFuture<Response> register(AbstractRequestScheduler owner, BalanceContext context) {

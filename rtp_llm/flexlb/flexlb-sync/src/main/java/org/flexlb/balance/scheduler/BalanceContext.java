@@ -1890,8 +1890,6 @@ public class BalanceContext {
 
     boolean deliveryAcknowledged() { return deliveryAcknowledged; }
 
-    long updatedAtMs() { return updatedAtMs; }
-
     DeliveryClaimKind deliveryClaimKind() { return delivery == null ? DeliveryClaimKind.NONE : delivery.kind; }
 
     long batchId() { return batchId; }
@@ -1908,10 +1906,6 @@ public class BalanceContext {
     CancelReason cancellationReason() { return cancellationReason; }
 
     ResponseResult selectedResponse() { return selectedResponse; }
-
-    RequestDeadline requestDeadline() { return requestDeadline; }
-
-    DecisionDeadline decisionDeadline() { return decisionDeadline; }
 
     TerminalAction tryFinishCleanupLocked() {
         this.requireContextLock("cleanup completion");

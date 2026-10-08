@@ -34,9 +34,7 @@ public final class DecodeResources {
         ENGINE_ACCEPTED,
         STILL_OWNED,
         STALE,
-        CONFLICT;
-
-        public boolean released() { return this == RELEASED; }
+        CONFLICT
     }
 
     public enum EngineDispatchPermitAcquireStatus {
@@ -197,8 +195,6 @@ public final class DecodeResources {
                                     boolean priorityKnown,
                                     long reservationToken,
                                     boolean claimedForPreemption) {
-        public boolean queued() { return phase.isMasterQueued(); }
-
         public CapacityRelease placementRelease() {
             return new CapacityRelease(1L, kvTokens, expectedKvTokens);
         }

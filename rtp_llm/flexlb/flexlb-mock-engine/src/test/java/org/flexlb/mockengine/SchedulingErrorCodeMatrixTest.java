@@ -73,7 +73,7 @@ class SchedulingErrorCodeMatrixTest {
             assertFailure(fixture.schedule(context), fixture.harness.config.isDirect() ? 8511 : 8431,
                     fixture.harness.config.isDirect() ? UNSPECIFIED : RESOURCE_EXHAUSTED, "expired");
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
-            assertEquals(0, fixture.harness.decodeEndpoint(0).getInflightCount());
+            assertEquals(0, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
         }
     }
 
@@ -84,7 +84,7 @@ class SchedulingErrorCodeMatrixTest {
             fixture.harness.setDecodeKvCapacity(0, 64, 64);
             assertFailure(fixture.schedule(fixture.context()), 8431, RESOURCE_EXHAUSTED,
                     "admission capacity is temporarily exhausted");
-            assertEquals(0, fixture.harness.decodeEndpoint(0).getInflightCount());
+            assertEquals(0, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
         }
     }
@@ -149,7 +149,7 @@ class SchedulingErrorCodeMatrixTest {
             BalanceContext context = fixture.context();
             assertFailure(fixture.schedule(context), code, reason, message);
             assertNotNull(context.getSchedulingDiagnostics());
-            assertEquals(1, fixture.harness.decodeEndpoint(0).getInflightCount());
+            assertEquals(1, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
         }
     }
@@ -167,7 +167,7 @@ class SchedulingErrorCodeMatrixTest {
             assertFailure(failure, 8431, RESOURCE_EXHAUSTED, "DECODE");
             assertQueueWaitPv(context, failure, "DECODE");
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
-            assertEquals(1, fixture.harness.decodeEndpoint(0).getInflightCount());
+            assertEquals(1, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
         }
     }
 
@@ -200,7 +200,7 @@ class SchedulingErrorCodeMatrixTest {
             assertEquals(0, fixture.harness.prefillEngines.getFirst().getAcceptedCount());
             // A Prefill rejection does not prove Decode has not observed the request.
             // Preserve that ownership until the existing inactivity reducer settles it.
-            AutoTpmE2EHarness.await(() -> fixture.harness.decodeEndpoint(0).getInflightCount() == 0,
+            AutoTpmE2EHarness.await(() -> fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount() == 0,
                     2_000L, "Decode reservation must settle after inactivity");
             assertFailure(future.join(), 8510, UNSPECIFIED, "injected admission rejection");
         }
@@ -216,7 +216,7 @@ class SchedulingErrorCodeMatrixTest {
             assertFalse(original.isDone());
             fixture.service.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED);
             assertFailure(original.get(5, TimeUnit.SECONDS), 8504, UNSPECIFIED, "cancel");
-            assertEquals(1, fixture.harness.decodeEndpoint(0).getInflightCount());
+            assertEquals(1, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
         }
     }

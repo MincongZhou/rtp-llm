@@ -11,7 +11,7 @@ import static com.google.common.base.Preconditions.checkArgument;
  * Immutable view of Prefill work which has crossed an endpoint lifecycle boundary.
  *
  * <p>Known request and batch work is intentionally kept separate from
- * {@link #unknownRequestCount()}. A committed batch whose repack prediction is
+ * the count of requests whose work is unknown. A committed batch whose repack prediction is
  * unavailable retains its request identities and carries an empty
  * {@link BatchWork#remainingWorkMs()}. Neither form of unknown work may be
  * converted into fabricated milliseconds by a load projection.

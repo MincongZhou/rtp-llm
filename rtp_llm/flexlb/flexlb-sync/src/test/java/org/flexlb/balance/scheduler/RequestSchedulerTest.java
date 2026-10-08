@@ -164,7 +164,7 @@ class RequestSchedulerTest {
             assertTrue(future.cancel(false));
             assertTrue(future.isCancelled());
             assertEquals(RequestState.Phase.CANCEL_REQUESTED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(990007L, 0L).state());
-            assertEquals(1, coordinator.size(), "the decision owner has not consumed the ticket");
+            assertEquals(1, RequestProtocolTestSupport.queuedCount(coordinator), "the decision owner has not consumed the ticket");
             releaseControl.countDown();
             RequestProtocolTestSupport.awaitCondition(() -> org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(990007L, 0L).state() == RequestState.Phase.CANCELLED);
             assertThrows(java.util.concurrent.CancellationException.class, future::join);
@@ -346,7 +346,7 @@ class RequestSchedulerTest {
             } else {
                 assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), future.get(5, TimeUnit.SECONDS).getCode());
             }
-            RequestProtocolTestSupport.awaitCondition(() -> coordinator.size() == 0);
+            RequestProtocolTestSupport.awaitCondition(() -> RequestProtocolTestSupport.queuedCount(coordinator) == 0);
             verify(router, never()).select(any(), any());
         } finally {
             coordinator.close();
@@ -395,10 +395,10 @@ class RequestSchedulerTest {
             }
             assertEquals(RequestState.Phase.CANCEL_REQUESTED, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(990001L, 0L).state());
             assertFalse(future.isDone(), "the admission claim still owns its route");
-            RequestProtocolTestSupport.awaitCondition(() -> coordinator.size() == 0);
+            RequestProtocolTestSupport.awaitCondition(() -> RequestProtocolTestSupport.queuedCount(coordinator) == 0);
             releasePlan.countDown();
             assertTrue(planClosed.await(5, TimeUnit.SECONDS));
-            assertEquals(0, coordinator.size());
+            assertEquals(0, RequestProtocolTestSupport.queuedCount(coordinator));
             assertEquals((deadline ? StrategyErrorType.RESOURCE_EXHAUSTED : StrategyErrorType.REQUEST_CANCELLED).getErrorCode(), future.get(5, TimeUnit.SECONDS).getCode());
             RequestProtocolTestSupport.awaitCondition(() -> {
                 var lock = (java.util.concurrent.locks.ReentrantLock) org.springframework.test.util.ReflectionTestUtils.getField(coordinator, "lock");

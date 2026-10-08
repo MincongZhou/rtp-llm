@@ -57,7 +57,7 @@ class DecodeEndpointTest {
                 : DecodeResources.DecodeRequestStatus.active(reservation);
         verify(sink).onDecodeStatus(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq(endpoint), org.mockito.ArgumentMatchers.eq(requestStatus));
         assertEquals(allocated, endpoint.isAcceptedByEngine(reservation));
-        assertEquals(allocated ? 0 : 1, endpoint.getInflightCount());
+        assertEquals(allocated ? 0 : 1, endpoint.resourceSnapshot().reservedCount());
         assertEquals(phase == TaskPhase.RUNNING ? DecodeTaskPhase.RUNNING
                         : allocated ? DecodeTaskPhase.ACCEPTED_NOT_RUNNING : DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
                 endpoint.resourceSnapshot().requests().get(100L).phase());
@@ -71,14 +71,14 @@ class DecodeEndpointTest {
         EndpointTestSupport.applyStatus(endpoint, finished).run();
         verify(sink).onDecodeStatus(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq(endpoint), org.mockito.ArgumentMatchers.eq(DecodeResources.DecodeRequestStatus.terminal(reservation, 0L)));
         assertFalse(endpoint.resourceSnapshot().requests().containsKey(100L));
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
     }
 
     @Test
     void reserve_updatesSnapshotAndInflight() {
         updateStatus(null, null, 10000);
         reserve(100L, 500, 500);
-        assertEquals(1, endpoint.getInflightCount());
+        assertEquals(1, endpoint.resourceSnapshot().reservedCount());
         assertEquals(9500, endpoint.routingView().realKvAvailable());
     }
 
@@ -88,14 +88,14 @@ class DecodeEndpointTest {
         reserve(101L, 300, 300);
         release(100L);
 
-        assertEquals(1, endpoint.getInflightCount());
+        assertEquals(1, endpoint.resourceSnapshot().reservedCount());
     }
 
     @Test
     void release_unknownRequestId_noEffect() {
         reserve(100L, 500, 500);
         release(999L);
-        assertEquals(1, endpoint.getInflightCount());
+        assertEquals(1, endpoint.resourceSnapshot().reservedCount());
     }
 
     @Test
@@ -103,7 +103,7 @@ class DecodeEndpointTest {
         reserve(100L, 100, 100);
         release(100L);
         release(100L);
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
         assertEquals(0, endpoint.routingView().realKvAvailable());
     }
 
@@ -115,7 +115,7 @@ class DecodeEndpointTest {
         running.setPhase(TaskPhase.KV_ALLOCATED);
         updateStatus(Map.of("100", running), null, 10000);
 
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
         assertEquals(10000, endpoint.routingView().realKvAvailable());
     }
 
@@ -128,7 +128,7 @@ class DecodeEndpointTest {
         failed.setErrorMessage("timeout");
         updateStatus(null, Map.of("100", failed), 10000);
 
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
     }
 
     @Test
@@ -139,7 +139,7 @@ class DecodeEndpointTest {
         success.setErrorCode(0);
         updateStatus(null, Map.of("100", success), 10000);
 
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
     }
 
     @Test
@@ -183,7 +183,7 @@ class DecodeEndpointTest {
         assertEquals(1, endpoint.routingView().engineLoad());
 
         var queued = endpoint.resourceSnapshot().requests().get(1L);
-        assertTrue(queued.queued());
+        assertTrue(queued.phase().isMasterQueued());
         assertEquals(DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED, queued.phase());
         assertFalse(endpoint.isAcceptedByEngine(reservations.get(1L)));
 
@@ -191,9 +191,9 @@ class DecodeEndpointTest {
         assertEquals(TRANSFERRED, acquirePermit(1L).dispatch());
         assertEquals(2, endpoint.routingView().engineLoad());
         var dispatched = endpoint.resourceSnapshot().requests().get(1L);
-        assertFalse(dispatched.queued());
+        assertFalse(dispatched.phase().isMasterQueued());
         assertEquals(DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN, dispatched.phase());
-        assertTrue(queued.queued(), "dispatch cannot change the previously captured phase");
+        assertTrue(queued.phase().isMasterQueued(), "dispatch cannot change the previously captured phase");
 
         // release req 2 (was queued) → inflight=2, queued=0
         release(2L);
@@ -232,9 +232,9 @@ class DecodeEndpointTest {
         var confirmed = endpoint.resourceSnapshot().requests().get(1L);
         assertEquals(1L, confirmed.requestId());
         assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING, confirmed.phase());
-        assertFalse(confirmed.queued());
+        assertFalse(confirmed.phase().isMasterQueued());
         assertTrue(endpoint.isAcceptedByEngine(reservations.get(1L)));
-        assertTrue(endpoint.resourceSnapshot().requests().get(2L).queued());
+        assertTrue(endpoint.resourceSnapshot().requests().get(2L).phase().isMasterQueued());
 
         // req 2 still queued, inflight=1 (req2), confirmed=1 (req1)
         // engineLoad = confirmed(1) + max(0, inflight(1) - queued(1)) = 1
@@ -289,7 +289,7 @@ class DecodeEndpointTest {
         markQueued(101L);
         markQueued(102L);
 
-        assertEquals(3, endpoint.getInflightCount());
+        assertEquals(3, endpoint.resourceSnapshot().reservedCount());
         assertEquals(0, endpoint.routingView().engineLoad());
         assertEquals(3, endpoint.routingView().totalLoad());
         assertEquals(3, endpoint.resourceSnapshot().queuedCount());
@@ -298,7 +298,7 @@ class DecodeEndpointTest {
         int evicted = endpoint.evictExpiredRequests(5, requestId -> false);
 
         assertEquals(3, evicted);
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
         assertTrue(endpoint.resourceSnapshot().queuedCount() == 0);
         assertEquals(0, endpoint.routingView().engineLoad());
         assertEquals(0, endpoint.routingView().totalLoad());

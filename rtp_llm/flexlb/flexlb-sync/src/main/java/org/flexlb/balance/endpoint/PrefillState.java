@@ -202,10 +202,6 @@ public final class PrefillState {
         /* guarded by PrefillState.lock; non-null only while OPEN */
         private EndpointGenerationLifecycle.HandoffPermit generationHandoff;
 
-        public long batchId() {
-            return batchId;
-        }
-
         /** Commit this exact batch lease while the caller holds ownershipLock(). */
         public CommittedHandoff commitLocked(
                 List<RequestRoute> items,

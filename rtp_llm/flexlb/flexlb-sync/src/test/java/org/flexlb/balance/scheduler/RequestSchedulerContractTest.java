@@ -237,22 +237,25 @@ class RequestSchedulerContractTest {
             runtime.initializeScheduler(PlacementConfiguration.create(runtime, f.config,
                     f.router, reporter, mock(DecodeCapacityAcquirer.class), new PlacementAvailability()));
             try {
-                var owner = (AbstractRequestScheduler) runtime.scheduler();
+                var owner = (AbstractRequestScheduler) SchedulerTestSupport.initializedScheduler(runtime);
                 var request = f.context(100);
                 var future = owner.register(request, StrategyErrorType.BATCH_SLO_EXPIRED);
 
-                assertSame(owner, runtime.scheduler());
-                assertSame(owner, runtime.scheduler());
-                assertSame(owner, runtime.scheduler());
+                assertSame(owner, request.scheduler());
+                assertSame(owner, runtime.requests().ownerOf(100L));
 
                 var next = f.context(101);
                 var nextFuture = owner.register(next, StrategyErrorType.BATCH_SLO_EXPIRED);
-                assertSame(owner, runtime.scheduler());
+                assertSame(owner, next.scheduler());
+                assertSame(owner, runtime.requests().ownerOf(101L));
                 owner.cancel(100, 0, CancelReason.CLIENT_CANCELLED);
                 owner.cancel(101, 0, CancelReason.CLIENT_CANCELLED);
                 future.get(3, TimeUnit.SECONDS);
                 nextFuture.get(3, TimeUnit.SECONDS);
-                assertSame(owner, runtime.scheduler(), "terminal records preserve ownership too");
+                RequestProtocolTestSupport.awaitCondition(() -> runtime.requests().findTerminal(100L) != null
+                        && runtime.requests().findTerminal(101L) != null);
+                assertSame(owner, runtime.requests().findTerminal(100L).owner(), "terminal records preserve ownership too");
+                assertSame(owner, runtime.requests().findTerminal(101L).owner());
             } finally {
                 runtime.shutdown();
             }

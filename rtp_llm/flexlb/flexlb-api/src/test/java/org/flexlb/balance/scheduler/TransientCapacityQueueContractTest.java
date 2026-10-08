@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
 import org.flexlb.balance.endpoint.DecodeResources;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
@@ -151,7 +152,7 @@ class TransientCapacityQueueContractTest {
                          fixture.decodeEndpoint.tryPinGeneration()) {
                 settled = fixture.decodeEndpoint.tryReserveQueuedRequest(pin, requestId, 128L, 136L, 50, null);
             }
-            assertTrue(fixture.decodeEndpoint.release(settled, DecodeResources.ReleaseReason.COUNTERPART_FINISHED).released());
+            assertEquals(ReservationReleaseResult.RELEASED, fixture.decodeEndpoint.release(settled, DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
             assertEquals(0, fixture.totalDecodeReservations());
 
             fixture.runtime.applyStatus(

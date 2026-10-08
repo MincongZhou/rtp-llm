@@ -42,7 +42,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
                 () -> offline.get(600, TimeUnit.MILLISECONDS));
         assertFalse(offline.isDone(), "post-send uncertainty stays pending before request TTL");
         assertTrue(getPrefillEndpoint().ownershipStats().batchCount() >= 1);
-        assertTrue(getDecodeEndpoint().getInflightCount() >= 1);
+        assertTrue(getDecodeEndpoint().resourceSnapshot().reservedCount() >= 1);
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
 
         Response expired = offline.get(5, TimeUnit.SECONDS);
@@ -51,7 +51,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         assertTrue(expired.getErrorMessage().contains("REQUEST_INACTIVE"));
         assertTrue(requestRegistry().liveRequestCount() > 0);
         assertTrue(getPrefillEndpoint().ownershipStats().locallyOwnedRequests() > 0);
-        assertTrue(getDecodeEndpoint().getInflightCount() > 0);
+        assertTrue(getDecodeEndpoint().resourceSnapshot().reservedCount() > 0);
         assertThrows(IllegalStateException.class, schedulerRuntime::close);
         assertTrue(first.join().isSuccess(), "cleanup does not replace an already published ACK");
     }

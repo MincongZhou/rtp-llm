@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
@@ -338,8 +339,8 @@ class RequestResourceAccountingTest {
             assertNotEquals(oldReservation.reservationToken(), replacement.reservationToken());
             assertThrows(IllegalStateException.class, () -> oldClaim.complete(DeliveryResult.delivered()));
             f.expire();
-            assertFalse(f.decode.release(oldReservation, DecodeResources.ReleaseReason.EXPIRED).released());
-            assertFalse(f.decode.release(oldReservation, DecodeResources.ReleaseReason.COUNTERPART_FINISHED).released());
+            assertNotEquals(ReservationReleaseResult.RELEASED, f.decode.release(oldReservation, DecodeResources.ReleaseReason.EXPIRED));
+            assertNotEquals(ReservationReleaseResult.RELEASED, f.decode.release(oldReservation, DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
             assertEquals(HARD_KV * 2, f.decode.routingView().inflightHardKv());
             assertEquals(EXPECTED_KV * 2, f.decode.routingView().inflightExpectedKv());
             assertEquals(replacement, EndpointTestSupport.decodeReservation(f.decode, ID));

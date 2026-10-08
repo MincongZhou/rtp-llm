@@ -91,9 +91,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 org.mockito.Mockito.mock(DefaultBatchDispatcher.class), configService,
                 new org.flexlb.service.RecentCacheKeyTraceReporter(), cancelChannel);
         var eviction = new DecodeCapacityAcquirer(cancelChannel, requests, runtime, requestReporter);
-        runtime.initializeScheduler(PlacementConfiguration.create(runtime, configService.loadBalanceConfig(),
-                router, batchReporter, eviction, placementAvailability));
-        this.scheduler = runtime.scheduler();
+        this.scheduler = PlacementConfiguration.create(runtime, configService.loadBalanceConfig(),
+                router, batchReporter, eviction, placementAvailability);
+        runtime.initializeScheduler(scheduler);
     }
 
     public RequestRepository requestRegistry() {

@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
@@ -25,6 +26,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.flexlb.balance.scheduler.SchedulingTestConfig.decodeRequirements;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_RESERVED_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_SHADOW_KV_RESERVED;
@@ -104,7 +106,7 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(1, endpoint.resourceSnapshot().acceptedCount());
         assertEquals(1, endpoint.resourceSnapshot().runningCount());
         assertEquals(2, endpoint.resourceSnapshot().confirmedCount());
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
         assertTrue(isConfirmed(1L));
         assertTrue(isConfirmed(2L));
 
@@ -278,7 +280,7 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(300, endpoint.routingView().inflightHardKv());
         // totalLoad = confirmed Engine-owned count + reserved inflight count.
         assertEquals(2, endpoint.routingView().totalLoad());
-        assertEquals(1, endpoint.getInflightCount());
+        assertEquals(1, endpoint.resourceSnapshot().reservedCount());
     }
 
     // ==================== token-fenced weak-ACK preemption ====================
@@ -322,13 +324,13 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(1, endpoint.resourceSnapshot().runningCount());
 
         // Expiring the incoming request must not release a victim whose Cancel outcome is unknown.
-        assertTrue(endpoint.release(incoming, DecodeResources.ReleaseReason.EXPIRED).released());
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(incoming, DecodeResources.ReleaseReason.EXPIRED));
         assertEquals(0L, endpoint.routingView().inflightHardKv());
         assertEquals(0L, endpoint.routingView().inflightExpectedKv());
         assertEquals(1, endpoint.resourceSnapshot().runningCount());
         assertEquals(1, endpoint.routingView().engineCapacityUsed());
-        assertTrue(endpoint.release(victim, DecodeResources.ReleaseReason.EXPIRED).released());
-        assertFalse(endpoint.release(victim, DecodeResources.ReleaseReason.EXPIRED).released());
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(victim, DecodeResources.ReleaseReason.EXPIRED));
+        assertNotEquals(ReservationReleaseResult.RELEASED, endpoint.release(victim, DecodeResources.ReleaseReason.EXPIRED));
         var after = endpoint.resourceSnapshot();
         assertEquals(0, after.runningCount());
         assertEquals(0, after.acceptedCount());
@@ -453,7 +455,7 @@ class DecodeEndpointLayeredViewTest {
         endpoint.abortPreemption(101L);
         assertEquals(0, endpoint.evictExpiredRequests(100, requestId -> false));
         assertTrue(EndpointTestSupport.isReserved(endpoint.resourceSnapshot(), 1L), "uncertain Cancel survives attempt rollback");
-        assertTrue(endpoint.release(reservations.get(1L), DecodeResources.ReleaseReason.EXPIRED).released());
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(reservations.get(1L), DecodeResources.ReleaseReason.EXPIRED));
         assertFalse(EndpointTestSupport.isReserved(endpoint.resourceSnapshot(), 1L));
         assertEquals(0, endpoint.routingView().inflightHardKv());
     }
@@ -548,10 +550,10 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(1, endpoint.routingView().totalLoad(),
                 "the disappeared confirmed victim remains a synthetic slot");
 
-        assertTrue(endpoint.release(reservations.get(1L), DecodeResources.ReleaseReason.EXPIRED).released());
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(reservations.get(1L), DecodeResources.ReleaseReason.EXPIRED));
         assertEquals(10_000, endpoint.routingView().realKvAvailable());
         assertEquals(0, endpoint.routingView().totalLoad());
-        assertFalse(endpoint.release(reservations.get(1L), DecodeResources.ReleaseReason.EXPIRED).released(),
+        assertNotEquals(ReservationReleaseResult.RELEASED, endpoint.release(reservations.get(1L), DecodeResources.ReleaseReason.EXPIRED),
                 "the exact local lease expires at most once");
         assertEquals(10_000, endpoint.routingView().realKvAvailable());
     }

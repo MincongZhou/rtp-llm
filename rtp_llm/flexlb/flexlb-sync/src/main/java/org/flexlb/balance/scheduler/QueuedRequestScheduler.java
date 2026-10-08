@@ -188,16 +188,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         }
     }
 
-    int size() {
-        lock.lock();
-        try {
-            return orderedQueue.size() + (int) events.stream()
-                    .filter(event -> event.kind == EventKind.SUBMIT || event.kind == EventKind.REQUEUE).count();
-        } finally {
-            lock.unlock();
-        }
-    }
-
     /** A withdrawal is not a new request: keep its sequence, context, Future and absolute deadline. */
     public boolean requeue(RequestRoute previous) {
         if (previous.future().isDone()) { return true; }

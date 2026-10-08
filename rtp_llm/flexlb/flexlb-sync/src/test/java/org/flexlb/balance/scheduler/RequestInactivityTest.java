@@ -106,7 +106,7 @@ class RequestInactivityTest {
     @EnumSource(value = RoleType.class, names = {"PREFILL", "DECODE"})
     void activeStatusCancelsObsoleteVisibilityTimerWithoutEndingResourceTracking(RoleType source) throws Exception {
         acknowledgeDelivery();
-        var deadline = requestContext.decisionDeadline();
+        ExpirationTimer.DecisionDeadline deadline = RequestProtocolTestSupport.field(requestContext, "decisionDeadline");
         assertNotNull(deadline);
         ScheduledFuture<?> scheduled = (ScheduledFuture<?>)
                 org.springframework.test.util.ReflectionTestUtils.getField(deadline, "scheduled");
@@ -121,7 +121,7 @@ class RequestInactivityTest {
         }
         registry.runtime.continuations().awaitIdle();
         assertTrue(scheduled.isCancelled(), "engine evidence must cancel the obsolete scheduled callback");
-        assertNull(requestContext.decisionDeadline());
+        assertNull(RequestProtocolTestSupport.field(requestContext, "decisionDeadline"));
         requestContext.onDecisionVisibilityDeadline(deadline);
         assertLiveAndCharged();
         assertTrue(item.future().join().isSuccess());

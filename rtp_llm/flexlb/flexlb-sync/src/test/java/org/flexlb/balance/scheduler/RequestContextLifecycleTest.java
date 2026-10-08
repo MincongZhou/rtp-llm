@@ -284,7 +284,7 @@ class RequestContextLifecycleTest {
     void schedulingDeadlineDuringAdmissionRetainsItsOwnEntryRuleAfterDeliveryClaim(boolean timer) {
         var context = context(10007L);
         var future = RequestProtocolTestSupport.register(lifecycle, context);
-        var deadline = context.requestDeadline();
+        ExpirationTimer.RequestDeadline deadline = RequestProtocolTestSupport.field(context, "requestDeadline");
         assertNotNull(deadline);
         var item = org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(context), new Response(), null, null,
                 mock(PrefillEndpoint.class), null, null, System.currentTimeMillis());
@@ -298,7 +298,7 @@ class RequestContextLifecycleTest {
                 lifecycle.cancelRequest(context, 0L, CancelReason.DEADLINE_EXCEEDED);
             }
             assertEquals(timer ? CancelReason.DEADLINE_EXCEEDED : null, context.cancellationReason());
-            assertSame(timer ? null : deadline, context.requestDeadline());
+            assertSame(timer ? null : deadline, RequestProtocolTestSupport.field(context, "requestDeadline"));
             assertEquals(RequestStage.DELIVERING, context.stage());
             assertSame(item, context.route());
             assertFalse(future.isDone(), "admission owner must settle the timer fact");
@@ -613,8 +613,8 @@ class RequestContextLifecycleTest {
             assertEquals("FINISHED", String.valueOf(org.springframework.test.util.ReflectionTestUtils.getField(requestContext, "stage")));
             assertNull(requestContext.activeRoute());
             assertNull(requestContext.route());
-            assertNull(requestContext.requestDeadline());
-            assertNull(requestContext.decisionDeadline());
+            assertNull(RequestProtocolTestSupport.field(requestContext, "requestDeadline"));
+            assertNull(RequestProtocolTestSupport.field(requestContext, "decisionDeadline"));
             assertNull(RequestProtocolTestSupport.<ExpirationTimer.InactivityDeadline>field(requestContext, "inactivityDeadline"));
             assertNull(lifecycle.findRequestContext(709L));
             RequestState terminal = org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(709L, 0L);

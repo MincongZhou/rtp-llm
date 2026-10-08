@@ -189,7 +189,7 @@ class RequestLifetimeTest {
             assertSame(fixture.item, fixture.requestContext.activeRoute());
             assertTrue(RequestProtocolTestSupport.<Boolean>field(fixture.requestContext, "decisionExpired"));
             assertTrue(RequestProtocolTestSupport.<java.util.OptionalLong>field(fixture.requestContext, "decisionExpiresAtMs").isEmpty());
-            assertNull(fixture.requestContext.decisionDeadline());
+            assertNull(RequestProtocolTestSupport.field(fixture.requestContext, "decisionDeadline"));
             assertTrue(fixture.requestContext.isLiveGeneration());
             assertFalse(fixture.requestContext.snapshot().state().isTerminal());
             assertTrue(fixture.requestContext.snapshot().detail().contains("SUSPECTED_LOST"));
@@ -639,12 +639,12 @@ class RequestLifetimeTest {
 
     private static void assertStaleDecisionHasNoEffect(Fixture fixture, ExpirationTimer.DecisionDeadline stale) {
         var before = fixture.requestContext.snapshot();
-        var installed = fixture.requestContext.decisionDeadline();
+        ExpirationTimer.DecisionDeadline installed = RequestProtocolTestSupport.field(fixture.requestContext, "decisionDeadline");
         var deadline = RequestProtocolTestSupport.<java.util.OptionalLong>field(fixture.requestContext, "decisionExpiresAtMs");
         boolean expired = RequestProtocolTestSupport.<Boolean>field(fixture.requestContext, "decisionExpired");
         fixture.requestContext.onDecisionVisibilityDeadline(stale);
         assertEquals(before, fixture.requestContext.snapshot());
-        assertSame(installed, fixture.requestContext.decisionDeadline());
+        assertSame(installed, RequestProtocolTestSupport.field(fixture.requestContext, "decisionDeadline"));
         assertEquals(deadline, RequestProtocolTestSupport.<java.util.OptionalLong>field(fixture.requestContext, "decisionExpiresAtMs"));
         assertEquals(expired, RequestProtocolTestSupport.<Boolean>field(fixture.requestContext, "decisionExpired"));
         assertSame(fixture.item, fixture.requestContext.activeRoute());

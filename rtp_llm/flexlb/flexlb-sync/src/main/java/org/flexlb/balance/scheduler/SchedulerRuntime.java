@@ -90,12 +90,6 @@ public final class SchedulerRuntime {
         }
     }
 
-    public RequestScheduler scheduler() {
-        synchronized (schedulerLock) {
-            return Objects.requireNonNull(scheduler, "scheduler is not initialized");
-        }
-    }
-
     private void closeSchedulers() {
         RequestScheduler scheduler;
         synchronized (schedulerLock) {

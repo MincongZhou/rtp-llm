@@ -73,10 +73,10 @@ class EndpointCleanupOwnershipTest {
             assertNotNull(EndpointTestSupport.reserveUnqueuedDecode(endpoint, pin, id, 1L, 1L, 50));
         }
         assertEquals(0, endpoint.evictExpiredRequests(-1L, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)::retainsIdentity));
-        assertEquals(1, endpoint.getInflightCount());
+        assertEquals(1, endpoint.resourceSnapshot().reservedCount());
         // Models moving the ownership scan outside the endpoint lock without revalidation.
         assertEquals(1, endpoint.evictExpiredRequests(-1L, beforeRegistration::contains));
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
         assertTrue(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry).retainsIdentity(id), "request is still registered despite premature eviction");
     }
 
@@ -274,7 +274,7 @@ class EndpointCleanupOwnershipTest {
     private static void assertDecodeLedger(DecodeEndpoint endpoint, int reserved, int confirmed,
                                           long hardKv, long expectedKv) {
         var view = endpoint.resourceSnapshot();
-        assertEquals(reserved, endpoint.getInflightCount());
+        assertEquals(reserved, endpoint.resourceSnapshot().reservedCount());
         assertEquals(reserved, view.reservedCount());
         assertEquals(confirmed, view.confirmedCount());
         assertEquals(reserved + confirmed, view.routing().totalLoad());

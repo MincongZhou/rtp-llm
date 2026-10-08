@@ -48,7 +48,7 @@ class LeakCanaryLongRunE2ETest {
             h.startAutoPump(10);
             Response rejected = h.scheduler.submit(h.context(99_999L, 50)).get(5, TimeUnit.SECONDS);
             assertEquals(8510, rejected.getCode());
-            AutoTpmE2EHarness.await(() -> h.decodeEndpoint(0).getInflightCount() == 0,
+            AutoTpmE2EHarness.await(() -> h.decodeEndpoint(0).resourceSnapshot().reservedCount() == 0,
                     2_000, "ordinary Cancel cleanup proof must settle the rejected request");
             assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv());
             assertEquals(0, h.prefillEndpoint(0).queuedRequestCount());
@@ -143,9 +143,9 @@ class LeakCanaryLongRunE2ETest {
             assertCompletedRequestsSettled(h, completedAt, System.currentTimeMillis());
             // Successful Engine completions must settle within 1s, before the 5s inactivity fallback.
             // A Prefill rejection may retain unconfirmed Decode ownership until that fallback.
-            AutoTpmE2EHarness.await(() -> h.decodeEndpoint(0).getInflightCount() == 0,
+            AutoTpmE2EHarness.await(() -> h.decodeEndpoint(0).resourceSnapshot().reservedCount() == 0,
                     INACTIVITY_TIMEOUT_MS + 1_000, "failed requests must settle within the inactivity bound");
-            assertEquals(0, h.decodeEndpoint(0).getInflightCount(),
+            assertEquals(0, h.decodeEndpoint(0).resourceSnapshot().reservedCount(),
                     "decode shadow inflight must settle to zero");
             assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv(),
                     "no orphaned hard-KV reservation");

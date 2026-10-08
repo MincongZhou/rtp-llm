@@ -49,7 +49,7 @@ class PlacementConfigurationTest {
             spring.register(PlacementAvailability.class, RequestRepository.class, PlacementConfiguration.class, SchedulerRuntime.class);
             spring.refresh();
             request.setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("input"));
-            var future = spring.getBean(SchedulerRuntime.class).scheduler().submit(request);
+            var future = SchedulerTestSupport.initializedScheduler(spring.getBean(SchedulerRuntime.class)).submit(request);
             assertSame(future, request.getFuture());
             assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), future.get(3, TimeUnit.SECONDS).getCode());
         }

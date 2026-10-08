@@ -44,7 +44,7 @@ public final class EndpointCleanupTestSupport {
             this.batch = batch;
         }
 
-        public record Owner(RequestRoute item, PrefillState.Reservation reservation) { }
+        public record Owner(RequestRoute item, PrefillState.Reservation reservation, long batchId) { }
 
         public Owner commit(long requestId, long batchId, long predictedMs) {
             RequestRoute item = mock(RequestRoute.class);
@@ -65,7 +65,7 @@ public final class EndpointCleanupTestSupport {
                         try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(item), predictedMs)) {
                             assertNotNull(handoff);
                         }
-                        return new Owner(item, reservation);
+                        return new Owner(item, reservation, batchId);
                     }
                 }
             }
@@ -77,7 +77,7 @@ public final class EndpointCleanupTestSupport {
                             generation.tryAcquireHandoff())) {
                         assertNotNull(handoff);
                     }
-                    return new Owner(item, reservation);
+                    return new Owner(item, reservation, batchId);
                 }
             }
         }
@@ -102,7 +102,7 @@ public final class EndpointCleanupTestSupport {
                 assertTrue(work.requests().isEmpty());
                 assertEquals(1, work.batches().size());
                 assertEquals(List.of(owner.item().requestId()), work.batches().getFirst().requestIds());
-                assertEquals(((PrefillState.BatchReservation) owner.reservation()).batchId(),
+                assertEquals(owner.batchId(),
                         work.batches().getFirst().batchId());
                 // Check the actual admission gate, not just the derived batch count.
                 assertFalse(state.batchCapacityAvailable(1));

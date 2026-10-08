@@ -52,6 +52,11 @@ public final class SchedulerTestSupport {
             bindOwner(route.ctx(), owner == null ? mock(AbstractRequestScheduler.class) : owner);
         }
     }
+    static RequestScheduler initializedScheduler(SchedulerRuntime runtime) {
+        synchronized (ReflectionTestUtils.getField(runtime, "schedulerLock")) {
+            return (RequestScheduler) ReflectionTestUtils.getField(runtime, "scheduler");
+        }
+    }
     public static SchedulerRuntime runtime(RequestScheduler owner) { return ((AbstractRequestScheduler) owner).runtime; }
     static EngineCancelChannel cancelChannel(RequestScheduler owner) {
         return (EngineCancelChannel) ReflectionTestUtils.getField(runtime(owner), "cancelChannel");

@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -262,7 +263,7 @@ class RouteDeliveryStrategyTest {
                     assertEquals(0, endpoint.resourceSnapshot().activeDispatchPermits());
                     assertEquals(1, notifications.get());
                 } else {
-                    assertTrue(endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).released());
+                    assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
                     try (var pin = endpoint.tryPinGeneration()) {
                         reservation = endpoint.tryReserveQueuedRequest(pin, 1L, 100L, 200L, 50, null);
                     }
