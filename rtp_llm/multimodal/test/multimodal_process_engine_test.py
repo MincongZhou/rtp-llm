@@ -773,6 +773,18 @@ class MMProcessEngineGpuBatchTest(TestCase):
         )
         self.assertEqual(len(engine._hash_key_cache.keys()), 1)
 
+    def test_same_request_duplicate_waits_after_its_producer_runs(self):
+        engine, part = self._make_engine(
+            mm_cache_cpu_max_bytes=4096, mm_timeout_ms=1000
+        )
+        engine.mm_preprocess_batch_size = 1
+
+        result = self._embed(engine, ["fake://7", "fake://7"])
+
+        self.assertEqual([item.item() for item in result.embeddings], [7, 7])
+        self.assertEqual(len(result.feature_hashes), 2)
+        self.assertEqual(part.embedding_calls, 1)
+
     def test_cached_hashes_survive_async_and_rpc_serialization(self):
         from rtp_llm.server.vit_rpc_server import merge_embedding_results, trans_output
         from rtp_llm.utils.grpc_util import trans_tensor
@@ -1154,6 +1166,17 @@ class EmptyEmbeddingResultTest(TestCase):
                 "rtp_llm.multimodal.mm_process_engine.get_multimodal_feature_hash"
             ) as hash_op:
                 with self.assertRaisesRegex(ValueError, "ViT returned empty embedding"):
+                    _feature_hashes_from_result((output, None))
+                hash_op.assert_not_called()
+
+    def test_scalar_tensor_fails_before_any_hash_is_computed(self):
+        for output in (torch.tensor(1), [torch.ones((2, 4)), torch.tensor(1)]):
+            with self.subTest(output=output), patch(
+                "rtp_llm.multimodal.mm_process_engine.get_multimodal_feature_hash"
+            ) as hash_op:
+                with self.assertRaisesRegex(
+                    ValueError, "ViT returned scalar embedding"
+                ):
                     _feature_hashes_from_result((output, None))
                 hash_op.assert_not_called()
 
@@ -1664,7 +1687,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
                 if started_count == 2:
                     both_started.set()
             release.wait(timeout=5)
-            entry.complete((torch.tensor(0), None))
+            entry.complete((torch.tensor([0]), None))
 
         def get_results():
             nonlocal result, error

@@ -99,13 +99,18 @@ def _embedding_token_length(embeddings: List[Any]) -> int:
 
 
 def _validate_embedding_result(result: Any) -> None:
-    """Reject empty model output before hashing or publishing it to the cache."""
+    """Reject tensors that cannot represent visual tokens before caching."""
     embeddings = result[0]
     if isinstance(embeddings, torch.Tensor):
         # Check stacked tensors before splitting: a zero leading dimension
         # would otherwise become an empty list and bypass per-tensor validation.
         embeddings = [embeddings]
     for index, embedding in enumerate(embeddings or []):
+        if isinstance(embedding, torch.Tensor) and embedding.ndim == 0:
+            raise ValueError(
+                f"ViT returned scalar embedding at index {index}; "
+                "expected a visual-token tensor"
+            )
         if isinstance(embedding, torch.Tensor) and embedding.numel() == 0:
             raise ValueError(
                 f"ViT returned empty embedding at index {index}: "
@@ -115,14 +120,10 @@ def _validate_embedding_result(result: Any) -> None:
 
 @cuda_graph_gate.operation()
 def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
-    """Build sidecar hashes after rejecting empty embedding tensors."""
+    """Build one sidecar hash tensor for every validated embedding tensor."""
     _validate_embedding_result(result)
     embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
-    return [
-        get_multimodal_feature_hash(embedding)
-        for embedding in embeddings
-        if not (isinstance(embedding, torch.Tensor) and embedding.ndim == 0)
-    ]
+    return [get_multimodal_feature_hash(embedding) for embedding in embeddings]
 
 
 def _worker_initializer(
@@ -1172,7 +1173,10 @@ class MMProcessEngine:
                         work_item.cache_entry.set_greennet_verdict(
                             verdict, checked=self._greennet_enabled()
                         )
-                    if work_item.embedding_result is not None:
+                    if (
+                        work_item.cache_state == "miss"
+                        and work_item.embedding_result is not None
+                    ):
                         work_item.complete_cache(work_item.embedding_result, force=True)
                 return result
             except Exception as error:
@@ -1531,8 +1535,17 @@ class MMProcessEngine:
         work_items: List[MMWorkItem],
     ) -> None:
         """Wait for all preprocessing tasks to complete."""
+        local_producers = {
+            item.cache_entry
+            for item in work_items
+            if item.cache_state == "miss" and item.cache_entry is not None
+        }
         for work_item in work_items:
             if work_item.waiting_for_cache:
+                # Same-request producers are submitted in _compute_embeddings.
+                # Their followers wait there, after producer computation completes.
+                if work_item.cache_entry in local_producers:
+                    continue
                 timeout_s = (
                     work_item.mm_timeout_ms / 1000.0
                     if work_item.mm_timeout_ms is not None
@@ -1558,13 +1571,33 @@ class MMProcessEngine:
         self, work_items: List[MMWorkItem]
     ) -> Tuple[List[Any], List[Any], List[Any]]:
         """Compute embeddings for all work items."""
-        pending_items = [wi for wi in work_items if wi.embedding_result is None]
+        pending_items = [
+            wi
+            for wi in work_items
+            if wi.embedding_result is None and not wi.waiting_for_cache
+        ]
 
         if pending_items:
             self._scheduler.submit_and_wait(pending_items)
 
         emb_res, pos_res, tensor_res = [], [], []
+        local_producers = {
+            wi.cache_entry: wi
+            for wi in work_items
+            if wi.cache_state == "miss" and wi.cache_entry is not None
+        }
         for wi in work_items:
+            if wi.waiting_for_cache:
+                producer = local_producers.get(wi.cache_entry)
+                if producer is not None:
+                    # The producer's cache publication may be deferred until
+                    # GreenNet passes. Reuse its private result in this request.
+                    wi.embedding_result = producer.embedding_result
+                    wi.feature_hashes = producer.feature_hashes
+                else:
+                    wi.embedding_result = wi.cache_entry.wait(
+                        timeout=wi.mm_timeout_ms / 1000.0
+                    )
             result = wi.embedding_result
             # Scheduler invariant: submit_and_wait either fills embedding_result
             # for every pending item or raises, so it is never None here.
