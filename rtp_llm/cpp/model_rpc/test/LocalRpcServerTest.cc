@@ -13,7 +13,6 @@
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
-#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
 using namespace ::testing;

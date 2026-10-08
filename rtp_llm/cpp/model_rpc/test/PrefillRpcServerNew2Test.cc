@@ -108,4 +108,29 @@ TEST(PrefillRpcServerNew2Test, GenerateStreamCallRejectsPdRequestWithoutUniqueKe
     EXPECT_EQ(status.error_message(), "decode_entrance handoff requires non-empty unique_key");
 }
 
+TEST(PrefillRpcServerNew2Test, New2OnflightScopeTracksStepAndCleansOnReturn) {
+    PrefillRpcServerNew2 server;
+
+    {
+        PrefillRpcServerNew2::OnflightScope scope(&server, 9001);
+        {
+            std::lock_guard<std::mutex> lock(server.onflight_trackers_mutex_);
+            ASSERT_EQ(server.onflight_trackers_.size(), 1);
+            ASSERT_NE(server.onflight_trackers_.find(9001), server.onflight_trackers_.end());
+            EXPECT_EQ(server.onflight_trackers_.at(9001)->step.load(),
+                      static_cast<int>(PrefillRpcServerNew2::GenerateStreamStep::kEntry));
+        }
+
+        scope.markStep(PrefillRpcServerNew2::GenerateStreamStep::kAfterEngineEnqueue);
+        {
+            std::lock_guard<std::mutex> lock(server.onflight_trackers_mutex_);
+            EXPECT_EQ(server.onflight_trackers_.at(9001)->step.load(),
+                      static_cast<int>(PrefillRpcServerNew2::GenerateStreamStep::kAfterEngineEnqueue));
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(server.onflight_trackers_mutex_);
+    EXPECT_TRUE(server.onflight_trackers_.empty());
+}
+
 }  // namespace rtp_llm
