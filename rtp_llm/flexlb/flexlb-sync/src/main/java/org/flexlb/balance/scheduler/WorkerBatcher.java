@@ -266,12 +266,13 @@ public final class WorkerBatcher {
                 return false;
             }
             accepted = prefillState.enqueueActiveLocked(item, settings.maxOutstandingRequests());
-            if (accepted) { stateChanged.signal(); }
             if (!accepted && !stopped
                     && settings.preemptQueued()) {
                 victims = prefillState.replaceQueuedRoutesLocked(item, settings.maxOutstandingRequests());
                 accepted = !victims.isEmpty();
-                if (accepted) { stateChanged.signal(); }
+            }
+            if (accepted) {
+                stateChanged.signal();
             }
         } finally {
             queueLock.unlock();

@@ -532,6 +532,12 @@ public final class PrefillState {
                 || (maxOutstandingRequests > 0L && !canAcceptRequestLocked(maxOutstandingRequests))) {
             return false;
         }
+        insertQueuedRouteLocked(item);
+        return true;
+    }
+
+    /** Caller holds the ownership lock and has checked that the request ID is available. */
+    private void insertQueuedRouteLocked(RequestRoute item) {
         RequestEntry entry = new RequestEntry(item, OwnershipStage.QUEUED);
         requests.put(item.requestId(), entry);
         try {
@@ -541,7 +547,6 @@ public final class PrefillState {
             throw failure;
         }
         recordMutationLocked();
-        return true;
     }
 
     public boolean ownsSelectionLocked(List<RequestRoute> items, long nowMs) {
@@ -683,7 +688,7 @@ public final class PrefillState {
         List<RequestRoute> victims = queuedPreemptionVictimsLocked(incoming.priority(), requestLimit);
         if (victims.isEmpty()) { return victims; }
         // The selected victims fund this seat; the shared lock hides the temporary excess.
-        if (!enqueueActiveLocked(incoming, 0L)) { return List.of(); }
+        insertQueuedRouteLocked(incoming);
         for (RequestRoute victim : victims) {
             checkState(removeQueuedLocked(victim), "queued preemption lost its exact victim");
         }

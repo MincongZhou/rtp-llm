@@ -5,6 +5,8 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -14,12 +16,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -213,6 +216,49 @@ class PrefillRequestCapacityTest {
             assertThrows(IllegalStateException.class, () -> direct.enqueueActiveLocked(item(1), 1L));
             assertTrue(direct.canAcceptRequest(1L));
             assertEquals(0L, direct.outstandingRequestCount());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedReplacementInsertionKeepsVictimsAndCapacityForRetry(boolean fatal) {
+        RequestRoute first = item(1), second = item(2), incoming = item(3);
+        when(first.priority()).thenReturn(10);
+        when(second.priority()).thenReturn(50);
+        when(incoming.priority()).thenReturn(90);
+        AtomicBoolean failInsertion = new AtomicBoolean(true);
+        Comparator<RequestRoute> ordering = (left, right) -> {
+            if (failInsertion.get() && (left == incoming || right == incoming)) {
+                if (fatal) {
+                    throw new AssertionError("queue insertion failed");
+                }
+                throw new IllegalStateException("queue insertion failed");
+            }
+            return Long.compare(left.requestId(), right.requestId());
+        };
+        PrefillState ledger = new PrefillState(lock, PrefillActiveIndex.ordered(16, ordering));
+        lock.lock();
+        try {
+            assertTrue(ledger.enqueueActiveLocked(first, 2L));
+            assertTrue(ledger.enqueueActiveLocked(second, 2L));
+            assertFalse(ledger.enqueueActiveLocked(incoming, 2L));
+            Class<? extends Throwable> failureType = fatal ? AssertionError.class : IllegalStateException.class;
+            assertThrows(failureType,
+                    () -> ledger.replaceQueuedRoutesLocked(incoming, 2L));
+            assertEquals(List.of(first, second), ledger.captureQueue(Integer.MAX_VALUE).items());
+            assertEquals(2L, ledger.outstandingRequestCount());
+
+            failInsertion.set(false);
+            assertEquals(List.of(first), ledger.replaceQueuedRoutesLocked(incoming, 2L));
+            assertEquals(List.of(second, incoming), ledger.captureQueue(Integer.MAX_VALUE).items());
+            assertEquals(2L, ledger.outstandingRequestCount());
+            assertFalse(ledger.removeQueuedLocked(first), "a displaced owner cannot release the replacement");
+            assertTrue(ledger.replaceQueuedRoutesLocked(item(3), 2L).isEmpty(),
+                    "a reused request ID cannot replace its current queue owner");
+            assertSame(incoming, ledger.captureQueue(Integer.MAX_VALUE).items().getLast());
+            assertEquals(2L, ledger.outstandingRequestCount());
         } finally {
             lock.unlock();
         }
