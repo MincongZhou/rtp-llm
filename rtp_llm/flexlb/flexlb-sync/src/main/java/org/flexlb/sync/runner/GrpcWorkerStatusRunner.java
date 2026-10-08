@@ -75,7 +75,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             long latestFinishedTaskVersion = workerStatus.appliedStatusCursor()
                     .latestFinishedTaskVersion();
 
-            PollCompletion.attach(pollLease, callbackExecutor, "Worker status", ipPort,
+            PollCompletion.registerResultCallback(pollLease, callbackExecutor, "Worker status", ipPort,
                     engineGrpcService.getWorkerStatusAsync(
                             workerStatus.getIp(), workerStatus.getGrpcPort(), latestFinishedTaskVersion,
                             syncRequestTimeoutMs, roleType)

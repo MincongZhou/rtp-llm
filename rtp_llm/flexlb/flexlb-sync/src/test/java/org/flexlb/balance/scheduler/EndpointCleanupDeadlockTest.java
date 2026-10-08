@@ -121,7 +121,7 @@ class EndpointCleanupDeadlockTest {
                         assertTrue(closeReachesContexts.await(5, TimeUnit.SECONDS));
                         // close() is about to acquire Context. Registration must remain available
                         // to reject this late request; holding it while waiting for Context deadlocks.
-                        assertThrows(java.util.concurrent.RejectedExecutionException.class, () -> timer.attachRequestDeadline(requestContext, Long.MAX_VALUE));
+                        assertThrows(java.util.concurrent.RejectedExecutionException.class, () -> timer.scheduleRequestDeadline(requestContext, Long.MAX_VALUE));
                     }
                 } catch (Throwable error) {
                     failure.set(error);

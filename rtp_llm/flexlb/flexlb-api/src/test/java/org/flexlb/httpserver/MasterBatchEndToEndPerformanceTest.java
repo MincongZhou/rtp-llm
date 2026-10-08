@@ -359,7 +359,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @BeforeEach
     void startMasterGrpcServer() throws Exception {
         publishDecodeCapacity(1_000_000_000L, 2_000_000_000L);
-        attachAcceptedBatchHandler(mockPrefillWorker);
+        registerAcceptedBatchCallback(mockPrefillWorker);
         simulatedStatusThread = new Thread(
                 this::applySimulatedCompletions, "flexlb-perf-engine-status");
         simulatedStatusThread.setDaemon(true);
@@ -843,7 +843,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 MockPrefillWorker worker = addPrefillWorker(
                         MockWorkerBehavior.builder().build(),
                         grpcPort);
-                attachAcceptedBatchHandler(worker);
+                registerAcceptedBatchCallback(worker);
             } else {
                 addLogicalPrefillEndpoint(additionalIndex + 1);
             }
@@ -992,7 +992,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
     }
 
-    private void attachAcceptedBatchHandler(MockPrefillWorker worker) {
+    private void registerAcceptedBatchCallback(MockPrefillWorker worker) {
         worker.getRpcService().onAcceptedBatch(batch -> {
             try {
                 for (var slot : batch.getDpSlotsList()) {

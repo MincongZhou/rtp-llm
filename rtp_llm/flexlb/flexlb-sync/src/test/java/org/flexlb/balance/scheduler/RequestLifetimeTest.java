@@ -406,9 +406,9 @@ class RequestLifetimeTest {
 
             if ("throw".equals(outcome)) {
                 assertSame(failure, assertThrows(IllegalStateException.class,
-                        () -> timer.attachRequestDeadline(context, 0L)));
+                        () -> timer.scheduleRequestDeadline(context, 0L)));
             } else {
-                var installed = timer.attachRequestDeadline(context, 0L);
+                var installed = timer.scheduleRequestDeadline(context, 0L);
                 if ("install".equals(outcome)) {
                     assertSame(exact.get(), installed);
                     verify(scheduler).onSchedulingDeadline(context, installed);
@@ -451,7 +451,7 @@ class RequestLifetimeTest {
                 // the timeout before claim would instead reject the handoff.
                 fixture.requestContext.configureInactivityTimeout(20L);
             }
-            assertNotNull(timer.attachInactivityDeadline(fixture.requestContext));
+            assertNotNull(timer.scheduleInactivityDeadline(fixture.requestContext));
             verify(registry, timeout(1000L).times(1)).enqueueInactivityDeadline(any(), any(), anyLong(), any());
             verify(registry, never()).cancel(anyLong(), anyLong(), any());
         }
@@ -485,7 +485,7 @@ class RequestLifetimeTest {
         Thread closer = null;
         try {
             fixture.requestContext.configureInactivityTimeout(20L);
-            assertNotNull(timer.attachInactivityDeadline(fixture.requestContext));
+            assertNotNull(timer.scheduleInactivityDeadline(fixture.requestContext));
             assertTrue(entered.await(5, TimeUnit.SECONDS));
             closer = new Thread(timer::close);
             closer.start();
@@ -533,7 +533,7 @@ class RequestLifetimeTest {
                 RequestProtocolTestSupport.startRouteDelivery(fixture.scheduler, fixture.requestContext);
                 RequestProtocolTestSupport.markAcknowledged(fixture.requestContext);
             }
-            assertNotNull(timer.attachInactivityDeadline(fixture.requestContext));
+            assertNotNull(timer.scheduleInactivityDeadline(fixture.requestContext));
             assertTrue(expired.await(1L, TimeUnit.SECONDS));
             assertEquals(2, checks.get(), "the renewed request must retain a timer for later silence");
         }

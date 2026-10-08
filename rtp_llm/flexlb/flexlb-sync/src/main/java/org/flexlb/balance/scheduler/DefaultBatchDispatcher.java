@@ -400,7 +400,7 @@ public class DefaultBatchDispatcher {
             invoked = true;
             var response = Objects.requireNonNull(grpcClient.batchEnqueueAsync(ip, port, request),
                     "EnqueueBatch client returned null future after invocation");
-            attachEnqueueBatchCompletionHandler(items, batchId, observer, response);
+            registerEnqueueBatchCallback(items, batchId, observer, response);
         } catch (Throwable failure) {
             logFailure("Batch dispatch failed", batchId, failure);
             publishResult(items, batchId,
@@ -408,8 +408,8 @@ public class DefaultBatchDispatcher {
         }
     }
 
-    /** Attach EnqueueBatch result publication and track callback completion for shutdown. */
-    private void attachEnqueueBatchCompletionHandler(List<RequestRoute> items, long batchId,
+    /** Register EnqueueBatch result publication and track callback completion for shutdown. */
+    private void registerEnqueueBatchCallback(List<RequestRoute> items, long batchId,
                                    BiConsumer<RequestRoute, DeliveryResult> observer,
                                    CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> response) {
         // The dispatch permit is still held: shutdown cannot pass this observer registration.

@@ -43,7 +43,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
             }
             CompletableFuture<Response> future = register(context, StrategyErrorType.BATCH_SLO_EXPIRED);
             if (!future.isDone()) {
-                this.expirationTimer().attachInactivityDeadline(context);
+                this.expirationTimer().scheduleInactivityDeadline(context);
                 dispatchRegistered(context);
             }
             return future;

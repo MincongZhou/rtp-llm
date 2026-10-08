@@ -59,7 +59,7 @@ class RequestSchedulerEntryTest {
         if (reporterFails) { doThrow(new IllegalStateException("reporter unavailable")).when(reporter).report(context); }
         var pending = new CompletableFuture<Response>();
         try {
-            owner.attachResponseCompletionHandler(context, pending);
+            owner.registerResponseCallback(context, pending);
             var response = new Response();
             response.setSuccess(true);
             pending.complete(response);

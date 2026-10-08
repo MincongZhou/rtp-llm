@@ -169,13 +169,13 @@ final class ExpirationTimer implements AutoCloseable {
      * @return its exact context-owned capability, or null when the context rejected
      *         installation because another lifecycle transition already won
      */
-    RequestDeadline attachRequestDeadline(BalanceContext context, long deadlineAtMs) {
+    RequestDeadline scheduleRequestDeadline(BalanceContext context, long deadlineAtMs) {
         return register(context, new RequestDeadline(), delayUntil(deadlineAtMs),
                 BalanceContext::installRequestDeadline, (requestContext, exact) -> requestContext.scheduler().onSchedulingDeadline(requestContext, exact));
     }
 
     // ── 可见性期限：计划、注册、触发与取消 ──
-    void attachDecisionDeadline(BalanceContext requestContext) {
+    void scheduleDecisionDeadline(BalanceContext requestContext) {
         OptionalLong deadline = requestContext.decisionDeadlineAtMs();
         if (deadline.isPresent()) {
             registerDecisionDeadline(requestContext, deadline.getAsLong());
@@ -203,7 +203,7 @@ final class ExpirationTimer implements AutoCloseable {
     }
 
     // ── 沉默期限：计划、注册与续期检查 ──
-    InactivityDeadline attachInactivityDeadline(BalanceContext context) {
+    InactivityDeadline scheduleInactivityDeadline(BalanceContext context) {
         if (requests.isClosed()) { return null; }
         OptionalLong deadline;
         synchronized (context) {
@@ -216,7 +216,7 @@ final class ExpirationTimer implements AutoCloseable {
     }
 
     private void inactivityDeadlineExpired(BalanceContext requestContext, InactivityDeadline exact) {
-        requestContext.scheduler().enqueueInactivityDeadline(requestContext, exact, clock.getAsLong(), () -> attachInactivityDeadline(requestContext));
+        requestContext.scheduler().enqueueInactivityDeadline(requestContext, exact, clock.getAsLong(), () -> scheduleInactivityDeadline(requestContext));
     }
 
     // ── 精确句柄：注册协议、调度与取消 ──

@@ -127,7 +127,7 @@ class RequestSchedulerContractTest {
         try (Fixture f = new Fixture(false)) {
             var request = f.context(901);
             var future = f.requests.register(request, StrategyErrorType.BATCH_SLO_EXPIRED);
-            f.requests.expirationTimer().attachInactivityDeadline(request);
+            f.requests.expirationTimer().scheduleInactivityDeadline(request);
             ExpirationTimer.InactivityDeadline deadline = RequestProtocolTestSupport.field(request, "inactivityDeadline");
             assertNotNull(deadline);
             f.scheduler.cancel(901, 0, CancelReason.CLIENT_CANCELLED);
@@ -465,7 +465,7 @@ class RequestSchedulerContractTest {
             var originalTimer = f.requests.expirationTimer();
             var timer = org.mockito.Mockito.spy(originalTimer);
             var failure = new IllegalStateException("expiry attachment failed");
-            doThrow(failure).when(timer).attachInactivityDeadline(context);
+            doThrow(failure).when(timer).scheduleInactivityDeadline(context);
             org.springframework.test.util.ReflectionTestUtils.setField(f.requests, "expirationTimer", timer);
             try {
                 assertSame(failure, assertThrows(IllegalStateException.class, handle::finish));

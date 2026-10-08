@@ -111,7 +111,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
         CompletableFuture<Response> future = registerRequest(context, expiredError);
         if (!(context.getFuture() instanceof BalanceContext.RequestFuture)) { context.setFuture(future); }
-        attachResponseCompletionHandler(context, future);
+        registerResponseCallback(context, future);
         return future;
     }
 
@@ -515,8 +515,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     ExpirationTimer expirationTimer() { return expirationTimer; }
 
-    /** Attach response recording and successful-route cache tracing to the response Future. */
-    void attachResponseCompletionHandler(BalanceContext context, CompletableFuture<Response> future) {
+    /** Register response recording and successful-route cache tracing on Future completion. */
+    void registerResponseCallback(BalanceContext context, CompletableFuture<Response> future) {
         future.whenComplete((response, failure) -> {
             if (failure != null) { return; }
             try {
@@ -602,7 +602,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 failure = settlementFailure;
             }
             // A failed settlement must not strand the expiry watch or the admission gate.
-            failure = Failures.run(failure, () -> expirationTimer.attachInactivityDeadline(ctx));
+            failure = Failures.run(failure, () -> expirationTimer.scheduleInactivityDeadline(ctx));
             // Drain must see the failure before the last admission gate opens.
             if (failure != null) {
                 runtime.recordFailure(failure);
@@ -687,7 +687,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             obsolete = applyDeliveryPredictionLocked(ctx, work, predictedMs, System.currentTimeMillis());
         }
         ExpirationTimer.releaseDecisionDeadline(obsolete);
-        expirationTimer.attachDecisionDeadline(ctx);
+        expirationTimer.scheduleDecisionDeadline(ctx);
     }
 
     public void publishRoute(DeliveryClaim claim, WorkSnapshot work, long predictedMs) {
@@ -1081,7 +1081,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     void executeEngineEffects(BalanceContext ctx, Runnable work, DecisionDeadline obsolete) {
         ExpirationTimer.releaseDecisionDeadline(obsolete);
-        Throwable failure = Failures.run(null, () -> expirationTimer.attachDecisionDeadline(ctx));
+        Throwable failure = Failures.run(null, () -> expirationTimer.scheduleDecisionDeadline(ctx));
         failure = Failures.run(failure, () -> execute(ctx, work));
         Failures.rethrow(failure, "request cleanup failed");
     }

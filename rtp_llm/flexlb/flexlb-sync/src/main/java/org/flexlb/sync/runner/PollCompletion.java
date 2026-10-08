@@ -14,7 +14,7 @@ final class PollCompletion {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
     private PollCompletion() { }
 
-    static <T> void attach(WorkerStatus.PollLease lease, Executor executor, String kind, String address,
+    static <T> void registerResultCallback(WorkerStatus.PollLease lease, Executor executor, String kind, String address,
                            CompletableFuture<T> response, BiConsumer<T, Throwable> callback) {
         response.handleAsync((value, failure) -> {
             try {

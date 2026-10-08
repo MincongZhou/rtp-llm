@@ -99,7 +99,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
             long currentCacheVersion = getCurrentCacheVersion();
 
-            PollCompletion.attach(pollLease, callbackExecutor, "Cache status", ipPort,
+            PollCompletion.registerResultCallback(pollLease, callbackExecutor, "Cache status", ipPort,
                     engineGrpcService.getCacheStatusAsync(workerStatus.getIp(), workerStatus.getGrpcPort(), workerStatus, currentCacheVersion,
                             requestTimeoutMs, roleType)
                     .thenApply(cacheStatusPB -> {

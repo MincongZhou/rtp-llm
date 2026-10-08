@@ -154,8 +154,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 onRegistered.run();
             }
             if (!future.isDone() && context.isOpen()) {
-                this.expirationTimer().attachRequestDeadline(context, context.getRequestExpiresAtMs());
-                this.expirationTimer().attachInactivityDeadline(context);
+                this.expirationTimer().scheduleRequestDeadline(context, context.getRequestExpiresAtMs());
+                this.expirationTimer().scheduleInactivityDeadline(context);
                 if (!trySubmitRegistered(context)) {
                     this.settleGlobalQueueClose(context.getRequestId(), future);
                 }

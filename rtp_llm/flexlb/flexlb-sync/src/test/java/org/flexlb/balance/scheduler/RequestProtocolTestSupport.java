@@ -138,8 +138,8 @@ final class RequestProtocolTestSupport {
         var future = owner.register(context, context.getConfig().isQueue()
                 ? StrategyErrorType.RESOURCE_EXHAUSTED : StrategyErrorType.BATCH_SLO_EXPIRED);
         if (context.scheduler() == owner && !future.isDone()) {
-            if (context.getConfig().isQueue()) { owner.expirationTimer().attachRequestDeadline(context, context.getRequestExpiresAtMs()); }
-            owner.expirationTimer().attachInactivityDeadline(context);
+            if (context.getConfig().isQueue()) { owner.expirationTimer().scheduleRequestDeadline(context, context.getRequestExpiresAtMs()); }
+            owner.expirationTimer().scheduleInactivityDeadline(context);
         }
         return future;
     }

@@ -52,7 +52,7 @@ class ExpirationTimerTest {
         var interrupted = new java.util.concurrent.atomic.AtomicBoolean();
         try (var executor = Executors.newFixedThreadPool(3)) {
             try {
-                var registration = executor.submit(() -> timer.attachRequestDeadline(context, Long.MAX_VALUE));
+                var registration = executor.submit(() -> timer.scheduleRequestDeadline(context, Long.MAX_VALUE));
                 assertTrue(installing.await(5, TimeUnit.SECONDS));
                 var first = executor.submit(() -> {
                     owner.set(Thread.currentThread());
@@ -61,7 +61,7 @@ class ExpirationTimerTest {
                 RequestProtocolTestSupport.awaitCondition(() -> owner.get() != null
                         && owner.get().getState() == Thread.State.WAITING);
                 assertThrows(java.util.concurrent.RejectedExecutionException.class,
-                        () -> timer.attachRequestDeadline(mock(BalanceContext.class), Long.MAX_VALUE));
+                        () -> timer.scheduleRequestDeadline(mock(BalanceContext.class), Long.MAX_VALUE));
                 var second = executor.submit(() -> {
                     waiter.set(Thread.currentThread());
                     Thread.currentThread().interrupt();
@@ -169,9 +169,9 @@ class ExpirationTimerTest {
         when(context.installInactivityDeadline(any())).thenAnswer(install);
         try {
             ExpirationTimer.DeadlineRegistration exact = switch (kind) {
-                case "REQUEST" -> timer.attachRequestDeadline(context, Long.MAX_VALUE);
+                case "REQUEST" -> timer.scheduleRequestDeadline(context, Long.MAX_VALUE);
                 case "DECISION" -> timer.registerDecisionDeadline(context, Long.MAX_VALUE);
-                case "INACTIVITY" -> timer.attachInactivityDeadline(context);
+                case "INACTIVITY" -> timer.scheduleInactivityDeadline(context);
                 default -> throw new AssertionError(kind);
             };
             assertEquals(installed, exact != null);
@@ -212,9 +212,9 @@ class ExpirationTimerTest {
             when(context.installInactivityDeadline(any())).thenReturn(true);
             when(context.inactivityDeadlineAtMs()).thenReturn(OptionalLong.of(Long.MAX_VALUE));
             timer = new ExpirationTimer(access);
-            var request = timer.attachRequestDeadline(context, Long.MAX_VALUE);
+            var request = timer.scheduleRequestDeadline(context, Long.MAX_VALUE);
             var decision = timer.registerDecisionDeadline(context, Long.MAX_VALUE);
-            var inactivity = timer.attachInactivityDeadline(context);
+            var inactivity = timer.scheduleInactivityDeadline(context);
             deadlines = new ExpirationTimer.DetachedDeadlines(request, decision, inactivity);
             requestTask = replaceTask(request);
             decisionTask = replaceTask(decision);
