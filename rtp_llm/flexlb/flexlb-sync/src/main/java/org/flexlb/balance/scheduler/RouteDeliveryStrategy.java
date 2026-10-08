@@ -1,8 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
@@ -13,7 +11,6 @@ import org.flexlb.balance.scheduler.BalanceContext.DeliveryClaim;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Failures;
 
-import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -21,9 +18,6 @@ import java.util.OptionalLong;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.math.LongMath.saturatedAdd;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.missingEndpoint;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.prepareMember;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollback;
 
 /** Individual route admission, ownership, publication, and projection. */
 public final class RouteDeliveryStrategy implements DeliveryStrategy {
@@ -43,60 +37,25 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs) {
         checkArgument(!candidates.isEmpty(), "route delivery requires at least one candidate");
-        RequestRoute head = candidates.get(0);
-        PrefillEndpoint prefill = head.prefillEp();
-        RouteTransaction transaction = new RouteTransaction(this, prefill, evaluator, candidates.size());
-        if (prefill == null) {
-            transaction.blockedItem = head;
-            transaction.blockedResult = CapacityBoundary.failed(missingEndpoint("Prefill", head));
-            transaction.phase = RouteTransaction.Phase.CLOSED;
-            return transaction;
-        }
-        Throwable failure = null;
-        try {
-            for (RequestRoute item : candidates) {
-                CapacityBoundary boundary = item.ctx().scheduler().prepareDispatch(item, transaction);
-                if (boundary != null) {
-                    transaction.blockedItem = item;
-                    transaction.blockedResult = boundary;
-                    break;
-                }
-            }
-            if (!transaction.prepared.isEmpty()) {
-                transaction.phase = RouteTransaction.Phase.PREPARED;
-            }
-            return transaction;
-        } catch (Throwable preparationFailure) {
-            failure = preparationFailure;
-            throw Failures.propagate(failure, "route delivery failed");
-        } finally {
-            if (transaction.phase != RouteTransaction.Phase.PREPARED) {
-                Throwable cleanup = Failures.close(transaction);
-                if (failure == null) {
-                    Failures.rethrow(cleanup, "route delivery failed");
-                } else {
-                    Failures.append(failure, cleanup);
-                }
-            }
-        }
+        return DeliveryTransaction.prepare(this, candidates, evaluator, plannedPredictionMs);
     }
 
-    private void deliver(
-            RouteTransaction transaction,
+    void deliver(
+            DeliveryTransaction transaction,
             int remainingQueueDepth,
             WorkSnapshot precedingWork) {
         Throwable deliveryFailure = null;
-        List<RequestRoute> delivered = new ArrayList<>(transaction.prepared.size());
-        List<ClaimedRoute> claimed = new ArrayList<>(transaction.prepared.size());
+        List<RequestRoute> delivered = new ArrayList<>(transaction.members.size());
+        List<ClaimedRoute> claimed = new ArrayList<>(transaction.members.size());
         PrefillState.CommittedHandoff handoff = transaction.takeCommitted();
         try {
-            for (int index = 0; index < transaction.prepared.size(); index++) {
-                var prepared = transaction.prepared.get(index);
-                RequestRoute item = prepared.item();
+            for (int index = 0; index < transaction.members.size(); index++) {
+                var member = transaction.members.get(index);
+                RequestRoute item = member.item();
                 DeliveryClaim claim;
                 try {
                     claim = item.ctx().scheduler().claimDelivery(item, DeliveryClaimKind.ROUTE_DECISION, 0L,
-                            prepared.member());
+                            member);
                 } catch (Throwable claimFailure) {
                     try {
                         item.ctx().scheduler().failDeliveryPreparation(item, claimFailure);
@@ -110,7 +69,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 if (claim == null) {
                     continue;
                 }
-                claimed.add(new ClaimedRoute(claim, prepared.predictedMs()));
+                claimed.add(new ClaimedRoute(claim, transaction.routePredictions[index]));
             }
             long unstartedWorkMs = 0L;
             for (ClaimedRoute route : claimed) {
@@ -156,124 +115,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     @Override
     public RouteProjection.DeliveryProjection projectionPolicy() {
         return PROJECTION;
-    }
-
-    /** One ordered list owns each prepared member and its frozen prediction. */
-    static final class RouteTransaction implements Transaction, PrefillAdmissionResources.Preparation {
-        private enum Phase { PREPARING, PREPARED, COMMITTED, CLOSED }
-
-        private record PreparedRoute(PrefillAdmissionResources.Member member,
-                long predictedMs) {
-            RequestRoute item() { return member.item(); }
-        }
-
-        private final RouteDeliveryStrategy owner;
-        private final PrefillEndpoint prefill;
-        private final ArrayList<PreparedRoute> prepared;
-        private final List<PrefillAdmissionResources.Member> members = new AbstractList<>() {
-            @Override public PrefillAdmissionResources.Member get(int index) { return prepared.get(index).member(); }
-            @Override public int size() { return prepared.size(); }
-        };
-        private final List<RequestRoute> items = new AbstractList<>() {
-            @Override public RequestRoute get(int index) { return prepared.get(index).item(); }
-            @Override public int size() { return prepared.size(); }
-        };
-        private RequestRoute blockedItem;
-        private CapacityBoundary blockedResult;
-        private Phase phase = Phase.PREPARING;
-        private PrefillState.CommittedHandoff committed;
-
-        private final PrefillTimePredictor.Evaluator evaluator;
-
-        private RouteTransaction(RouteDeliveryStrategy owner, PrefillEndpoint prefill, PrefillTimePredictor.Evaluator evaluator, int candidateCount) {
-            this.prepared = new ArrayList<>(candidateCount);
-            this.evaluator = evaluator;
-            this.owner = owner;
-            this.prefill = prefill;
-        }
-
-        public synchronized CapacityBoundary append(RequestRoute item) {
-            requirePhase(Phase.PREPARING);
-            long predictedMs = PrefillPredictionBoundary.predictSingleRequestMs(
-                        evaluator, item.seqLen(), item.hitCache());
-            PrefillAdmissionResources.Member member = null;
-            try {
-                var attempt = prepareMember(item);
-                if (!attempt.accepted()) { return attempt.boundary(); }
-                member = attempt.value();
-                prepared.add(new PreparedRoute(member, predictedMs));
-                return null;
-            } catch (Throwable failure) {
-                return CapacityBoundary.failed(rollback(member, failure));
-            }
-        }
-
-        @Override public List<RequestRoute> items() { return items; }
-        @Override public RequestRoute blockedItem() { return blockedItem; }
-        @Override public CapacityBoundary blockedResult() { return blockedResult; }
-
-        @Override
-        public synchronized PrefillState.WorkCapture commitLocked() {
-            requirePhase(Phase.PREPARED);
-            try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
-                if (routeCommit == null) { throw PrefillAdmissionResources.retired("Prefill", items.getFirst()); }
-                long[] predictions = new long[prepared.size()];
-                for (int index = 0; index < predictions.length; index++) {
-                    predictions[index] = prepared.get(index).predictedMs();
-                }
-                var handoff = routeCommit.commitQueuedLocked(items, predictions);
-                committed = handoff;
-                phase = Phase.COMMITTED;
-                return handoff.precedingWork();
-            }
-        }
-
-        private synchronized PrefillState.CommittedHandoff takeCommitted() {
-            requirePhase(Phase.COMMITTED);
-            phase = Phase.CLOSED;
-            var admission = committed;
-            committed = null;
-            return admission;
-        }
-
-        @Override
-        public void handoff(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork) {
-            owner.deliver(this, remainingQueueDepth,
-                    Objects.requireNonNull(precedingWork, "precedingWork"));
-        }
-
-        @Override
-        public void abort(Throwable cause) {
-            PrefillState.CommittedHandoff handoff;
-            synchronized (this) {
-                if (phase != Phase.COMMITTED) { return; }
-                handoff = takeCommitted();
-            }
-            Throwable failure = null;
-            try {
-                for (RequestRoute item : items) {
-                    failure = Failures.run(failure, () -> item.ctx().scheduler().failDeliveryPreparation(item, cause));
-                }
-            } finally {
-                PrefillAdmissionResources.closeCommitted(members, handoff);
-            }
-            Failures.rethrow(failure, "route delivery cleanup failed");
-        }
-
-        @Override
-        public void close() {
-            synchronized (this) {
-                if (phase != Phase.PREPARING && phase != Phase.PREPARED) { return; }
-                phase = Phase.CLOSED;
-            }
-            Throwable failure = null;
-            for (PreparedRoute route : prepared) { failure = rollback(route.member(), failure); }
-            Failures.rethrow(failure, "admission rollback failed");
-        }
-
-        private void requirePhase(Phase expected) {
-            if (phase != expected) { throw new IllegalStateException("expected " + expected + " route admission, was " + phase); }
-        }
     }
 
     private static final class RouteProjectionPolicy

@@ -360,7 +360,7 @@ class BatchDeliveryStrategyTest {
         Fixture fixture = new Fixture(701L);
         RequestRoute first = fixture.item(1L);
         RequestRoute late = fixture.item(2L);
-        try (var transaction = (BatchDeliveryStrategy.BatchTransaction) fixture.strategy.prepare(
+        try (var transaction = (DeliveryTransaction) fixture.strategy.prepare(
                 List.of(first), DeliveryStrategyTestSupport.EVALUATOR, OptionalLong.of(10L))) {
             assertEquals(List.of(first), transaction.items());
             assertThrows(UnsupportedOperationException.class, () -> transaction.items().set(0, late));
@@ -369,6 +369,39 @@ class BatchDeliveryStrategyTest {
         verify(fixture.capabilities.permit(first)).release();
         verify(fixture.capabilities.prefill()).rollbackReservation(fixture.capabilities.batchReservation());
         assertEquals(1, fixture.submission.closeCount());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedMemberCaptureReleasesItsPermitAndOtherPreparedResources(boolean cleanupFails) {
+        Fixture fixture = new Fixture(701L);
+        RequestRoute item = fixture.item(1L);
+        var primary = new IllegalStateException("member capture failed");
+        var cleanup = new IllegalStateException("permit cleanup failed");
+        doAnswer(invocation -> {
+            Object transaction = invocation.getArgument(1);
+            @SuppressWarnings("unchecked")
+            var members = org.mockito.Mockito.spy((java.util.ArrayList<PrefillAdmissionResources.Member>)
+                    org.springframework.test.util.ReflectionTestUtils.getField(transaction, "members"));
+            doAnswer(capture -> {
+                if (cleanupFails) { doThrow(cleanup).when(fixture.capabilities.permit(item)).release(); }
+                throw primary;
+            }).when(members).add(any());
+            org.springframework.test.util.ReflectionTestUtils.setField(transaction, "members", members);
+            return org.springframework.test.util.ReflectionTestUtils.invokeMethod(transaction, "append", item);
+        }).when(fixture.schedulerFixture.scheduler()).prepareDispatch(eq(item), any());
+
+        try (var transaction = fixture.strategy.prepare(List.of(item),
+                DeliveryStrategyTestSupport.EVALUATOR, OptionalLong.empty())) {
+            assertTrue(transaction.items().isEmpty());
+            assertSame(item, transaction.blockedItem());
+            assertSame(primary, transaction.blockedResult().cause());
+            assertEquals(cleanupFails ? List.of(cleanup) : List.of(), List.of(primary.getSuppressed()));
+        }
+        verify(fixture.capabilities.permit(item)).release();
+        verify(fixture.capabilities.permit(item), never()).dispatch();
+        verify(fixture.capabilities.prefill()).rollbackReservation(fixture.capabilities.batchReservation());
+        assertEquals(1, fixture.submission.totalCloseCount());
     }
 
     @ParameterizedTest

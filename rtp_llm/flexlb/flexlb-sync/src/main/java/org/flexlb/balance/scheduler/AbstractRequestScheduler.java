@@ -613,7 +613,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
      * Eligibility and preparation are one transaction; null means prepared, otherwise the result is the exact rejection.
      * The operation must not publish or call user code.
      */
-    public CapacityBoundary prepareDispatch(RequestRoute exact, PrefillAdmissionResources.Preparation prepare) {
+    public CapacityBoundary prepareDispatch(RequestRoute exact, DeliveryTransaction prepare) {
         BalanceContext ctx = exact.ctx();
         synchronized (ctx) {
             return ownsPreparedDeliveryLocked(ctx, exact) ? prepare.append(exact) : CapacityBoundary.OWNERSHIP_LOST;

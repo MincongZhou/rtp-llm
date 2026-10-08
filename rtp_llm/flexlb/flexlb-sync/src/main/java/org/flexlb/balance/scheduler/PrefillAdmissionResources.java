@@ -17,7 +17,7 @@ import static org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted;
 import static org.flexlb.balance.delivery.CapacityBoundary.Attempt.rejected;
 
 /**
- * Shared endpoint-capability mechanics for the two delivery transactions.
+ * Shared endpoint-capability mechanics for queued and direct delivery.
  *
  * <p>This class deliberately has no dispatcher selection logic. The active
  * transaction decides which Prefill reservation is prepared; this class owns the
@@ -33,11 +33,6 @@ final class PrefillAdmissionResources {
                     "DECODE_CAPACITY_SCOPE_UNKNOWN",
                     RoleType.DECODE);
     private PrefillAdmissionResources() {
-    }
-
-    interface Preparation {
-        /** Append the exact member; null means prepared, otherwise return its rejection. */
-        CapacityBoundary append(RequestRoute exact);
     }
 
     /** Immutable association; the exact Decode permit owns its resolution state. */

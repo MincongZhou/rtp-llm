@@ -298,7 +298,7 @@ final class RequestProtocolTestSupport {
     }
 
     static boolean prepareMember(AbstractRequestScheduler registry, RequestRoute item) {
-        var transaction = org.mockito.Mockito.mock(BatchDeliveryStrategy.BatchTransaction.class);
+        var transaction = org.mockito.Mockito.mock(DeliveryTransaction.class);
         org.mockito.Mockito.when(transaction.append(item)).thenReturn(null);
         return registry.prepareDispatch(item, transaction) == null;
     }

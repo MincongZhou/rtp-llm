@@ -496,11 +496,8 @@ class RequestContextLifecycleTest {
                 assertNull(item.ctx().route());
                 assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
             }
-            Runnable prepare = mock(Runnable.class);
-            var preparation = other.prepareDispatch(item, exact -> {
-                prepare.run();
-                throw new AssertionError("foreign scheduler prepared delivery");
-            });
+            var prepare = mock(DeliveryTransaction.class);
+            var preparation = other.prepareDispatch(item, prepare);
             assertSame(org.flexlb.balance.delivery.CapacityBoundary.OWNERSHIP_LOST, preparation);
             org.mockito.Mockito.verifyNoInteractions(prepare);
             assertNull(other.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 41L, RequestProtocolTestSupport.handoff(() -> {

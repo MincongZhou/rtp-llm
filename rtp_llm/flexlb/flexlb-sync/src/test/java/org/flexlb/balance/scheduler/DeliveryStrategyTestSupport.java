@@ -48,7 +48,7 @@ public final class DeliveryStrategyTestSupport {
     public static void stubRouteDelivery(AbstractRequestScheduler requests,
             java.util.function.BiConsumer<DeliveryClaim, DeliveryResult> completed) {
         Mockito.doAnswer(invocation ->
-                invocation.getArgument(1, PrefillAdmissionResources.Preparation.class).append(invocation.getArgument(0)))
+                invocation.getArgument(1, DeliveryTransaction.class).append(invocation.getArgument(0)))
                 .when(requests).prepareDispatch(Mockito.any(), Mockito.any());
         Mockito.doAnswer(invocation -> {
             if (!invocation.getArgument(3, PrefillAdmissionResources.Member.class).transferToEndpoint(invocation.getArgument(0))) { return null; }
@@ -289,7 +289,7 @@ public final class DeliveryStrategyTestSupport {
                 RequestRoute item = invocation.getArgument(0);
                 if (item == preparationLostFor) { return CapacityBoundary.OWNERSHIP_LOST; }
                 prepared.add(item);
-                return invocation.getArgument(1, PrefillAdmissionResources.Preparation.class).append(invocation.getArgument(0));
+                return invocation.getArgument(1, DeliveryTransaction.class).append(invocation.getArgument(0));
             }).when(scheduler).prepareDispatch(Mockito.any(), Mockito.any());
             Mockito.doAnswer(invocation -> claim(invocation.getArgument(0), invocation.getArgument(1),
                     invocation.getArgument(2), invocation.getArgument(3)))
