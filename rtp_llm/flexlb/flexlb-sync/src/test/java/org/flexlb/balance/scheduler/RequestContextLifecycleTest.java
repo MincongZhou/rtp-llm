@@ -459,7 +459,7 @@ class RequestContextLifecycleTest {
         assertNull(requestContext.activeRoute());
         assertTrue(requestContext.isOpen());
         assertTrue(requestContext.isLiveGeneration());
-        IllegalStateException failure = assertThrows(IllegalStateException.class, () -> org.springframework.test.util.ReflectionTestUtils.invokeMethod(requestContext, "recordCancellationLocked", CancelReason.CLIENT_CANCELLED, "client cancelled"));
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () -> org.springframework.test.util.ReflectionTestUtils.invokeMethod(lifecycle, "recordCancellationLocked", requestContext, CancelReason.CLIENT_CANCELLED, "client cancelled"));
         assertTrue(failure.getMessage().contains("requires context lock"));
         assertEquals(RequestState.Phase.QUEUED, requestContext.snapshot().state());
     }
@@ -803,7 +803,7 @@ class RequestContextLifecycleTest {
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         BalanceContext requestContext = lifecycle.findRequestContext(602L);
         synchronized (requestContext) {
-            requestContext.acceptPrefillStatus(registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL, org.flexlb.balance.endpoint.PrefillState.PrefillRequestStatus.active(registered.item()), System.currentTimeMillis());
+            requestContext.scheduler().acceptPrefillStatus(requestContext, registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL, org.flexlb.balance.endpoint.PrefillState.PrefillRequestStatus.active(registered.item()), System.currentTimeMillis());
         }
         lifecycle.cancel(602L, 0L, CancelReason.DEADLINE_EXCEEDED);
         assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).getRequestState(602L, 0L).state());
@@ -948,7 +948,7 @@ class RequestContextLifecycleTest {
         verify(source).reconcilePreemptionResources(21L, DecodeResources.PreemptionUpdate.finished(registered.item().decodeReservation()));
         assertTrue(claim.isFinished());
         assertEquals(RequestStage.FINISHED, context.stage());
-        assertTrue(claim.terminalObservation().toCompletableFuture().isDone());
+        assertTrue(claim.requestResolution().toCompletableFuture().isDone());
         assertNull(lifecycle.findRequestContext(707L));
         assertNull(context.preemption());
     }
@@ -985,7 +985,7 @@ class RequestContextLifecycleTest {
         verify(source).publishCapacityRelease();
         verify(source, org.mockito.Mockito.never()).release(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
         assertTrue(claim.isFinished());
-        assertTrue(claim.terminalObservation().toCompletableFuture().isDone());
+        assertTrue(claim.requestResolution().toCompletableFuture().isDone());
         assertEquals(RequestStage.FINISHED, context.stage());
         assertEquals(RequestState.Phase.COMPLETED, context.snapshot().state());
         assertNull(lifecycle.findRequestContext(711L));

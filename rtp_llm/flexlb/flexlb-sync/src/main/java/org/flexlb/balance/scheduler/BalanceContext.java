@@ -56,9 +56,8 @@ import static org.flexlb.dao.loadbalance.Response.buildSuccessResponse;
  * 不自行加锁，需要结合调用方的持锁范围阅读。volatile 字段不能替代复合操作的锁。
  * 输入及观测用 setter 不全部受此锁保护，应结合初始化与异步发布时机阅读。
  *
- * <p>通常在锁内确认状态和操作身份，再由 Scheduler 在锁外执行返回的 action/Runnable。
- * 本类也会调用 Scheduler 构造这些执行任务，以及查询 Endpoint 事实；Future 完成与
- * Endpoint 清理需遵循各自的锁外执行约定。
+ * <p>锁内记录请求事实、校验精确身份并原子选择响应和终态。Scheduler 组织 Endpoint
+ * 账本复验、容量通知和后续执行；Future 完成及资源清理在 context 锁外执行。
  */
 @ToString(onlyExplicitlyIncluded = true)
 public class BalanceContext {
@@ -655,9 +654,9 @@ public class BalanceContext {
 
     /**
      * 消费一次投递工作量预测，推算 Engine 可见性截止时间。
-     * 真实的 Prefill/Decode 证据优先于预测；返回的旧定时器交给调用方在锁外取消。
+     * 真实的 Prefill/Decode 证据优先于预测；这里只记录请求的预测事实。
      */
-    DecisionDeadline updateDeliveryPredictionLocked(WorkSnapshot precedingWork, long unstartedWorkMs, long nowMs) {
+    void recordDeliveryPredictionLocked(WorkSnapshot precedingWork, long unstartedWorkMs, long nowMs) {
         this.requireContextLock("delivery prediction consumption");
         Objects.requireNonNull(precedingWork, "precedingWork");
         checkArgument(unstartedWorkMs >= 0L, "unstarted work must be non-negative");
@@ -680,12 +679,6 @@ public class BalanceContext {
                 }
             }
         }
-        // Reconcile the exact reservation in this decision. Engine acceptance overrides the prediction.
-        if (this.route.decodeEp() != null && this.route.decodeEp().isAcceptedByEngine(this.route.decodeReservation())) {
-            this.lastWorkerStatusAtMs = Math.max(this.lastWorkerStatusAtMs, nowMs);
-            return this.markDecodeAcceptedLocked();
-        }
-        return null;
     }
 
     private void setDecisionDeadlineLocked(OptionalLong deadline) {
@@ -1561,6 +1554,33 @@ public class BalanceContext {
         return result;
     }
 
+    void recordPrefillProgressLocked(RoleType role, PrefillState.PrefillRequestStatus.Kind kind, long nowMs) {
+        requireContextLock("Prefill execution evidence");
+        if (kind == PrefillState.PrefillRequestStatus.Kind.ACTIVE) {
+            if (cleanup == null && !prefillObserved && !decodeAccepted && prefillCompletedAtMs == 0L) {
+                prefillObserved = true;
+                setDecisionDeadlineLocked(OptionalLong.empty());
+            }
+        } else if (kind == PrefillState.PrefillRequestStatus.Kind.COMPLETED && prefillCompletedAtMs == 0L) {
+            boolean separateDecode = role != RoleType.PDFUSION && route.decodeEp() != null;
+            prefillCompletedAtMs = nowMs;
+            if (!decodeAccepted) {
+                setDecisionDeadlineLocked(separateDecode && deliveryPredictionConsumed
+                        ? OptionalLong.of(deadlineAfter(nowMs, DECODE_HANDOFF_GRACE_MS)) : OptionalLong.empty());
+            }
+        }
+    }
+
+    DecisionDeadline recordDecodeObservationLocked(DecodeResources.DecodeRequestStatus.Kind kind, long nowMs) {
+        requireContextLock("Decode execution evidence");
+        observeWorker(nowMs);
+        if (cleanup != null) { return null; }
+        if (kind == DecodeResources.DecodeRequestStatus.Kind.ACTIVE) { return markDecodeAcceptedLocked(); }
+        setDecisionDeadlineLocked(OptionalLong.empty());
+        decodeAccepted = true;
+        return null;
+    }
+
     void observeWorker(long nowMs) {
         requireContextLock("worker observation");
         lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, nowMs);
@@ -1822,23 +1842,8 @@ public class BalanceContext {
         }
     }
 
-    boolean recordCancellationLocked(CancelReason reason, String message) {
-        this.requireContextLock("record cancellation");
-        Objects.requireNonNull(reason, "reason");
-        if (!this.ownsActiveGenerationLocked() || this.cancellationReason() != null) {
-            return false;
-        }
-        Map<String, Object> diagnostics = null;
-        if (reason == CancelReason.DEADLINE_EXCEEDED && this.queueOwner() != null) {
-            RequestRoute route = this.activeRoute();
-            if (this.deliveryClaimKind() != DeliveryClaimKind.NONE) {
-                diagnostics = Map.of("cause", message);
-            } else if (route != null && route.prefillEp() != null) {
-                diagnostics = route.prefillEp().getLatestQueueWaitSnapshot();
-            } else {
-                diagnostics = this.queueOwner().getLatestQueueWaitSnapshot();
-            }
-        }
+    void recordCancellationLocked(CancelReason reason, String message, Map<String, Object> diagnostics) {
+        requireContextLock("cancellation facts");
         if (reason == CancelReason.DEADLINE_EXCEEDED && queueOwner() != null) {
             cancellationResponse = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
                     AdmissionRejectReason.RESOURCE_EXHAUSTED, String.valueOf(diagnostics.get("cause")));
@@ -1849,237 +1854,9 @@ public class BalanceContext {
         cancellationReason = reason;
         detail = message;
         updatedAtMs = System.currentTimeMillis();
-        return true;
     }
 
-    Runnable acceptPrefillStatus(PrefillEndpoint source, RoleType role,
-                                 PrefillState.PrefillRequestStatus requestStatus, long nowMs) {
-        Runnable work;
-        DecisionDeadline obsolete;
-        boolean resume;
-        RequestRoute routeToCancel;
-        synchronized (this) {
-            if (!this.ownsPrefillRouteLocked(source, requestStatus.route())) {
-                return null;
-            }
-            PreemptionRegistration previous = this.preemption();
-            boolean cleaning = this.hasCleanup();
-            work = applyPrefillStatusLocked(role, requestStatus, nowMs);
-            obsolete = cleaning ? null : this.detachObsoleteDecisionDeadlineLocked();
-            resume = previous != null && this.preemption() == null && this.hasCleanup() && work == null;
-            routeToCancel = previous == null ? null : pendingWorkerQueueCancellationLocked();
-            if (work == null && obsolete == null && !resume && routeToCancel == null
-                    && decisionDeadlineAtMs().isEmpty()) {
-                return null;
-            }
-        }
-        return () -> {
-            if (resume) {
-                scheduler.resumeCleanup(this);
-            } else {
-                scheduler.executeEngineEffects(this, work, obsolete);
-            }
-            if (routeToCancel != null) {
-                scheduler.scheduleWorkerQueueCancellation(this, routeToCancel);
-            }
-        };
-    }
-
-    private Runnable applyPrefillStatusLocked(RoleType role, PrefillState.PrefillRequestStatus requestStatus, long nowMs) {
-        this.requireContextLock("Prefill request status reduction");
-        this.observeWorker(nowMs);
-        boolean cleaning = this.hasCleanup();
-        if (cleaning && requestStatus.kind() != PrefillState.PrefillRequestStatus.Kind.ACTIVE) {
-            this.recordCleanupSettlement(true, false, false);
-            PreemptionRegistration claim = this.preemption();
-            if (requestStatus.kind() != PrefillState.PrefillRequestStatus.Kind.PRIORITY_CANCELED
-                    || claim == null || claim.isFinished()) {
-                return () -> scheduler.resumeCleanup(this);
-            }
-        }
-        DecodeEndpoint capacityRelease = null;
-        Runnable transition = switch(requestStatus.kind()) {
-            case ACTIVE ->
-                {
-                    if (cleanup == null && !prefillObserved && !decodeAccepted && prefillCompletedAtMs == 0L) {
-                        prefillObserved = true;
-                        setDecisionDeadlineLocked(OptionalLong.empty());
-                    }
-
-                    PreemptionRegistration claim = this.preemption();
-                    if (claim != null && claim.isNotFound()) {
-                        DecodeEndpoint decode = requestStatus.route().decodeEp();
-                        if (decode == null || decode.reconcilePreemptionResources(claim.attemptToken(),
-                                DecodeResources.PreemptionUpdate.active(requestStatus.route().decodeReservation()))) {
-                            this.detachPreemptionOwnerLocked(claim);
-                            capacityRelease = decode;
-                            yield cleaning ? () -> scheduler.resumeCleanup(this) : null;
-                        }
-                    }
-                    yield null;
-                }
-            case COMPLETED ->
-                {
-                    if (prefillCompletedAtMs == 0L) {
-                        boolean separateDecode = role != RoleType.PDFUSION && route.decodeEp() != null;
-                        prefillCompletedAtMs = nowMs;
-                        if (!decodeAccepted) {
-                            setDecisionDeadlineLocked(separateDecode && deliveryPredictionConsumed
-                                    ? OptionalLong.of(deadlineAfter(nowMs, DECODE_HANDOFF_GRACE_MS)) : OptionalLong.empty());
-                        }
-                    }
-
-                    yield role == RoleType.PDFUSION ? this.processRequestEndLocked(requestStatus.route(), DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, true, requestStatus.errorCode())) : null;
-                }
-            case FAILED ->
-                this.processRequestEndLocked(requestStatus.route(), DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, false, requestStatus.errorCode()));
-            case PRIORITY_CANCELED -> {
-                PreemptionRegistration claim = this.preemption();
-                DecodeEndpoint decode = requestStatus.route().decodeEp();
-                if (claim == null || !claim.canAcceptPriorityTerminal() || decode == null || requestStatus.route().decodeReservation() == null
-                        || !decode.reconcilePreemptionResources(claim.attemptToken(),
-                                DecodeResources.PreemptionUpdate.canceled(requestStatus.route().decodeReservation()))) {
-                    yield null;
-                }
-                capacityRelease = decode;
-                claim.tryFinish();
-                yield this.finishPreemptedRequestLocked(claim, "priority victim canceled by worker", true);
-            }
-        };
-        if (!cleaning) { this.reconcileDecisionEvidenceLocked(); }
-        if (capacityRelease == null) { return transition; }
-        DecodeEndpoint source = capacityRelease;
-        return () -> {
-            Throwable failure = Failures.run(null, source::publishCapacityRelease);
-            failure = Failures.run(failure, transition);
-            Failures.rethrow(failure, "Prefill request status continuation failed");
-        };
-    }
-
-    Runnable acceptDecodeStatus(DecodeEndpoint source, DecodeResources.DecodeRequestStatus requestStatus, long nowMs) {
-        Runnable work = null;
-        DecisionDeadline obsolete = null;
-        boolean capacityChanged = false;
-        synchronized (this) {
-            if (!this.ownsDecodeReservationLocked(source, requestStatus.reservation())) {
-                return null;
-            }
-            this.observeWorker(nowMs);
-            if (requestStatus.kind() == DecodeResources.DecodeRequestStatus.Kind.TERMINAL) {
-                if (!this.hasCleanup()) {
-                    setDecisionDeadlineLocked(OptionalLong.empty());
-                    decodeAccepted = true;
-                }
-                work = this.processRequestEndLocked(this.route(), DeferredTerminal.worker(
-                        WorkerTerminalSource.DECODE_ENDPOINT, requestStatus.errorCode() == 0L, requestStatus.errorCode()));
-                obsolete = this.detachObsoleteDecisionDeadlineLocked();
-            } else {
-                // Membership and allocation remain separate facts. Only allocation reconciles a NOT_FOUND claim.
-                if (!this.hasCleanup()) { obsolete = this.markDecodeAcceptedLocked(); }
-                PreemptionRegistration claim = this.preemption();
-                if (requestStatus.allocationObserved() && claim != null && claim.isNotFound()) {
-                    DeferredTerminal terminal = claim.pendingTerminal();
-                    capacityChanged = source.reconcilePreemptionResources(claim.attemptToken(), terminal == null
-                            ? DecodeResources.PreemptionUpdate.active(requestStatus.reservation())
-                            : DecodeResources.PreemptionUpdate.finished(requestStatus.reservation()));
-                    if (capacityChanged) {
-                        if (this.hasCleanup()) {
-                            if (terminal != null) {
-                                // Finalization retains this owner until the request's terminal observation is published.
-                                claim.tryFinish();
-                                this.recordCleanupSettlement(false, true, false);
-                            } else {
-                                this.detachPreemptionOwnerLocked(claim);
-                            }
-                            work = () -> scheduler.resumeCleanup(this);
-                        } else {
-                            this.detachPreemptionOwnerLocked(claim);
-                            if (terminal != null) {
-                                claim.tryFinish();
-                                TerminalAction action = this.decideRequestEndLocked(terminal,
-                                        () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL));
-                                if (action != null) { this.recordCleanupSettlement(false, true, false); }
-                                work = scheduler.finalizationEffects(action, claim);
-                            } else if (claim.hasPendingDeliveryConfirmation()) {
-                                work = this.acknowledgeDeliveryLocked(claim);
-                            }
-                        }
-                    }
-                }
-            }
-            if (requestStatus.kind() == DecodeResources.DecodeRequestStatus.Kind.ACTIVE
-                    && work == null && obsolete == null && !capacityChanged
-                    && decisionDeadlineAtMs().isEmpty()) {
-                return null;
-            }
-        }
-        Runnable effect = work;
-        DecisionDeadline deadline = obsolete;
-        boolean publishCapacity = capacityChanged;
-        return () -> {
-            Throwable notificationFailure = publishCapacity ? Failures.run(null, source::publishCapacityRelease) : null;
-            try {
-                DeliveryClaim delivery = this.delivery();
-                if (delivery != null) { delivery.observeDecodeSettlement(source, requestStatus); }
-                scheduler.executeEngineEffects(this, effect, deadline);
-            } catch (Throwable failure) {
-                throw Failures.propagate(Failures.append(failure, notificationFailure), "Decode request status continuation failed");
-            }
-            Failures.rethrow(notificationFailure, "Decode capacity publication failed");
-        };
-    }
-
-    /**
-     * 选路/撤回结束后消费暂存事实：权威 Worker 终态优先，再处理退休、失败或取消。
-     * 返回的执行任务由调用方在 context 锁外运行。
-     */
-    Runnable settleAdmissionLocked(AdmissionHandle operation, Response failure) {
-        this.requireContextLock("admission settlement");
-        CancelReason pendingCancellation = this.cancellationReason();
-        AdmissionResult retained = this.consumeAdmissionFacts(operation);
-        boolean inactive = retained.inactive();
-        DeferredTerminal pending = retained.terminal();
-        PendingPrefillRetirement retirement = retained.retirement();
-        if (this.route() == null && pending != null && pending.kind() == DeferredTerminal.Kind.FAILURE) {
-            if (failure == null) {
-                failure = buildErrorResponse(pending.errorType(), pending.detail());
-            }
-            pending = null;
-        }
-        if (this.retainCleanupFacts(inactive, pending)) {
-            return null;
-        }
-        // Authoritative completion takes precedence over retirement and admission failure.
-        if (pending != null && pending.authoritativeWorker()) {
-            return this.processRequestEndLocked(this.route(), pending);
-        }
-        TerminalAction retired = this.claimPrefillRetirementLocked(retirement);
-        if (retired != null) {
-            return scheduler.finalizationEffects(retired, null);
-        }
-        if (inactive && pendingCancellation != null) {
-            return scheduler.finalizationEffects(this.decideRequestEndLocked(DeferredTerminal.inactivityExpired("REQUEST_INACTIVE: no matching Engine request status before inactivity timeout"), () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)), null);
-        }
-        Runnable effect = null;
-        if (pending != null) {
-            effect = this.processRequestEndLocked(this.route(), pending);
-        } else if (failure != null) {
-            String message = pendingCancellation != null ? pendingCancellation.getMessage() : failure.getErrorMessage() == null ? "eviction admission failed" : failure.getErrorMessage();
-            TerminalOutcome outcome = pendingCancellation == null ? TerminalOutcome.fail(message) : TerminalOutcome.cancellation(pendingCancellation, message);
-            Response response = pendingCancellation == null ? failure : Response.copyOf(this.cancellationResponse());
-            effect = scheduler.finalizationEffects(this.claimFinalizationLocked(null, outcome, response, true, () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)), null);
-        }
-        if (effect != null || pendingCancellation == null || !this.ownsActiveGenerationLocked()) {
-            return effect;
-        }
-        if (!inactive && pendingWorkerQueueCancellationLocked() != null) {
-            return effect;
-        }
-        TerminalAction cancelled = pendingCancellation == CancelReason.DEADLINE_EXCEEDED || this.requestInactiveLocked(System.currentTimeMillis()) ? this.decideRequestEndLocked(DeferredTerminal.inactivityExpired(pendingCancellation.getMessage()), () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)) : this.tryTerminateCancellationLocked(() -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL));
-        return cancelled == null ? effect : scheduler.finalizationEffects(cancelled, null);
-    }
-
-    TerminalAction claimPrefillRetirementLocked(PendingPrefillRetirement pending) {
+    TerminalAction claimPrefillRetirementLocked(PendingPrefillRetirement pending, Supplier<PublicationPermit> publication) {
         this.requireContextLock("Prefill retirement");
         if (pending == null || !this.ownsPrefillRouteLocked(pending.source(), pending.item()) || this.decodeAccepted() || this.preemption() != null || this.deliveryClaimKind().isClaimed()) {
             return null;
@@ -2089,155 +1866,16 @@ public class BalanceContext {
             return null;
         }
         TerminalAction action = this.cancellationReason() != null && this.deliveryClaimKind() == DeliveryClaimKind.NONE
-                ? this.tryTerminateCancellationLocked(() -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)) : null;
+                ? this.tryTerminateCancellationLocked(publication) : null;
         if (action == null) {
             action = this.claimFinalizationLocked(null, TerminalOutcome.fail(pending.detail()),
                     buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, pending.detail()), true,
-                    () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL));
+                    publication);
         }
         if (action != null) { this.recordCleanupSettlement(true, false, false); }
         return action;
     }
 
-    Runnable decideInactivityLocked(long nowMs, PreemptionRegistration signal) {
-        if (this.expireCleanup(nowMs)) {
-            return () -> scheduler.resumeCleanup(this);
-        }
-        if (!this.ownsActiveGenerationLocked() || !this.requestInactiveLocked(nowMs)) {
-            return null;
-        }
-        String message = "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout";
-        this.recordCancellationLocked(CancelReason.DEADLINE_EXCEEDED, message);
-        if (this.admission() != null) {
-            this.retainAdmissionExpiry();
-            return null;
-        }
-        return scheduler.finalizationEffects(this.decideRequestEndLocked(DeferredTerminal.inactivityExpired(message), () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)), signal);
-    }
-
-    /**
-     * 先校验 route 身份，再按清理、admission、抢占所有权决定立即处理还是暂存事件。
-     * Worker 权威终态也可用于 FINALIZING 的资源结算；旧 route 的事件不影响当前请求。
-     */
-    Runnable processRequestEndLocked(RequestRoute expected, DeferredTerminal event) {
-        this.requireContextLock("request end");
-        boolean workerProof = event.authoritativeWorker();
-        if (expected == null || !this.ownsResourceTrackingLocked() || this.route() != expected || !workerProof && !this.ownsActiveRoute(expected)) {
-            return null;
-        }
-        if (this.hasCleanup()) {
-            if (event.decodeTerminalAlreadyApplied() || event.endpointAlreadyRetired()) {
-                this.recordCleanupSettlement(false, true, true);
-            } else {
-                this.recordCleanupSettlement(true, false, false);
-            }
-            return () -> scheduler.resumeCleanup(this);
-        }
-        if (this.admission() != null) {
-            this.retainAdmissionTerminalLocked(event);
-            return null;
-        }
-        PreemptionRegistration exact = this.preemption();
-        if (exact == null) {
-            return scheduler.finalizationEffects(this.decideRequestEndLocked(event, () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)), null);
-        }
-        if (event.endpointAlreadyRetired()) {
-            this.retainPreemptionTerminalLocked(exact, event);
-            exact.tryFinish();
-            this.detachPreemptionOwnerLocked(exact);
-            return scheduler.finalizationEffects(this.decideRequestEndLocked(event, () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)), exact);
-        }
-        if (exact.isFinished()) {
-            return null;
-        }
-        this.retainPreemptionTerminalLocked(exact, event);
-        if (!workerProof && !exact.isNotFound() && !exact.isUnknown()) {
-            return null;
-        }
-        return this.processPendingEventsUnderPreemptionLocked(exact, !workerProof && exact.isUnknown(), exact);
-    }
-
-    Runnable processPendingEventsUnderPreemptionLocked(PreemptionRegistration exact, boolean transportUnknown, PreemptionRegistration signal) {
-        this.requireContextLock("pending preemption facts");
-        DeferredTerminal terminal = exact.pendingTerminal();
-        boolean terminalWins = terminal != null && (!transportUnknown || terminal.authoritativeWorker());
-        if (!terminalWins && (transportUnknown || !exact.hasPendingDeliveryConfirmation())) {
-            return null;
-        }
-        RequestRoute active = this.activeRoute();
-        DecodeEndpoint decode = active == null ? null : active.decodeEp();
-        // Decode terminal facts already committed its ledger; all other evidence must reconcile it first.
-        boolean capacityChanged = decode != null && !(terminalWins && terminal.decodeTerminalAlreadyApplied());
-        if (capacityChanged && !decode.reconcilePreemptionResources(exact.attemptToken(), terminalWins
-                        ? DecodeResources.PreemptionUpdate.finished(active.decodeReservation())
-                        : DecodeResources.PreemptionUpdate.active(active.decodeReservation()))) {
-            return null;
-        }
-        if (terminalWins) { exact.tryFinish(); }
-        this.detachPreemptionOwnerLocked(exact);
-        TerminalAction action = terminalWins ? this.decideRequestEndLocked(terminal,
-                () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL)) : null;
-        if (action != null && capacityChanged) { this.recordCleanupSettlement(false, true, false); }
-        Runnable work = terminalWins
-                ? scheduler.finalizationEffects(action, signal)
-                : this.acknowledgeDeliveryLocked(signal);
-        if (!capacityChanged) { return work; }
-        return () -> {
-            Throwable failure = Failures.run(null, decode::publishCapacityRelease);
-            failure = Failures.run(failure, work);
-            Failures.rethrow(failure, "preemption continuation failed");
-        };
-    }
-
-    Runnable finishPreemptedRequestLocked(PreemptionRegistration exact,
-                                                  String detail, boolean prefillSettled) {
-        if (this.hasCleanup()) {
-            this.recordCleanupSettlement(prefillSettled, true, false);
-            return () -> scheduler.resumeCleanup(this);
-        }
-        DeferredTerminal terminal = DeferredTerminal.priority(detail);
-        this.retainPreemptionTerminalLocked(exact, terminal);
-        this.detachPreemptionOwnerLocked(exact);
-        TerminalAction action = this.decideRequestEndLocked(terminal,
-                () -> scheduler.requirePublicationPermitLocked(this, PublicationKind.TERMINAL));
-        if (action != null) { this.recordCleanupSettlement(prefillSettled, true, false); }
-        return scheduler.finalizationEffects(action, exact);
-    }
-
-    Runnable acknowledgeDeliveryLocked(PreemptionRegistration signal) {
-        this.requireContextLock("delivery acknowledgement");
-        if (this.route() == null || !this.ownsActiveRoute(this.route())) {
-            return null;
-        }
-        this.confirmDelivery();
-        if (this.cancellationReason() != null) {
-            return null;
-        }
-        PreemptionRegistration blocked = this.preemption();
-        if (blocked != null) {
-            if (blocked.isFinished()) {
-                return null;
-            }
-            blocked.recordDeliveryConfirmation();
-            return this.processPendingEventsUnderPreemptionLocked(blocked, false, null);
-        }
-        if (this.deliveryAcknowledged()) {
-            return null;
-        }
-        // A delayed timer continuation cannot let an expired silent request publish a late ACK.
-        long nowMs = System.currentTimeMillis();
-        if (this.requestInactiveLocked(nowMs)) {
-            return this.decideInactivityLocked(nowMs, signal);
-        }
-        PublicationPermit permit = scheduler.requirePublicationPermitLocked(this, PublicationKind.DELIVERY);
-        try {
-            DeliveryPublication publication = this.acknowledgeDelivery(permit, nowMs);
-            return scheduler.deliveryEffects(this, publication, signal);
-        } catch (RuntimeException | Error failure) {
-            permit.abandonIfUnused();
-            throw failure;
-        }
-    }
 }
 
 record DeferredTerminal(Kind kind, StrategyErrorType errorType, String detail, WorkerTerminalSource workerSource, boolean workerSuccessful, long workerErrorCode) {

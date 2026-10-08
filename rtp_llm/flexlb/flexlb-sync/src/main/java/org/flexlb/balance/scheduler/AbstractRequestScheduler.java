@@ -8,9 +8,10 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
-import org.flexlb.balance.preemption.VictimTerminal;
+import org.flexlb.balance.preemption.VictimResolution;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.BalanceContext.AdmissionHandle;
+import org.flexlb.balance.scheduler.BalanceContext.AdmissionResult;
 import org.flexlb.balance.scheduler.BalanceContext.CleanupNext;
 import org.flexlb.balance.scheduler.BalanceContext.CleanupPass;
 import org.flexlb.balance.scheduler.BalanceContext.DeliveryClaim;
@@ -37,6 +38,7 @@ import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -210,7 +212,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                 PrefillState.PrefillRequestStatus requestStatus) {
         try {
             if (context != null && context.scheduler() == this) {
-                submitContinuation(context, context.acceptPrefillStatus(source, role, requestStatus, System.currentTimeMillis()));
+                submitContinuation(context, acceptPrefillStatus(context, source, role, requestStatus, System.currentTimeMillis()));
             }
         } catch (Throwable failure) {
             logEndpointFailure("Prefill status", failure);
@@ -221,7 +223,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                DecodeResources.DecodeRequestStatus requestStatus) {
         try {
             if (context != null && context.scheduler() == this) {
-                submitContinuation(context, context.acceptDecodeStatus(source, requestStatus, System.currentTimeMillis()));
+                submitContinuation(context, acceptDecodeStatus(context, source, requestStatus, System.currentTimeMillis()));
             }
         } catch (Throwable failure) {
             logEndpointFailure("Decode status", failure);
@@ -287,7 +289,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 Runnable work;
                 synchronized (context) {
                     work = context.ownsDecodeReservationLocked(source, exact)
-                            ? context.processRequestEndLocked(context.route(), DeferredTerminal.decodeGenerationRetired(
+                            ? advanceRequestEndLocked(context, context.route(), DeferredTerminal.decodeGenerationRetired(
                                     "Decode endpoint generation retired: generation=" + exact.endpointGenerationId()))
                             : null;
                 }
@@ -300,7 +302,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         Runnable effect;
         synchronized (ctx) {
             if (!ctx.consumeInactivityDeadlineLocked(exact)) { return; }
-            effect = ctx.decideInactivityLocked(nowMs, null);
+            effect = decideInactivityLocked(ctx, nowMs, null);
         }
         continuations.submit(ctx, () -> {
             try { execute(ctx, effect); }
@@ -583,7 +585,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 synchronized (ctx) {
                     if (ctx.admission() == exact) {
                         restoredRoute = ctx.finishAdmission(exact);
-                        effect = ctx.settleAdmissionLocked(exact, failureResponse);
+                        effect = settleRoutingFactsLocked(ctx, exact, failureResponse);
                     }
                     cleanupPending = ctx.hasCleanup();
                     routeToCancel = cleanupPending || effect != null ? null : ctx.pendingWorkerQueueCancellationLocked();
@@ -638,9 +640,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             // lag, so an unconsumed timer is not proof that this item is live.
             long nowMs = System.currentTimeMillis();
             if (ctx.requestInactiveLocked(nowMs)) {
-                expired = ctx.decideInactivityLocked(nowMs, null);
+                expired = decideInactivityLocked(ctx, nowMs, null);
             } else if (exact.requestExpired(nowMs)) {
-                ctx.recordCancellationLocked(CancelReason.DEADLINE_EXCEEDED, "request scheduling deadline exceeded before delivery");
+                recordCancellationLocked(ctx, CancelReason.DEADLINE_EXCEEDED, "request scheduling deadline exceeded before delivery");
                 expired = finalizationEffects(ctx.tryTerminateCancellationLocked(() -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), null);
             } else {
                 if (!handoff.transferToEndpoint(exact)) {
@@ -663,6 +665,16 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return isCurrentContext(ctx) && ctx.ownsPreparedDeliveryLocked(exact);
     }
 
+    private DecisionDeadline applyDeliveryPredictionLocked(BalanceContext ctx, WorkSnapshot work, long predictedMs, long nowMs) {
+        ctx.recordDeliveryPredictionLocked(work, predictedMs, nowMs);
+        RequestRoute route = ctx.route();
+        if (route.decodeEp() != null && route.decodeEp().isAcceptedByEngine(route.decodeReservation())) {
+            ctx.observeWorker(nowMs);
+            return ctx.markDecodeAcceptedLocked();
+        }
+        return null;
+    }
+
     public void setDeliveryPrediction(DeliveryClaim claim, WorkSnapshot work, long predictedMs) {
         BalanceContext ctx = claim.item.ctx();
         DecisionDeadline obsolete;
@@ -670,7 +682,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (!ctx.ownsActiveRoute(claim.item)) {
                 return;
             }
-            obsolete = ctx.updateDeliveryPredictionLocked(work, predictedMs, System.currentTimeMillis());
+            obsolete = applyDeliveryPredictionLocked(ctx, work, predictedMs, System.currentTimeMillis());
         }
         ExpirationTimer.releaseDecisionDeadline(obsolete);
         expirationTimer.attachDecisionDeadline(ctx);
@@ -686,8 +698,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             checkArgument(ctx.deliveryClaimKind() == DeliveryClaimKind.ROUTE_DECISION,
                     "route publication requires a route claim");
-            obsolete = ctx.updateDeliveryPredictionLocked(work, predictedMs, System.currentTimeMillis());
-            effect = ctx.acknowledgeDeliveryLocked(null);
+            obsolete = applyDeliveryPredictionLocked(ctx, work, predictedMs, System.currentTimeMillis());
+            effect = acknowledgeDeliveryLocked(ctx, null);
         }
         claim.completeRoute();
         executeEngineEffects(ctx, effect, obsolete);
@@ -714,7 +726,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 ctx.markAwaitingConfirmationLocked("Delivery outcome uncertain: " + detailOf(result.cause()));
                 return null;
             }
-            acknowledgement = ctx.acknowledgeDeliveryLocked(null);
+            acknowledgement = acknowledgeDeliveryLocked(ctx, null);
         }
         return acknowledgement == null ? null : () -> execute(ctx, acknowledgement);
     }
@@ -747,6 +759,345 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     // ── Worker 事实与 Endpoint 退出：接收、核验、推进 ──
 
+    Runnable acceptPrefillStatus(BalanceContext ctx, PrefillEndpoint source, RoleType role,
+                                 PrefillState.PrefillRequestStatus requestStatus, long nowMs) {
+        Runnable work;
+        DecisionDeadline obsolete;
+        boolean resume;
+        RequestRoute routeToCancel;
+        synchronized (ctx) {
+            if (!ctx.ownsPrefillRouteLocked(source, requestStatus.route())) {
+                return null;
+            }
+            PreemptionRegistration previous = ctx.preemption();
+            boolean cleaning = ctx.hasCleanup();
+            work = applyPrefillStatusLocked(ctx, role, requestStatus, nowMs);
+            obsolete = cleaning ? null : ctx.detachObsoleteDecisionDeadlineLocked();
+            resume = previous != null && ctx.preemption() == null && ctx.hasCleanup() && work == null;
+            routeToCancel = previous == null ? null : ctx.pendingWorkerQueueCancellationLocked();
+            if (work == null && obsolete == null && !resume && routeToCancel == null
+                    && ctx.decisionDeadlineAtMs().isEmpty()) {
+                return null;
+            }
+        }
+        return () -> {
+            if (resume) {
+                resumeCleanup(ctx);
+            } else {
+                executeEngineEffects(ctx, work, obsolete);
+            }
+            if (routeToCancel != null) {
+                scheduleWorkerQueueCancellation(ctx, routeToCancel);
+            }
+        };
+    }
+
+    private Runnable applyPrefillStatusLocked(BalanceContext ctx, RoleType role, PrefillState.PrefillRequestStatus requestStatus, long nowMs) {
+        ctx.requireContextLock("Prefill request status reduction");
+        ctx.observeWorker(nowMs);
+        boolean cleaning = ctx.hasCleanup();
+        if (cleaning && requestStatus.kind() != PrefillState.PrefillRequestStatus.Kind.ACTIVE) {
+            ctx.recordCleanupSettlement(true, false, false);
+            PreemptionRegistration claim = ctx.preemption();
+            if (requestStatus.kind() != PrefillState.PrefillRequestStatus.Kind.PRIORITY_CANCELED
+                    || claim == null || claim.isFinished()) {
+                return () -> resumeCleanup(ctx);
+            }
+        }
+        ctx.recordPrefillProgressLocked(role, requestStatus.kind(), nowMs);
+        DecodeEndpoint capacityRelease = null;
+        Runnable transition = switch(requestStatus.kind()) {
+            case ACTIVE -> {
+                    PreemptionRegistration claim = ctx.preemption();
+                    if (claim != null && claim.isNotFound()) {
+                        DecodeEndpoint decode = requestStatus.route().decodeEp();
+                        if (decode == null || decode.reconcilePreemptionResources(claim.attemptToken(),
+                                DecodeResources.PreemptionUpdate.active(requestStatus.route().decodeReservation()))) {
+                            ctx.detachPreemptionOwnerLocked(claim);
+                            capacityRelease = decode;
+                            yield cleaning ? () -> resumeCleanup(ctx) : null;
+                        }
+                    }
+                    yield null;
+                }
+            case COMPLETED -> role == RoleType.PDFUSION
+                    ? advanceRequestEndLocked(ctx, requestStatus.route(), DeferredTerminal.worker(
+                            WorkerTerminalSource.PREFILL_ENDPOINT, true, requestStatus.errorCode())) : null;
+            case FAILED ->
+                advanceRequestEndLocked(ctx, requestStatus.route(), DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, false, requestStatus.errorCode()));
+            case PRIORITY_CANCELED -> {
+                PreemptionRegistration claim = ctx.preemption();
+                DecodeEndpoint decode = requestStatus.route().decodeEp();
+                if (claim == null || !claim.canAcceptPriorityTerminal() || decode == null || requestStatus.route().decodeReservation() == null
+                        || !decode.reconcilePreemptionResources(claim.attemptToken(),
+                                DecodeResources.PreemptionUpdate.canceled(requestStatus.route().decodeReservation()))) {
+                    yield null;
+                }
+                capacityRelease = decode;
+                claim.tryFinish();
+                yield finalizePreemptedRequestLocked(ctx, claim, "priority victim canceled by worker", true);
+            }
+        };
+        if (!cleaning) { ctx.reconcileDecisionEvidenceLocked(); }
+        if (capacityRelease == null) { return transition; }
+        return capacityReleaseEffects(capacityRelease, transition, "Prefill request status continuation failed");
+    }
+
+    Runnable acceptDecodeStatus(BalanceContext ctx, DecodeEndpoint source, DecodeResources.DecodeRequestStatus requestStatus, long nowMs) {
+        Runnable work = null;
+        DecisionDeadline obsolete = null;
+        boolean capacityChanged = false;
+        synchronized (ctx) {
+            if (!ctx.ownsDecodeReservationLocked(source, requestStatus.reservation())) {
+                return null;
+            }
+            obsolete = ctx.recordDecodeObservationLocked(requestStatus.kind(), nowMs);
+            if (requestStatus.kind() == DecodeResources.DecodeRequestStatus.Kind.TERMINAL) {
+                work = advanceRequestEndLocked(ctx, ctx.route(), DeferredTerminal.worker(
+                        WorkerTerminalSource.DECODE_ENDPOINT, requestStatus.errorCode() == 0L, requestStatus.errorCode()));
+                obsolete = ctx.detachObsoleteDecisionDeadlineLocked();
+            } else {
+                // Membership and allocation remain separate facts. Only allocation reconciles a NOT_FOUND claim.
+                PreemptionRegistration claim = ctx.preemption();
+                if (requestStatus.allocationObserved() && claim != null && claim.isNotFound()) {
+                    DeferredTerminal terminal = claim.pendingTerminal();
+                    capacityChanged = source.reconcilePreemptionResources(claim.attemptToken(), terminal == null
+                            ? DecodeResources.PreemptionUpdate.active(requestStatus.reservation())
+                            : DecodeResources.PreemptionUpdate.finished(requestStatus.reservation()));
+                    if (capacityChanged) {
+                        work = advanceAfterDecodeReconciliationLocked(ctx, claim, terminal, claim, true);
+                    }
+                }
+            }
+            if (requestStatus.kind() == DecodeResources.DecodeRequestStatus.Kind.ACTIVE
+                    && work == null && obsolete == null && !capacityChanged
+                    && ctx.decisionDeadlineAtMs().isEmpty()) {
+                return null;
+            }
+        }
+        Runnable effect = work;
+        DecisionDeadline deadline = obsolete;
+        boolean publishCapacity = capacityChanged;
+        return () -> {
+            Throwable notificationFailure = publishCapacity ? Failures.run(null, source::publishCapacityRelease) : null;
+            try {
+                DeliveryClaim delivery = ctx.delivery();
+                if (delivery != null) { delivery.observeDecodeSettlement(source, requestStatus); }
+                executeEngineEffects(ctx, effect, deadline);
+            } catch (Throwable failure) {
+                throw Failures.propagate(Failures.append(failure, notificationFailure), "Decode request status continuation failed");
+            }
+            Failures.rethrow(notificationFailure, "Decode capacity publication failed");
+        };
+    }
+
+    Runnable settleRoutingFactsLocked(BalanceContext ctx, AdmissionHandle operation, Response failure) {
+        ctx.requireContextLock("admission settlement");
+        CancelReason pendingCancellation = ctx.cancellationReason();
+        AdmissionResult retained = ctx.consumeAdmissionFacts(operation);
+        boolean inactive = retained.inactive();
+        DeferredTerminal pending = retained.terminal();
+        PendingPrefillRetirement retirement = retained.retirement();
+        if (ctx.route() == null && pending != null && pending.kind() == DeferredTerminal.Kind.FAILURE) {
+            if (failure == null) {
+                failure = buildErrorResponse(pending.errorType(), pending.detail());
+            }
+            pending = null;
+        }
+        if (ctx.retainCleanupFacts(inactive, pending)) {
+            return null;
+        }
+        // Authoritative completion takes precedence over retirement and admission failure.
+        if (pending != null && pending.authoritativeWorker()) {
+            return advanceRequestEndLocked(ctx, ctx.route(), pending);
+        }
+        TerminalAction retired = ctx.claimPrefillRetirementLocked(retirement, () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
+        if (retired != null) {
+            return finalizationEffects(retired, null);
+        }
+        if (inactive && pendingCancellation != null) {
+            return finalizationEffects(ctx.decideRequestEndLocked(DeferredTerminal.inactivityExpired("REQUEST_INACTIVE: no matching Engine request status before inactivity timeout"), () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), null);
+        }
+        Runnable effect = null;
+        if (pending != null) {
+            effect = advanceRequestEndLocked(ctx, ctx.route(), pending);
+        } else if (failure != null) {
+            String message = pendingCancellation != null ? pendingCancellation.getMessage()
+                    : failure.getErrorMessage() == null ? "eviction admission failed" : failure.getErrorMessage();
+            TerminalOutcome outcome = pendingCancellation == null ? TerminalOutcome.fail(message) : TerminalOutcome.cancellation(pendingCancellation, message);
+            Response response = pendingCancellation == null ? failure : Response.copyOf(ctx.cancellationResponse());
+            effect = finalizationEffects(ctx.claimFinalizationLocked(null, outcome, response, true, () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), null);
+        }
+        if (effect != null || pendingCancellation == null || !ctx.ownsActiveGenerationLocked()) {
+            return effect;
+        }
+        if (!inactive && ctx.pendingWorkerQueueCancellationLocked() != null) {
+            return effect;
+        }
+        TerminalAction cancelled = pendingCancellation == CancelReason.DEADLINE_EXCEEDED
+                || ctx.requestInactiveLocked(System.currentTimeMillis())
+                ? ctx.decideRequestEndLocked(DeferredTerminal.inactivityExpired(pendingCancellation.getMessage()),
+                        () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL))
+                : ctx.tryTerminateCancellationLocked(() -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
+        return cancelled == null ? effect : finalizationEffects(cancelled, null);
+    }
+
+    Runnable decideInactivityLocked(BalanceContext ctx, long nowMs, PreemptionRegistration signal) {
+        if (ctx.expireCleanup(nowMs)) {
+            return () -> resumeCleanup(ctx);
+        }
+        if (!ctx.ownsActiveGenerationLocked() || !ctx.requestInactiveLocked(nowMs)) {
+            return null;
+        }
+        String message = "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout";
+        recordCancellationLocked(ctx, CancelReason.DEADLINE_EXCEEDED, message);
+        if (ctx.admission() != null) {
+            ctx.retainAdmissionExpiry();
+            return null;
+        }
+        return finalizationEffects(ctx.decideRequestEndLocked(DeferredTerminal.inactivityExpired(message), () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), signal);
+    }
+
+    Runnable advanceRequestEndLocked(BalanceContext ctx, RequestRoute expected, DeferredTerminal event) {
+        ctx.requireContextLock("request end");
+        boolean workerProof = event.authoritativeWorker();
+        if (expected == null || !ctx.ownsResourceTrackingLocked() || ctx.route() != expected || !workerProof && !ctx.ownsActiveRoute(expected)) {
+            return null;
+        }
+        if (ctx.hasCleanup()) {
+            if (event.decodeTerminalAlreadyApplied() || event.endpointAlreadyRetired()) {
+                ctx.recordCleanupSettlement(false, true, true);
+            } else {
+                ctx.recordCleanupSettlement(true, false, false);
+            }
+            return () -> resumeCleanup(ctx);
+        }
+        if (ctx.admission() != null) {
+            ctx.retainAdmissionTerminalLocked(event);
+            return null;
+        }
+        PreemptionRegistration exact = ctx.preemption();
+        if (exact == null) {
+            return finalizationEffects(ctx.decideRequestEndLocked(event, () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), null);
+        }
+        if (event.endpointAlreadyRetired()) {
+            ctx.retainPreemptionTerminalLocked(exact, event);
+            exact.tryFinish();
+            ctx.detachPreemptionOwnerLocked(exact);
+            return finalizationEffects(ctx.decideRequestEndLocked(event, () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), exact);
+        }
+        if (exact.isFinished()) {
+            return null;
+        }
+        ctx.retainPreemptionTerminalLocked(exact, event);
+        if (!workerProof && !exact.isNotFound() && !exact.isUnknown()) {
+            return null;
+        }
+        return reconcilePreemptionLocked(ctx, exact, !workerProof && exact.isUnknown(), exact);
+    }
+
+    Runnable reconcilePreemptionLocked(BalanceContext ctx, PreemptionRegistration exact, boolean transportUnknown, PreemptionRegistration signal) {
+        ctx.requireContextLock("pending preemption facts");
+        DeferredTerminal terminal = exact.pendingTerminal();
+        boolean terminalWins = terminal != null && (!transportUnknown || terminal.authoritativeWorker());
+        if (!terminalWins && (transportUnknown || !exact.hasPendingDeliveryConfirmation())) {
+            return null;
+        }
+        RequestRoute active = ctx.activeRoute();
+        DecodeEndpoint decode = active == null ? null : active.decodeEp();
+        // Decode terminal facts already committed its ledger; all other evidence must reconcile it first.
+        boolean capacityChanged = decode != null && !(terminalWins && terminal.decodeTerminalAlreadyApplied());
+        if (capacityChanged && !decode.reconcilePreemptionResources(exact.attemptToken(), terminalWins
+                        ? DecodeResources.PreemptionUpdate.finished(active.decodeReservation())
+                        : DecodeResources.PreemptionUpdate.active(active.decodeReservation()))) {
+            return null;
+        }
+        Runnable work = advanceAfterDecodeReconciliationLocked(ctx, exact,
+                terminalWins ? terminal : null, signal, capacityChanged);
+        if (!capacityChanged) { return work; }
+        return capacityReleaseEffects(decode, work, "preemption continuation failed");
+    }
+
+    private static Runnable capacityReleaseEffects(DecodeEndpoint source, Runnable effect, String failureMessage) {
+        return () -> {
+            Throwable failure = Failures.run(null, source::publishCapacityRelease);
+            failure = Failures.run(failure, effect);
+            Failures.rethrow(failure, failureMessage);
+        };
+    }
+
+    private Runnable advanceAfterDecodeReconciliationLocked(BalanceContext ctx, PreemptionRegistration claim,
+            DeferredTerminal terminal, PreemptionRegistration signal, boolean decodeSettled) {
+        if (terminal != null) { claim.tryFinish(); }
+        if (ctx.hasCleanup()) {
+            if (terminal != null) {
+                // Retain the finished claim until finalization publishes its request resolution.
+                ctx.recordCleanupSettlement(false, true, false);
+            } else {
+                ctx.detachPreemptionOwnerLocked(claim);
+            }
+            return () -> resumeCleanup(ctx);
+        }
+        ctx.detachPreemptionOwnerLocked(claim);
+        if (terminal == null) {
+            return claim.hasPendingDeliveryConfirmation() ? acknowledgeDeliveryLocked(ctx, signal) : null;
+        }
+        TerminalAction action = ctx.decideRequestEndLocked(terminal,
+                () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
+        if (action != null && decodeSettled) { ctx.recordCleanupSettlement(false, true, false); }
+        return finalizationEffects(action, signal);
+    }
+
+    Runnable finalizePreemptedRequestLocked(BalanceContext ctx, PreemptionRegistration exact,
+                                                  String detail, boolean prefillSettled) {
+        if (ctx.hasCleanup()) {
+            ctx.recordCleanupSettlement(prefillSettled, true, false);
+            return () -> resumeCleanup(ctx);
+        }
+        DeferredTerminal terminal = DeferredTerminal.priority(detail);
+        ctx.retainPreemptionTerminalLocked(exact, terminal);
+        ctx.detachPreemptionOwnerLocked(exact);
+        TerminalAction action = ctx.decideRequestEndLocked(terminal,
+                () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
+        if (action != null) { ctx.recordCleanupSettlement(prefillSettled, true, false); }
+        return finalizationEffects(action, exact);
+    }
+
+    Runnable acknowledgeDeliveryLocked(BalanceContext ctx, PreemptionRegistration signal) {
+        ctx.requireContextLock("delivery acknowledgement");
+        if (ctx.route() == null || !ctx.ownsActiveRoute(ctx.route())) {
+            return null;
+        }
+        ctx.confirmDelivery();
+        if (ctx.cancellationReason() != null) {
+            return null;
+        }
+        PreemptionRegistration blocked = ctx.preemption();
+        if (blocked != null) {
+            if (blocked.isFinished()) {
+                return null;
+            }
+            blocked.recordDeliveryConfirmation();
+            return reconcilePreemptionLocked(ctx, blocked, false, null);
+        }
+        if (ctx.deliveryAcknowledged()) {
+            return null;
+        }
+        // A delayed timer continuation cannot let an expired silent request publish a late ACK.
+        long nowMs = System.currentTimeMillis();
+        if (ctx.requestInactiveLocked(nowMs)) {
+            return decideInactivityLocked(ctx, nowMs, signal);
+        }
+        PublicationPermit permit = requirePublicationPermitLocked(ctx, PublicationKind.DELIVERY);
+        try {
+            DeliveryPublication publication = ctx.acknowledgeDelivery(permit, nowMs);
+            return deliveryEffects(ctx, publication, signal);
+        } catch (RuntimeException | Error failure) {
+            permit.abandonIfUnused();
+            throw failure;
+        }
+    }
+
     void executeEngineEffects(BalanceContext ctx, Runnable work, DecisionDeadline obsolete) {
         ExpirationTimer.releaseDecisionDeadline(obsolete);
         Throwable failure = Failures.run(null, () -> expirationTimer.attachDecisionDeadline(ctx));
@@ -761,7 +1112,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 ctx.recordCleanupSettlement(true, false, false);
                 return () -> resumeCleanup(ctx);
             }
-            return finalizationEffects(ctx.claimPrefillRetirementLocked(new PendingPrefillRetirement(source, exact, detail)), null);
+            return finalizationEffects(ctx.claimPrefillRetirementLocked(new PendingPrefillRetirement(source, exact, detail), () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), null);
         }
     }
 
@@ -775,6 +1126,25 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         DeliveryClaim delivery = exact.delivery();
         if (delivery != null) { delivery.abandon(CancelReason.CLIENT_CANCELLED); }
         cancelRequest(exact, 0L, CancelReason.CLIENT_CANCELLED);
+    }
+
+    private boolean recordCancellationLocked(BalanceContext ctx, CancelReason reason, String message) {
+        ctx.requireContextLock("record cancellation");
+        Objects.requireNonNull(reason, "reason");
+        if (!ctx.ownsActiveGenerationLocked() || ctx.cancellationReason() != null) { return false; }
+        Map<String, Object> diagnostics = null;
+        if (reason == CancelReason.DEADLINE_EXCEEDED && ctx.queueOwner() != null) {
+            RequestRoute route = ctx.activeRoute();
+            if (ctx.deliveryClaimKind() != DeliveryClaimKind.NONE) {
+                diagnostics = Map.of("cause", message);
+            } else if (route != null && route.prefillEp() != null) {
+                diagnostics = route.prefillEp().getLatestQueueWaitSnapshot();
+            } else {
+                diagnostics = ctx.queueOwner().getLatestQueueWaitSnapshot();
+            }
+        }
+        ctx.recordCancellationLocked(reason, message, diagnostics);
+        return true;
     }
 
     final RequestState cancelRequest(BalanceContext ctx, long expectedBatchId, CancelReason reason) {
@@ -809,7 +1179,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             // Repeated cancellation only reads the state; the first caller owns cancellation work.
             String message = deadlineDuringAdmission
                     ? "request scheduling deadline exceeded during admission" : reason.getMessage();
-            if (!ctx.recordCancellationLocked(reason, message)) {
+            if (!recordCancellationLocked(ctx, reason, message)) {
                 return deadline == null ? ctx.snapshot() : null;
             }
 
@@ -875,7 +1245,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     void recordSchedulingFailure(BalanceContext ctx, StrategyErrorType error, String detail) {
         Runnable work;
         synchronized (ctx) {
-            work = ctx.processRequestEndLocked(ctx.activeRoute(), DeferredTerminal.failure(error, detail));
+            work = advanceRequestEndLocked(ctx, ctx.activeRoute(), DeferredTerminal.failure(error, detail));
         }
         execute(ctx, work);
     }
@@ -896,8 +1266,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (!isCurrentContext(ctx) || !ctx.advancePreemption(claim, next)) { return false; }
             work = ctx.hasCleanup() ? () -> resumeCleanup(ctx)
                     : switch (next) {
-                        case NOT_FOUND_STALE -> ctx.processPendingEventsUnderPreemptionLocked(claim, false, claim);
-                        case CANCEL_UNKNOWN -> ctx.processPendingEventsUnderPreemptionLocked(claim, true, claim);
+                        case NOT_FOUND_STALE -> reconcilePreemptionLocked(ctx, claim, false, claim);
+                        case CANCEL_UNKNOWN -> reconcilePreemptionLocked(ctx, claim, true, claim);
                         default -> null;
                     };
         }
@@ -914,7 +1284,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (!isCurrentContext(ctx) || !ctx.ownsResourceTrackingLocked() || ctx.preemption() != claim || !claim.isReleasable()) { return false; }
             ctx.detachPreemptionOwnerLocked(claim);
             cleanupPending = ctx.hasCleanup();
-            work = cleanupPending ? null : ctx.processPendingEventsUnderPreemptionLocked(claim, false, claim);
+            work = cleanupPending ? null : reconcilePreemptionLocked(ctx, claim, false, claim);
             routeToCancel = cleanupPending || work != null ? null : ctx.pendingWorkerQueueCancellationLocked();
         }
         if (cleanupPending) { resumeCleanup(ctx); } else { execute(ctx, work); }
@@ -928,7 +1298,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         synchronized (ctx) {
             if (!isCurrentContext(ctx) || !ctx.ownsResourceTrackingLocked() || ctx.preemption() != claim
                     || !claim.canCompletePreemption() || !claim.tryFinish()) { return false; }
-            work = ctx.finishPreemptedRequestLocked(claim, detail, false);
+            work = finalizePreemptedRequestLocked(ctx, claim, detail, false);
         }
         execute(ctx, work);
         return true;
@@ -966,7 +1336,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         context.requireCleanupOwner(action);
         Throwable cleanupFailure = null;
         cleanupFailure = Failures.run(cleanupFailure, () -> action.terminalResources().release());
-        cleanupFailure = Failures.run(cleanupFailure, action.preemption() == null ? null : () -> action.preemption().signalTerminal(new VictimTerminal(context.getRequestId())));
+        cleanupFailure = Failures.run(cleanupFailure, action.preemption() == null ? null : () -> action.preemption().signalResolution(new VictimResolution(context.getRequestId())));
         if (cleanupFailure != null) { recordFailure(cleanupFailure); }
         DeliveryClaim delivery = context.delivery();
         boolean successfulWorker = action.event() != null && action.event().kind() == DeferredTerminal.Kind.WORKER
@@ -1005,7 +1375,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return () -> {
             Throwable failure = Failures.run(null, () -> executeFinalization(action));
             failure = Failures.run(failure, signal == null ? null
-                    : () -> signal.signalTerminal(new VictimTerminal(action.requestContext().getRequestId())));
+                    : () -> signal.signalResolution(new VictimResolution(action.requestContext().getRequestId())));
             Failures.rethrow(failure, "request cleanup failed");
         };
     }
@@ -1014,7 +1384,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return () -> {
             Throwable failure = Failures.run(null, () -> submitDeliveryResponse(delivery));
             failure = Failures.run(failure, signal == null ? null
-                    : () -> signal.signalTerminal(new VictimTerminal(ctx.getRequestId())));
+                    : () -> signal.signalResolution(new VictimResolution(ctx.getRequestId())));
             Failures.rethrow(failure, "request cleanup failed");
         };
     }
@@ -1130,7 +1500,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             permit = requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL);
             try {
-                if (ctx.cancellationReason() == null && !ctx.recordCancellationLocked(CancelReason.CLIENT_CANCELLED, CancelReason.CLIENT_CANCELLED.getMessage())) {
+                if (ctx.cancellationReason() == null && !recordCancellationLocked(ctx, CancelReason.CLIENT_CANCELLED, CancelReason.CLIENT_CANCELLED.getMessage())) {
                     permit.abandonIfUnused();
                     return false;
                 }

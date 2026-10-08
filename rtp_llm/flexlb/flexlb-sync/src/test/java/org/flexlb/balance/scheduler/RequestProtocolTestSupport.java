@@ -85,7 +85,7 @@ final class RequestProtocolTestSupport {
      * Seed cancellation in state-only fixtures without exposing an internal production operation.
      */
     static boolean recordCancellation(AbstractRequestScheduler scheduler, BalanceContext requestContext, CancelReason reason, String message) {
-        return Boolean.TRUE.equals(ReflectionTestUtils.invokeMethod(requestContext, "recordCancellationLocked", reason, message));
+        return Boolean.TRUE.equals(ReflectionTestUtils.invokeMethod(scheduler, "recordCancellationLocked", requestContext, reason, message));
     }
 
     /**
@@ -179,7 +179,7 @@ final class RequestProtocolTestSupport {
     static void observePrefill(AbstractRequestScheduler scheduler, BalanceContext context,
             PrefillEndpoint source, RoleType role,
             PrefillState.PrefillRequestStatus requestStatus) {
-        if (context != null) { run(context.acceptPrefillStatus(source, role, requestStatus, System.currentTimeMillis())); }
+        if (context != null) { run(context.scheduler().acceptPrefillStatus(context, source, role, requestStatus, System.currentTimeMillis())); }
     }
 
     static void observeDecode(AbstractRequestScheduler scheduler, DecodeEndpoint source,
@@ -189,7 +189,7 @@ final class RequestProtocolTestSupport {
 
     static void observeDecode(AbstractRequestScheduler scheduler, BalanceContext context,
             DecodeEndpoint source, DecodeResources.DecodeRequestStatus requestStatus) {
-        if (context != null) { run(context.acceptDecodeStatus(source, requestStatus, System.currentTimeMillis())); }
+        if (context != null) { run(context.scheduler().acceptDecodeStatus(context, source, requestStatus, System.currentTimeMillis())); }
     }
 
     static void expireInactivity(AbstractRequestScheduler scheduler, BalanceContext context,
@@ -294,7 +294,7 @@ final class RequestProtocolTestSupport {
     }
 
     static Runnable acknowledge(AbstractRequestScheduler scheduler, BalanceContext requestContext) {
-        return ReflectionTestUtils.invokeMethod(requestContext, "acknowledgeDeliveryLocked", (Object) null);
+        return scheduler.acknowledgeDeliveryLocked(requestContext, null);
     }
 
     static boolean prepareMember(AbstractRequestScheduler registry, RequestRoute item) {

@@ -251,10 +251,10 @@ class DeliverySettlementTest {
         if (phase != PreemptionCancelPhase.CANCEL_IN_FLIGHT) { assertTrue(registry.updatePreemption(preemption, phase)); }
         reject(member);
         assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
-        assertFalse(preemption.terminalObservation().toCompletableFuture().isDone());
+        assertFalse(preemption.requestResolution().toCompletableFuture().isDone());
         assertOccupancy(1, 1);
         cleaned(member);
-        assertTrue(preemption.terminalObservation().toCompletableFuture().isDone());
+        assertTrue(preemption.requestResolution().toCompletableFuture().isDone());
         assertOccupancy(0, 0);
     }
 

@@ -4,7 +4,7 @@ import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
-import org.flexlb.balance.preemption.VictimTerminal;
+import org.flexlb.balance.preemption.VictimResolution;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
 import org.flexlb.balance.scheduler.RequestRepository;
@@ -31,7 +31,7 @@ import static com.google.common.base.Preconditions.checkState;
  * <p>The scheduler supplies a pure plan and consumes one result.  This class
  * owns the two-phase protocol, token fencing and exactly-once child settlement.
  * Engine acknowledgement is only control evidence; the canonical victim
- * terminal transaction may complete before or after that acknowledgement.</p>
+ * resolution transaction may complete before or after that acknowledgement.</p>
  */
 @Component
 public final class DecodePreemptionCoordinator {
@@ -144,13 +144,13 @@ public final class DecodePreemptionCoordinator {
                                     + owned.requestId()));
                 }
             }
-            // Capture every terminal capability before the first outbound
+            // Capture every request-resolution capability before the first outbound
             // side effect. The exact claim remains the only lookup key.
             for (ClaimedVictim owned : capability.claims) {
-                owned.terminalCompletion = owned.claim
-                        .terminalObservation()
-                        .handle((terminal, failure) -> failure == null
-                                && capability.recordTerminal(owned, terminal))
+                owned.resolutionCompletion = owned.claim
+                        .requestResolution()
+                        .handle((resolution, failure) -> failure == null
+                                && capability.recordResolution(owned, resolution))
                         .toCompletableFuture();
             }
 
@@ -185,13 +185,13 @@ public final class DecodePreemptionCoordinator {
         PreemptionCommand command = capability.command;
         // A transport-unknown ACK is not a negative acknowledgement: the
         // Prefill may have installed the intent before the reply was lost.
-        // Such a child therefore waits for the canonical victim terminal
+        // Such a child therefore waits for the canonical victim resolution
         // transaction exactly like an ACCEPTED child.
-        List<ClaimedVictim> pendingTerminals = new ArrayList<>();
+        List<ClaimedVictim> pendingResolutions = new ArrayList<>();
         boolean hasNotFound = false;
 
         for (ClaimedVictim owned : capability.claims) {
-            if (owned.disposition == ClaimDisposition.TERMINAL) {
+            if (owned.disposition == ClaimDisposition.RESOLVED) {
                 continue;
             }
             EngineCancelChannel.CancelAck outcome = owned.acknowledgement.join();
@@ -204,12 +204,12 @@ public final class DecodePreemptionCoordinator {
                     } else {
                         capability.transferUnknown(owned);
                     }
-                    pendingTerminals.add(owned);
+                    pendingResolutions.add(owned);
                 }
                 case NOT_FOUND -> {
                     owned.claim.scheduler().updatePreemption(owned.claim, PreemptionCancelPhase.NOT_FOUND_STALE);
                     capability.transferred(owned);
-                    if (owned.disposition != ClaimDisposition.TERMINAL) {
+                    if (owned.disposition != ClaimDisposition.RESOLVED) {
                         hasNotFound = true;
                     }
                 }
@@ -219,25 +219,25 @@ public final class DecodePreemptionCoordinator {
                 }
                 case FAILED, UNSUPPORTED -> {
                     capability.transferUnknown(owned);
-                    pendingTerminals.add(owned);
+                    pendingResolutions.add(owned);
                 }
             }
         }
 
-        if (pendingTerminals.isEmpty()) {
+        if (pendingResolutions.isEmpty()) {
             return CompletableFuture.completedFuture(
                     capability.finish(hasNotFound));
         }
         // The completion budget begins only after the ACK phase has ended; a
         // 40ms ACK followed by a 100ms cleanup therefore gets the full cleanup
         // window rather than sharing one 50ms deadline.
-        CompletableFuture<?>[] terminals = pendingTerminals.stream()
-                .map(pending -> pending.terminalCompletion)
+        CompletableFuture<?>[] resolutions = pendingResolutions.stream()
+                .map(pending -> pending.resolutionCompletion)
                 .toArray(CompletableFuture<?>[]::new);
         final boolean ackNotFound = hasNotFound;
-        // Only this aggregate wait expires. Individual terminal observers stay
+        // Only this aggregate wait expires. Individual resolution observers stay
         // live so late worker facts can still settle their exact claims.
-        CompletableFuture<Void> settlement = CompletableFuture.allOf(terminals);
+        CompletableFuture<Void> settlement = CompletableFuture.allOf(resolutions);
         // Resolve on the executor, not the shared CompletableFuture timeout thread:
         // finishing an attempt may acquire endpoint and request locks.
         java.util.concurrent.ScheduledFuture<?> deadline = timer.schedule(() -> settlement.complete(null),
@@ -257,7 +257,7 @@ public final class DecodePreemptionCoordinator {
                 capability.token,
                 DecodeResources.PreemptionUpdate.fenced(owned.reservation));
         if (endpointSettled && owned.claim.scheduler().completePreemption(owned.claim, command.detail())) {
-            capability.recordTerminal(owned);
+            capability.recordResolution(owned);
         }
     }
 
@@ -296,14 +296,14 @@ public final class DecodePreemptionCoordinator {
         RELEASABLE,
         OUTBOUND,
         TRANSFERRED,
-        TERMINAL
+        RESOLVED
     }
 
     /** Exact opaque request claim paired with its immutable endpoint victim. */
     private static final class ClaimedVictim {
         private final DecodeResources.ReservationHandle reservation;
         private final PreemptionRegistration claim;
-        private CompletableFuture<Boolean> terminalCompletion;
+        private CompletableFuture<Boolean> resolutionCompletion;
         private CompletableFuture<EngineCancelChannel.CancelAck> acknowledgement;
         private volatile ClaimDisposition disposition =
                 ClaimDisposition.RELEASABLE;
@@ -341,7 +341,7 @@ public final class DecodePreemptionCoordinator {
         }
 
         private synchronized boolean outboundStarted(ClaimedVictim owned) {
-            if (owned.disposition == ClaimDisposition.TERMINAL) {
+            if (owned.disposition == ClaimDisposition.RESOLVED) {
                 return false;
             }
             if (owned.disposition != ClaimDisposition.RELEASABLE) {
@@ -356,32 +356,32 @@ public final class DecodePreemptionCoordinator {
             return true;
         }
 
-        private synchronized boolean recordTerminal(
+        private synchronized boolean recordResolution(
                 ClaimedVictim owned,
-                VictimTerminal terminal) {
-            if (terminal == null
-                    || terminal.requestId() != owned.requestId()) {
+                VictimResolution resolution) {
+            if (resolution == null
+                    || resolution.requestId() != owned.requestId()) {
                 return false;
             }
-            recordTerminal(owned);
+            recordResolution(owned);
             return true;
         }
 
-        /** Idempotent convergence for terminal facts from either callback. */
-        private synchronized void recordTerminal(ClaimedVictim owned) {
-            owned.disposition = ClaimDisposition.TERMINAL;
+        /** Idempotent convergence for request resolution or downstream cleanup proof. */
+        private synchronized void recordResolution(ClaimedVictim owned) {
+            owned.disposition = ClaimDisposition.RESOLVED;
         }
 
-        private synchronized boolean allVictimsTerminal() {
+        private synchronized boolean allVictimsResolved() {
             if (claims.isEmpty()) {
                 return false;
             }
             return claims.stream().allMatch(
-                    owned -> owned.disposition == ClaimDisposition.TERMINAL);
+                    owned -> owned.disposition == ClaimDisposition.RESOLVED);
         }
 
         private synchronized void transferred(ClaimedVictim owned) {
-            if (owned.disposition != ClaimDisposition.TERMINAL) {
+            if (owned.disposition != ClaimDisposition.RESOLVED) {
                 owned.disposition = ClaimDisposition.TRANSFERRED;
             }
         }
@@ -395,7 +395,7 @@ public final class DecodePreemptionCoordinator {
         }
 
         private PreemptionResult finish(boolean hasNotFound) {
-            DecodeResources.ReservationHandle incoming = allVictimsTerminal()
+            DecodeResources.ReservationHandle incoming = allVictimsResolved()
                     && command.admissionOpen().getAsBoolean()
                     ? command.endpoint().commitPreemption(token) : null;
             if (incoming != null) {
@@ -404,7 +404,7 @@ public final class DecodePreemptionCoordinator {
             }
             boolean cleanSingleNotFound = hasNotFound
                     && claims.size() == 1
-                    && claims.get(0).disposition != ClaimDisposition.TERMINAL;
+                    && claims.get(0).disposition != ClaimDisposition.RESOLVED;
             return abort(
                     !cleanSingleNotFound,
                     cleanSingleNotFound

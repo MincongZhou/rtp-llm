@@ -153,7 +153,7 @@ class RequestTerminalSettlementTest {
         doAnswer(call -> {
             assertFalse(Thread.holdsLock(f.requestContext()));
             assertNull(f.requestContext().preemption());
-            assertFalse(preemption.terminalObservation().toCompletableFuture().isDone());
+            assertFalse(preemption.requestResolution().toCompletableFuture().isDone());
             if (notificationFails) { throw notificationFailure; }
             return null;
         }).when(f.item().decodeEp()).publishCapacityRelease();
@@ -164,7 +164,7 @@ class RequestTerminalSettlementTest {
             assertTrue(f.scheduler().updatePreemption(preemption, PreemptionCancelPhase.NOT_FOUND_STALE));
         }
         assertTrue(f.requestContext().future().join().isSuccess());
-        assertTrue(preemption.terminalObservation().toCompletableFuture().isDone());
+        assertTrue(preemption.requestResolution().toCompletableFuture().isDone());
         assertEquals(RequestState.Phase.ACKNOWLEDGED,
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.scheduler()).getRequestState(RESERVATION.requestId(), 7L).state());
         assertNull(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.scheduler()).getRequestState(RESERVATION.requestId(), 8L));
@@ -186,7 +186,7 @@ class RequestTerminalSettlementTest {
             assertFalse(Thread.holdsLock(f.requestContext()));
             assertNull(f.requestContext().preemption());
             assertTrue(claim.isFinished());
-            assertFalse(claim.terminalObservation().toCompletableFuture().isDone());
+            assertFalse(claim.requestResolution().toCompletableFuture().isDone());
             return null;
         }).when(f.item().decodeEp()).publishCapacityRelease();
         var failed = PrefillState.PrefillRequestStatus.terminal(f.item(), PrefillState.PrefillRequestStatus.Kind.FAILED, 9L);
@@ -200,7 +200,7 @@ class RequestTerminalSettlementTest {
         assertEquals(RequestState.Phase.FAILED, f.requestContext().snapshot().state());
         f.scheduler().runtime.continuations().awaitIdle();
         assertTrue((f.requestContext().stage() == BalanceContext.RequestStage.FINISHED));
-        assertTrue(claim.terminalObservation().toCompletableFuture().isDone());
+        assertTrue(claim.requestResolution().toCompletableFuture().isDone());
         verify(f.item().decodeEp()).publishCapacityRelease();
         verify(f.item().decodeEp(), never()).release(any(), any());
     }
@@ -220,7 +220,7 @@ class RequestTerminalSettlementTest {
             assertFalse(Thread.holdsLock(f.requestContext()));
             assertNull(f.requestContext().preemption());
             assertEquals(priorityCanceled, claim.isFinished());
-            assertFalse(claim.terminalObservation().toCompletableFuture().isDone());
+            assertFalse(claim.requestResolution().toCompletableFuture().isDone());
             return null;
         }).when(f.item().decodeEp()).publishCapacityRelease();
 
@@ -231,7 +231,7 @@ class RequestTerminalSettlementTest {
 
         verify(f.item().decodeEp()).reconcilePreemptionResources(31L, update);
         verify(f.item().decodeEp()).publishCapacityRelease();
-        assertEquals(priorityCanceled, claim.terminalObservation().toCompletableFuture().isDone());
+        assertEquals(priorityCanceled, claim.requestResolution().toCompletableFuture().isDone());
         assertEquals(priorityCanceled, f.requestContext().future().isDone());
         if (priorityCanceled) {
             assertEquals(BalanceContext.RequestStage.FINISHED, f.requestContext().stage());

@@ -234,7 +234,7 @@ class RequestAdmissionExpirationRaceTest {
                 RequestProtocolTestSupport.observeDecode(registry, decode,
                         DecodeResources.DecodeRequestStatus.active(reservation));
                 synchronized (requestContext) {
-                    requestContext.acceptDecodeStatus(decode, DecodeResources.DecodeRequestStatus.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
+                    requestContext.scheduler().acceptDecodeStatus(requestContext, decode, DecodeResources.DecodeRequestStatus.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
                 }
             }
 

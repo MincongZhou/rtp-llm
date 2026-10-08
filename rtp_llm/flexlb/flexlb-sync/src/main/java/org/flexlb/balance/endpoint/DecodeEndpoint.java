@@ -233,7 +233,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return changed;
     }
 
-    /** Change exact resource ownership without callbacks; Context publishes the resulting capacity edge after unlocking. */
+    /** Change exact resource ownership without callbacks; Scheduler publishes the resulting capacity edge after unlocking. */
     public boolean reconcilePreemptionResources(long attemptToken, PreemptionUpdate update) {
         return state.updatePreemption(attemptToken, update);
     }

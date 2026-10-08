@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
-import org.flexlb.balance.preemption.VictimTerminal;
+import org.flexlb.balance.preemption.VictimResolution;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
@@ -79,8 +79,8 @@ class DecodePreemptionCoordinatorTest {
         AbstractRequestScheduler requests = fixture.requests();
         DecodeEndpoint endpoint = fixture.endpoint();
 
-        CompletableFuture<VictimTerminal> firstTerminal = new CompletableFuture<>();
-        CompletableFuture<VictimTerminal> secondTerminal = new CompletableFuture<>();
+        CompletableFuture<VictimResolution> firstTerminal = new CompletableFuture<>();
+        CompletableFuture<VictimResolution> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
         when(requests.tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
@@ -100,9 +100,9 @@ class DecodePreemptionCoordinatorTest {
                         1_000L, 1_000L, () -> true, "test"));
 
         assertFalse(result.isDone());
-        firstTerminal.complete(new VictimTerminal(11L));
+        firstTerminal.complete(new VictimResolution(11L));
         assertFalse(result.isDone(), "one terminal cannot release two victims");
-        secondTerminal.complete(new VictimTerminal(12L));
+        secondTerminal.complete(new VictimResolution(12L));
 
         assertTrue(result.get(1, TimeUnit.SECONDS).committed());
         assertEquals(new DecodeResources.ReservationHandle(9L, 20L, 100L), result.join().reservation());
@@ -117,7 +117,7 @@ class DecodePreemptionCoordinatorTest {
     void timeoutBeginsAfterAckAndLateTerminalCannotReopenIncoming(
             EngineCancelChannel.CancelAck acknowledgement) throws Exception {
         Fixture fixture = fixture();
-        CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
+        CompletableFuture<VictimResolution> terminal = new CompletableFuture<>();
         PreemptionRegistration victimClaim = claim(fixture.requests(), 11L, terminal);
         when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
                 .thenReturn(Optional.of(victimClaim));
@@ -144,7 +144,7 @@ class DecodePreemptionCoordinatorTest {
         verify(fixture.requests(), never()).releasePreemption(victimClaim);
         assertFalse(terminal.isDone(), "timing out admission must retain the victim terminal observation");
 
-        terminal.complete(new VictimTerminal(11L));
+        terminal.complete(new VictimResolution(11L));
         assertSame(timedOut, outcome.join());
         verify(fixture.endpoint(), never()).commitPreemption(anyLong());
     }
@@ -154,8 +154,8 @@ class DecodePreemptionCoordinatorTest {
     void partialTerminalTimeoutRetainsUnknownVictimAndNeverReopensIncoming(
             boolean terminalBeforeSend) throws Exception {
         Fixture fixture = fixture();
-        CompletableFuture<VictimTerminal> firstTerminal = new CompletableFuture<>();
-        CompletableFuture<VictimTerminal> secondTerminal = new CompletableFuture<>();
+        CompletableFuture<VictimResolution> firstTerminal = new CompletableFuture<>();
+        CompletableFuture<VictimResolution> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
         when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
@@ -167,7 +167,7 @@ class DecodePreemptionCoordinatorTest {
                         ? EngineCancelChannel.CancelAck.ACCEPTED : EngineCancelChannel.CancelAck.FAILED));
         DecodePreemptionCoordinator coordinator = new DecodePreemptionCoordinator(channel, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(fixture.requests()), runtime);
         if (terminalBeforeSend) {
-            firstTerminal.complete(new VictimTerminal(11L));
+            firstTerminal.complete(new VictimResolution(11L));
         }
         var outcome = coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
                 fixture.endpoint(), incoming(2L),
@@ -175,7 +175,7 @@ class DecodePreemptionCoordinatorTest {
                 50L, 1_000L, () -> true, "test"));
         if (!terminalBeforeSend) {
             verify(channel).cancel(any(), eq(11L), org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED), anyLong());
-            firstTerminal.complete(new VictimTerminal(11L));
+            firstTerminal.complete(new VictimResolution(11L));
             assertFalse(outcome.isDone(), "one of two terminal observations cannot finish the aggregate");
         } else {
             verify(channel, never()).cancel(any(), eq(11L), org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED), anyLong());
@@ -189,7 +189,7 @@ class DecodePreemptionCoordinatorTest {
         verify(fixture.requests()).updatePreemption(eq(second), eq(org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_UNKNOWN));
         assertFalse(secondTerminal.isDone());
         verify(fixture.endpoint()).abortPreemption(1L);
-        secondTerminal.complete(new VictimTerminal(12L));
+        secondTerminal.complete(new VictimResolution(12L));
         assertSame(timedOut, outcome.join());
         verify(fixture.endpoint(), never()).commitPreemption(anyLong());
     }
@@ -200,8 +200,8 @@ class DecodePreemptionCoordinatorTest {
     void reversedAcknowledgementsStayBoundToTheirVictims(
             EngineCancelChannel.CancelAck secondReply) throws Exception {
         Fixture fixture = fixture();
-        CompletableFuture<VictimTerminal> firstTerminal = new CompletableFuture<>();
-        CompletableFuture<VictimTerminal> secondTerminal = new CompletableFuture<>();
+        CompletableFuture<VictimResolution> firstTerminal = new CompletableFuture<>();
+        CompletableFuture<VictimResolution> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
         when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
@@ -239,9 +239,9 @@ class DecodePreemptionCoordinatorTest {
         }
         assertFalse(result.isDone(), "ACKs cannot replace the first victim's terminal proof");
         if (secondReply != EngineCancelChannel.CancelAck.REQUEST_CLEANED) {
-            secondTerminal.complete(new VictimTerminal(12L));
+            secondTerminal.complete(new VictimResolution(12L));
         }
-        firstTerminal.complete(new VictimTerminal(11L));
+        firstTerminal.complete(new VictimResolution(11L));
         assertTrue(result.get(1L, TimeUnit.SECONDS).committed());
         verify(fixture.endpoint()).commitPreemption(1L);
         verify(fixture.endpoint(), never()).abortPreemption(anyLong());
@@ -252,7 +252,7 @@ class DecodePreemptionCoordinatorTest {
             names = {"REQUEST_FENCED", "REQUEST_CLEANED"})
     void onlyDownstreamCleanupProofCanReplaceDecodeTerminal(EngineCancelChannel.CancelAck reply) throws Exception {
         Fixture fixture = fixture();
-        CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
+        CompletableFuture<VictimResolution> terminal = new CompletableFuture<>();
         PreemptionRegistration claim = claim(fixture.requests(), 11L, terminal);
         when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
                 .thenReturn(Optional.of(claim));
@@ -271,7 +271,7 @@ class DecodePreemptionCoordinatorTest {
             verify(fixture.endpoint(), never()).updatePreemption(1L,
                     DecodeResources.PreemptionUpdate.fenced(new DecodeResources.ReservationHandle(9L, 11L, 101L)));
             verify(fixture.endpoint(), never()).commitPreemption(anyLong());
-            terminal.complete(new VictimTerminal(11L));
+            terminal.complete(new VictimResolution(11L));
         }
         assertTrue(outcome.get(1L, TimeUnit.SECONDS).committed());
         verify(fixture.endpoint()).commitPreemption(1L);
@@ -362,13 +362,13 @@ class DecodePreemptionCoordinatorTest {
 
     private static PreemptionRegistration claim(
             AbstractRequestScheduler owner, long requestId,
-            CompletableFuture<VictimTerminal> terminal) {
+            CompletableFuture<VictimResolution> terminal) {
         PreemptionRegistration claim = mock(PreemptionRegistration.class);
         when(claim.cancelTarget()).thenReturn(new CancelTarget("10.0.0.1", 9090));
         when(claim.requestId()).thenReturn(requestId);
         when(claim.scheduler()).thenReturn(owner);
         when(claim.attemptToken()).thenReturn(1L);
-        when(claim.terminalObservation()).thenReturn(terminal);
+        when(claim.requestResolution()).thenReturn(terminal);
         return claim;
     }
 

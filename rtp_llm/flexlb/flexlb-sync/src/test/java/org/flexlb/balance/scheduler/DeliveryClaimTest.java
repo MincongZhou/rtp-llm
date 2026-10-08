@@ -84,7 +84,7 @@ class DeliveryClaimTest {
             f.owner.runtime.continuations().awaitIdle();
             f.clearDecodeStateOwnership();
             f.claim.observeDecodeSettlement(f.decode, DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L));
-            Runnable terminal = f.context.acceptDecodeStatus(f.decode,
+            Runnable terminal = f.context.scheduler().acceptDecodeStatus(f.context, f.decode,
                     DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L), System.currentTimeMillis());
             assertNotNull(terminal);
             var executor = spy(f.owner.runtime.continuations());

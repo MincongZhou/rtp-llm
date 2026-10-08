@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.CancelTarget;
-import org.flexlb.balance.preemption.VictimTerminal;
+import org.flexlb.balance.preemption.VictimResolution;
 
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -13,14 +13,14 @@ import java.util.concurrent.CompletionStage;
  *
  * <p>This class records the attempt-local cancel protocol. BalanceContext decides
  * which request transitions are legal; its scheduler executes the resulting effects.
- * Cancel acknowledgement and request resource termination remain separate facts.</p>
+ * Cancel acknowledgement, request resolution and Decode release proof remain separate facts.</p>
  */
 public final class PreemptionRegistration {
     final BalanceContext owner;
     private final long attemptToken;
     private final String detail;
     private final CancelTarget cancelTarget;
-    private final CompletableFuture<VictimTerminal> terminal =
+    private final CompletableFuture<VictimResolution> resolution =
             new CompletableFuture<>();
 
     private PreemptionCancelPhase phase = PreemptionCancelPhase.CLAIMED;
@@ -52,12 +52,12 @@ public final class PreemptionRegistration {
         return attemptToken;
     }
 
-    public CompletionStage<VictimTerminal> terminalObservation() {
-        return terminal;
+    public CompletionStage<VictimResolution> requestResolution() {
+        return resolution;
     }
 
-    boolean signalTerminal(VictimTerminal exactTerminal) {
-        return terminal.complete(exactTerminal);
+    boolean signalResolution(VictimResolution exactResolution) {
+        return resolution.complete(exactResolution);
     }
 
     String detail() {
@@ -81,7 +81,7 @@ public final class PreemptionRegistration {
         return true;
     }
 
-    /** Record protocol completion once; resource cleanup and terminal notification still belong to the request context. */
+    /** Record protocol completion once; its scheduler still owns resource cleanup and resolution notification. */
     boolean tryFinish() {
         if (finished) {
             return false;

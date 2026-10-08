@@ -149,7 +149,7 @@ class RequestInactivityTest {
     void activeStatusPreservesPendingDecodeHandoffTimerInstallation() throws Exception {
         acknowledgeDelivery();
         long completedAt = registeredAtMs + TIMEOUT_MS;
-        Runnable completed = requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL,
+        Runnable completed = requestContext.scheduler().acceptPrefillStatus(requestContext, prefill, RoleType.PREFILL,
                 PrefillState.PrefillRequestStatus.terminal(item,
                         PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L), completedAt);
         assertNotNull(completed);
@@ -169,7 +169,7 @@ class RequestInactivityTest {
         BalanceContext foreign = mock(BalanceContext.class);
         when(foreign.scheduler()).thenReturn(mock(AbstractRequestScheduler.class));
         registry.onDecodeStatus(foreign, decode, DecodeResources.DecodeRequestStatus.active(item.decodeReservation()));
-        verify(foreign, never()).acceptDecodeStatus(any(), any(), org.mockito.ArgumentMatchers.anyLong());
+        verify(foreign, never()).ownsDecodeReservationLocked(any(), any());
         registry.onPrefillStatus(requestContext, prefill, RoleType.PREFILL, null);
         registry.onDecodeStatus(requestContext, decode, null);
         registry.onDecodeStatus(requestContext, decode, DecodeResources.DecodeRequestStatus.active(item.decodeReservation()));
@@ -180,9 +180,9 @@ class RequestInactivityTest {
 
     private Runnable acceptActive(RoleType source, long nowMs) {
         return source == RoleType.PREFILL
-                ? requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL,
+                ? requestContext.scheduler().acceptPrefillStatus(requestContext, prefill, RoleType.PREFILL,
                         PrefillState.PrefillRequestStatus.active(item), nowMs)
-                : requestContext.acceptDecodeStatus(decode,
+                : requestContext.scheduler().acceptDecodeStatus(requestContext, decode,
                         DecodeResources.DecodeRequestStatus.active(item.decodeReservation()), nowMs);
     }
 
@@ -300,11 +300,11 @@ class RequestInactivityTest {
         long lateStatusAt = registeredAtMs + 2L * TIMEOUT_MS;
         synchronized (requestContext) {
             Runnable observation = switch (source) {
-                case PREFILL_ENDPOINT -> requestContext.acceptPrefillStatus(mock(PrefillEndpoint.class), RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item), lateStatusAt);
-                case PREFILL_ITEM -> requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(item.ctx()), item.routeResponse(), item.prefill(), null, prefill, decode, item.decodeReservation(), registeredAtMs)), lateStatusAt);
-                case DECODE_ENDPOINT -> requestContext.acceptDecodeStatus(RequestProtocolTestSupport.decodeEndpoint(), DecodeResources.DecodeRequestStatus.active(item.decodeReservation()), lateStatusAt);
-                case DECODE_GENERATION -> requestContext.acceptDecodeStatus(decode, DecodeResources.DecodeRequestStatus.active(new DecodeResources.ReservationHandle(2L, REQUEST_ID, 1L)), lateStatusAt);
-                case DECODE_RESERVATION -> requestContext.acceptDecodeStatus(decode, DecodeResources.DecodeRequestStatus.active(new DecodeResources.ReservationHandle(1L, REQUEST_ID, 2L)), lateStatusAt);
+                case PREFILL_ENDPOINT -> requestContext.scheduler().acceptPrefillStatus(requestContext, mock(PrefillEndpoint.class), RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item), lateStatusAt);
+                case PREFILL_ITEM -> requestContext.scheduler().acceptPrefillStatus(requestContext, prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(org.flexlb.balance.scheduler.RequestRoute.create(freezeInputs(item.ctx()), item.routeResponse(), item.prefill(), null, prefill, decode, item.decodeReservation(), registeredAtMs)), lateStatusAt);
+                case DECODE_ENDPOINT -> requestContext.scheduler().acceptDecodeStatus(requestContext, RequestProtocolTestSupport.decodeEndpoint(), DecodeResources.DecodeRequestStatus.active(item.decodeReservation()), lateStatusAt);
+                case DECODE_GENERATION -> requestContext.scheduler().acceptDecodeStatus(requestContext, decode, DecodeResources.DecodeRequestStatus.active(new DecodeResources.ReservationHandle(2L, REQUEST_ID, 1L)), lateStatusAt);
+                case DECODE_RESERVATION -> requestContext.scheduler().acceptDecodeStatus(requestContext, decode, DecodeResources.DecodeRequestStatus.active(new DecodeResources.ReservationHandle(1L, REQUEST_ID, 2L)), lateStatusAt);
             };
             org.junit.jupiter.api.Assertions.assertNull(observation);
             assertTrue(RequestProtocolTestSupport.<Boolean>inspect(registry, requestContext, "requestInactiveLocked", lateStatusAt));
@@ -334,9 +334,9 @@ class RequestInactivityTest {
     private void observeActive(RoleType source, long nowMs) {
         synchronized (requestContext) {
             if (source == RoleType.PREFILL) {
-                requestContext.acceptPrefillStatus(prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item), nowMs);
+                requestContext.scheduler().acceptPrefillStatus(requestContext, prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item), nowMs);
             } else {
-                requestContext.acceptDecodeStatus(decode, DecodeResources.DecodeRequestStatus.active(item.decodeReservation()), nowMs);
+                requestContext.scheduler().acceptDecodeStatus(requestContext, decode, DecodeResources.DecodeRequestStatus.active(item.decodeReservation()), nowMs);
             }
         }
     }
