@@ -47,14 +47,14 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Admission and preemption contracts for {@link DecodeCapacityAcquirer#tryReserve}.
+ * Admission and preemption contracts for {@link DecodeCapacityAcquirer#tryReclaim}.
  *
  * <p>Requirement: every early decline is side-effect free (returns null
  * without reserving a permit, touching any port, or emitting telemetry).
  * Corner cases are derived from the domain requirements, not by echoing
  * if-branches.
  */
-@DisplayName("DecodeCapacityAcquirer.tryReserve contracts")
+@DisplayName("DecodeCapacityAcquirer.tryReclaim contracts")
 class DecodeCapacityAcquirerTest {
 
     private RequestSchedulerReporter reporter;
