@@ -1,42 +1,44 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
-import java.util.stream.LongStream;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.delivery.DeliveryResult;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
+import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestContext;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestEndpointCapabilities;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestRequestScheduler;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestTelemetry;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.LongStream;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.atMostOnce;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atMostOnce;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /** Exact ordered-prefix and per-request completion contract for route delivery. */
 class RouteDeliveryStrategyTest {
@@ -216,8 +218,11 @@ class RouteDeliveryStrategyTest {
         } finally {
             PrefillAdmissionResources.closeCommitted(members, handoff);
         }
-        if ("NO_DECODE".equals(result)) { verify(firstPermit, never()).release(); }
-        else { verify(firstPermit).release(); }
+        if ("NO_DECODE".equals(result)) {
+            verify(firstPermit, never()).release();
+        } else {
+            verify(firstPermit).release();
+        }
         verify(siblingPermit, never()).dispatch();
         verify(siblingPermit).release();
         verify(handoff).close();
@@ -289,22 +294,32 @@ class RouteDeliveryStrategyTest {
         }
     }
 
-    @Test
-    void removedMemberDoesNotContributeToLaterRouteCompletionTime() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void removedMemberDoesNotContributeToLaterRouteCompletionTime(boolean claimThrows) {
         Fixture fixture = new Fixture();
         RequestRoute first = fixture.item(1L);
         RequestRoute cancelled = fixture.item(2L);
         RequestRoute last = fixture.item(3L);
         fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(new WorkSnapshot.RequestWork(99L, WorkSnapshot.Phase.COMMITTED, 25L)), List.of(), 0L));
-        fixture.schedulerFixture.commitLostFor(cancelled);
+        when(first.seqLen()).thenReturn(20L);
+        when(cancelled.seqLen()).thenReturn(30L);
+        when(last.seqLen()).thenReturn(40L);
+        if (claimThrows) {
+            fixture.schedulerFixture.throwCommitFor(cancelled);
+        } else {
+            fixture.schedulerFixture.commitLostFor(cancelled);
+        }
+        fixture.schedulerFixture.beforeCompletion(() ->
+                assertEquals(List.of(first, cancelled, last), fixture.schedulerFixture.committed()));
 
         fixture.context.deliver(fixture.strategy, List.of(first, cancelled, last),
                 "cancelled-middle", 0, OptionalLong.empty());
 
-        assertEquals(Map.of(first, 90L,
-                last, 180L), fixture.schedulerFixture.unstartedWorkMs());
-        assertEquals(115L, fixture.schedulerFixture.remainingWorkMsAt(first, 1_000L).orElseThrow());
-        assertEquals(205L, fixture.schedulerFixture.remainingWorkMsAt(last, 1_000L).orElseThrow());
+        assertEquals(Map.of(first, 10L,
+                last, 40L), fixture.schedulerFixture.unstartedWorkMs());
+        assertEquals(35L, fixture.schedulerFixture.remainingWorkMsAt(first, 1_000L).orElseThrow());
+        assertEquals(65L, fixture.schedulerFixture.remainingWorkMsAt(last, 1_000L).orElseThrow());
         assertEquals(List.of(List.of(first, last)), fixture.telemetry.routes());
         verify(fixture.capabilities.permit(cancelled)).release();
         verify(fixture.capabilities.permit(cancelled), never()).dispatch();
@@ -486,6 +501,8 @@ class RouteDeliveryStrategyTest {
         Fixture fixture = new Fixture();
         RequestRoute first = fixture.item(1L);
         RequestRoute second = fixture.item(2L);
+        when(first.seqLen()).thenReturn(20L);
+        when(second.seqLen()).thenReturn(40L);
         fixture.schedulerFixture.throwCompletionFor(first);
 
         IllegalStateException failure = assertThrows(
@@ -498,6 +515,7 @@ class RouteDeliveryStrategyTest {
         assertTrue(failure.getMessage().contains("completion failure 1"));
         assertEquals(List.of(first, second), fixture.schedulerFixture.committed());
         assertEquals(2, fixture.schedulerFixture.completions().size());
+        assertEquals(Map.of(first, 10L, second, 40L), fixture.schedulerFixture.unstartedWorkMs());
         assertEquals(List.of(List.of(second)), fixture.telemetry.routes());
         fixture.capabilities.handoffs().forEach(handoff -> verify(handoff).close());
     }

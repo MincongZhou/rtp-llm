@@ -46,7 +46,8 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             WorkSnapshot precedingWork) {
         Throwable deliveryFailure = null;
         List<RequestRoute> delivered = new ArrayList<>(transaction.members.size());
-        List<ClaimedRoute> claimed = new ArrayList<>(transaction.members.size());
+        // Preserve committed member indices; claim the whole group before publishing any response.
+        DeliveryClaim[] claims = new DeliveryClaim[transaction.members.size()];
         PrefillState.CommittedHandoff handoff = transaction.takeCommitted();
         try {
             for (int index = 0; index < transaction.members.size(); index++) {
@@ -66,18 +67,19 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                     }
                     continue;
                 }
+                claims[index] = claim;
+            }
+            long unstartedWorkMs = 0L;
+            for (int index = 0; index < claims.length; index++) {
+                DeliveryClaim claim = claims[index];
                 if (claim == null) {
                     continue;
                 }
-                claimed.add(new ClaimedRoute(claim, transaction.routePredictions[index]));
-            }
-            long unstartedWorkMs = 0L;
-            for (ClaimedRoute route : claimed) {
-                RequestRoute item = route.claim().item;
+                RequestRoute item = claim.item;
                 try {
-                    long itemWorkMs = route.predictedMs();
+                    long itemWorkMs = transaction.routePredictions[index];
                     unstartedWorkMs = saturatedAdd(unstartedWorkMs, itemWorkMs);
-                    route.claim().item.ctx().scheduler().publishRoute(route.claim(), precedingWork, unstartedWorkMs);
+                    item.ctx().scheduler().publishRoute(claim, precedingWork, unstartedWorkMs);
                     delivered.add(item);
                 } catch (Throwable completionFailure) {
                     deliveryFailure = Failures.append(
@@ -94,8 +96,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             throw Failures.propagate(deliveryFailure, "route delivery failed");
         }
     }
-
-    private record ClaimedRoute(DeliveryClaim claim, long predictedMs) { }
 
     @Override
     public GroupPlanner.PrefixPrediction<RequestRoute> newGroupPredictor(
