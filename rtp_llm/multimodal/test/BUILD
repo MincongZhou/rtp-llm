@@ -126,10 +126,18 @@ py_test(
     deps = ["//rtp_llm:testlib"],
 )
 
+py_library(
+    name = "process_engine_test_helpers",
+    testonly = True,
+    srcs = ["multimodal_process_engine_test.py"],
+    data = [":testdata"],
+    deps = ["//rtp_llm:testlib"],
+)
+
 py_test(
     name = "mm_remote_embedding_cache_test",
     srcs = ["mm_remote_embedding_cache_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = [":process_engine_test_helpers"],
 )
 
 py_test(
@@ -153,7 +161,7 @@ py_test(
 py_test(
     name = "mm_cancellation_test",
     srcs = ["mm_cancellation_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = [":process_engine_test_helpers"],
 )
 
 py_test(

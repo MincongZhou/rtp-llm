@@ -998,11 +998,13 @@ class MMSchedulerTest(TestCase):
         set_device.assert_called_once_with(3)
 
     def test_forward_profiler_captures_batched_embedding(self):
-        """The forward_profiler hook runs on the executor thread around the
-        forward, so the exported trace contains the batched_embedding event —
-        i.e. the core GPU compute is captured, not lost to the worker thread."""
+        """The executor's real profiler captures the CPU fake's forward event."""
         profiler = MMProfiler()
-        with tempfile.TemporaryDirectory() as tmp:
+        # This forward only creates CPU tensors. Avoid CUDA/CUPTI startup while
+        # retaining a real exported trace from the scheduler thread.
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "torch.cuda.is_available", return_value=False
+        ):
             # Inject the output dir (rank omitted keeps this path), then arm 1.
             profiler._output_path = tmp
             profiler.start_profile(count=1)
