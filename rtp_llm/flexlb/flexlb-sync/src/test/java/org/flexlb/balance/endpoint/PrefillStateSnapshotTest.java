@@ -848,9 +848,13 @@ class PrefillStateSnapshotTest {
         assertEquals(WorkSnapshot.Phase.ENGINE_QUEUED,
                 state.committedSnapshot().batches().getFirst().phase());
 
-        reconcile(Map.of("3", task(3, null, 0, 300)), Map.of(), unused -> {
+        var completed = reconcile(Map.of("3", task(3, null, 0, 300)), Map.of(), unused -> {
             throw new AssertionError("a completed batch needs no prediction");
         });
+        assertEquals(1, completed.batchCompletions().size());
+        assertTrue(completed.batchCompletions().getFirst().successfulCompletion());
+        assertFalse(completed.batchCompletions().getFirst().learningEligible(),
+                "local cleanup disqualifies learning even when all remaining Worker results succeed");
         assertTrue(state.committedSnapshot().batches().isEmpty());
         assertEquals(0L, remainingWork());
     }
@@ -1030,6 +1034,27 @@ class PrefillStateSnapshotTest {
         clock.set(250L);
         assertEquals(350L, remainingWork(), "the batch without terminal events still advances to RUNNING");
         assertEquals(List.of(3L, 4L), state.committedSnapshot().batches().getFirst().requestIds());
+    }
+
+    @Test
+    void localCleanupDoesNotInventExecutionEvidenceOrEnableLearning() {
+        RequestRoute first = item(1), rejected = item(2), survivor = item(3);
+        commitBatch(List.of(first, rejected, survivor), 300L);
+        assertTrue(EndpointTestSupport.releaseRequest(state, first));
+        var partial = reconcile(Map.of("2", task(2, null, 500L, 0L)), Map.of(), members -> {
+            assertEquals(List.of(survivor), members, "local cleanup cannot imply execution started");
+            return 90L;
+        });
+        assertTrue(partial.batchCompletions().isEmpty());
+        assertEquals(90L, remainingWork());
+        var result = reconcile(Map.of("3", task(3, null, 0L, 100L)), Map.of(), unused -> {
+            throw new AssertionError("a completed batch needs no prediction");
+        });
+        var completion = result.batchCompletions().getFirst();
+        assertEquals(100L, completion.actualWorkMs());
+        assertTrue(completion.successfulCompletion());
+        assertFalse(completion.learningEligible(), "local cleanup disqualifies the whole batch from learning");
+        assertEquals(0L, state.observedRequestCount());
     }
 
     @Test

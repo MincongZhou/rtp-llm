@@ -3,27 +3,26 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.DecodeResources.DispatchOutcome;
 import org.flexlb.balance.endpoint.DecodeResources.ReleaseReason;
-import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.TaskPhase;
 import org.flexlb.enums.DecodeTaskPhase;
+import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Map;
 
-import static org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED;
 import static org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
-import static org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult.RELEASED;
+import static org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED;
 import static org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult.ENGINE_ACCEPTED;
-import static org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult.STILL_OWNED;
+import static org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult.RELEASED;
 import static org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult.STALE;
+import static org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult.STILL_OWNED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -363,6 +362,61 @@ class DecodeStateTest {
         assertEquals(9_900L, state.routingView().realKvAvailable());
         assertEquals(RELEASED, state.release(EndpointTestSupport.decodeReservation(state, 11), ReleaseReason.LOCAL_ROLLBACK));
         assertEquals(0, state.routingView().engineCapacityUsed());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void repeatedAllocationPreservesFirstKvAndExactIdentity(boolean locallyReserved) {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = locallyReserved
+                ? state.tryReserveQueuedRequest(10, 200, 400, 50, CAPACITY) : null;
+        var first = calibrate(state, status, Map.of("10", task(10, TaskPhase.KV_ALLOCATED)), Map.of());
+        TaskInfo running = task(10, TaskPhase.RUNNING);
+        running.setInputLength(900L);
+        var repeated = calibrate(state, status, Map.of("10", running), Map.of());
+        var owner = state.resourceSnapshot().requests().get(10L);
+        assertEquals(100L, owner.kvTokens());
+        assertEquals(100L, owner.expectedKvTokens());
+        assertEquals(DecodeTaskPhase.RUNNING, owner.phase());
+        assertEquals(0, state.resourceSnapshot().reservedCount());
+        assertEquals(0, state.resourceSnapshot().queuedCount());
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        if (locallyReserved) {
+            assertEquals(reservation, first.requestStatuses().getFirst().reservation());
+            assertEquals(reservation, repeated.requestStatuses().getFirst().reservation());
+            assertTrue(state.isAcceptedByEngine(reservation));
+        } else {
+            assertEquals(0L, owner.reservationToken());
+            assertTrue(first.requestStatuses().isEmpty());
+            assertTrue(repeated.requestStatuses().isEmpty());
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = TaskPhase.class, names = {"RECEIVED", "PENDING"})
+    void allocationProofInDuplicateReportsClearsOnlyTheVictimsSyntheticKvHold(TaskPhase regressed) {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var victim = state.tryReserveQueuedRequest(10, 100, 200, 50, CAPACITY);
+        calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
+        assertEquals(DecodeResources.PreemptionBeginResult.SUCCESS, state.beginPreemption(
+                1, java.util.List.of(victim), 11, 100, 200, 80, new AdmissionCapacity(1, 100)));
+        assertTrue(EndpointTestSupport.handoffPreemption(state, 1));
+        calibrate(state, status, Map.of("10", task(10, regressed)), Map.of());
+        assertEquals(9_800L, state.routingView().realKvAvailable());
+        var observed = calibrate(state, status, Map.of("allocated", task(10, TaskPhase.KV_ALLOCATED),
+                "regressed", task(10, regressed)), Map.of());
+        assertEquals(2, observed.requestStatuses().size());
+        assertTrue(observed.requestStatuses().stream().allMatch(event -> event.reservation().equals(victim)));
+        assertEquals(2, state.routingView().engineCapacityUsed());
+        assertEquals(9_900L, state.routingView().realKvAvailable(),
+                "any allocation evidence in the full snapshot removes the synthetic hold");
+        calibrate(state, status, Map.of(), Map.of("10", task(10, TaskPhase.RUNNING)));
+        var incoming = state.finishPreemption(1, true);
+        assertNotNull(incoming);
+        assertEquals(RELEASED, state.release(incoming, ReleaseReason.LOCAL_ROLLBACK));
+        assertEquals(0, state.routingView().totalLoad());
     }
 
     private static TaskInfo task(long requestId, TaskPhase phase) {

@@ -241,11 +241,6 @@ public final class PrefillState {
             return remainingWorkAt(servicePhase, remainingWorkMs, phaseBaseMs, nowMs);
         }
 
-        private void observeTerminal(TerminalObservation terminal, long nowMs) {
-            touch(nowMs);
-            outcome.include(terminal);
-        }
-
         private void touch(long nowMs) {
             lastObservedAtMs = Math.max(lastObservedAtMs, nowMs);
         }
@@ -379,15 +374,10 @@ public final class PrefillState {
     private record TerminalObservation(RequestEntry owner,
                                        long executionTimeMs,
                                        long errorCode,
-                                       PriorityPreemptionProgress preemptionProgress,
-                                       boolean workerObserved) {
+                                       PriorityPreemptionProgress preemptionProgress) {
         private static TerminalObservation from(RequestEntry owner, WorkerStatus.TaskObservation task) {
             return new TerminalObservation(owner, task.executionTimeMs(), task.errorCode(),
-                    task.priorityPreemptionProgress(), true);
-        }
-
-        private static TerminalObservation external(RequestEntry owner) {
-            return new TerminalObservation(owner, -1L, 0L, PriorityPreemptionProgress.NONE, false);
+                    task.priorityPreemptionProgress());
         }
 
         private TerminalObservation merge(TerminalObservation other) {
@@ -395,8 +385,7 @@ public final class PrefillState {
             return new TerminalObservation(owner,
                     Math.max(executionTimeMs, other.executionTimeMs),
                     errorCode != 0L ? errorCode : other.errorCode,
-                    PriorityPreemptionProgress.merge(preemptionProgress, other.preemptionProgress),
-                    workerObserved || other.workerObserved);
+                    PriorityPreemptionProgress.merge(preemptionProgress, other.preemptionProgress));
         }
     }
 
@@ -969,7 +958,7 @@ public final class PrefillState {
             if (entry == null || entry.route != exactItem) { return RequestRelease.NONE; }
             return switch (entry.ownership) {
                 case COMMITTED -> {
-                    settleLocked(entry, TerminalObservation.external(entry), clock.getAsLong());
+                    releaseCommittedLocked(entry, clock.getAsLong());
                     yield RequestRelease.COMMITTED;
                 }
                 case DIRECT_RESERVED -> {
@@ -1083,9 +1072,8 @@ public final class PrefillState {
         }
 
         private void include(TerminalObservation terminal) {
-            boolean succeeded = terminal.workerObserved && terminal.errorCode == 0L;
-            executionStarted |= terminal.workerObserved
-                    && (terminal.errorCode == 0L || terminal.executionTimeMs > 0L);
+            boolean succeeded = terminal.errorCode == 0L;
+            executionStarted |= succeeded || terminal.executionTimeMs > 0L;
             maxExecutionTimeMs = Math.max(maxExecutionTimeMs, terminal.executionTimeMs);
             successfulCompletion |= succeeded;
             learningEligible &= succeeded;
@@ -1294,7 +1282,7 @@ public final class PrefillState {
                 }
                 if (retained) { continue; }
                 for (RequestEntry entry : List.copyOf(members)) {
-                    settleLocked(entry, TerminalObservation.external(entry), nowMs);
+                    releaseCommittedLocked(entry, nowMs);
                 }
                 evicted++;
             }
@@ -1307,7 +1295,7 @@ public final class PrefillState {
                 }
             }
             for (RequestEntry entry : individuals) {
-                settleLocked(entry, TerminalObservation.external(entry), nowMs);
+                releaseCommittedLocked(entry, nowMs);
             }
             evicted += individuals.size();
         } finally {
@@ -1429,9 +1417,13 @@ public final class PrefillState {
         return new WorkCapture(nowMs, individual, capturedBatches, unknownEngineRequestCount);
     }
 
-    private void settleLocked(RequestEntry entry, TerminalObservation terminal, long nowMs) {
+    /** Local cleanup releases ownership without supplying a Worker execution result. */
+    private void releaseCommittedLocked(RequestEntry entry, long nowMs) {
         requireLock();
-        if (entry.batch != null) { entry.batch.observeTerminal(terminal, nowMs); }
+        if (entry.batch != null) {
+            entry.batch.touch(nowMs);
+            entry.batch.outcome.learningEligible = false;
+        }
         removeCommittedLocked(entry);
         recordMutationLocked();
     }
