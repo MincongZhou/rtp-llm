@@ -11,7 +11,6 @@ import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimResolution;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.BalanceContext.AdmissionHandle;
-import org.flexlb.balance.scheduler.BalanceContext.AdmissionResult;
 import org.flexlb.balance.scheduler.BalanceContext.CleanupNext;
 import org.flexlb.balance.scheduler.BalanceContext.CleanupPass;
 import org.flexlb.balance.scheduler.BalanceContext.DeliveryClaim;
@@ -23,7 +22,7 @@ import org.flexlb.balance.scheduler.BalanceContext.PublicationPermit;
 import org.flexlb.balance.scheduler.BalanceContext.RequestFuture;
 import org.flexlb.balance.scheduler.BalanceContext.RequestStage;
 import org.flexlb.balance.scheduler.BalanceContext.ResponseCompletion;
-import org.flexlb.balance.scheduler.BalanceContext.SelectedResponse;
+import org.flexlb.balance.scheduler.BalanceContext.ResponseResult;
 import org.flexlb.balance.scheduler.ExpirationTimer.DecisionDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.RequestDeadline;
 import org.flexlb.config.FlexlbConfig;
@@ -587,7 +586,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 synchronized (ctx) {
                     if (ctx.admission() == exact) {
                         restoredRoute = ctx.finishAdmission(exact);
-                        effect = settleRoutingFactsLocked(ctx, exact, failureResponse);
+                        effect = finalizationEffects(ctx.settleAdmissionLocked(exact, failureResponse,
+                                () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), null);
                     }
                     cleanupPending = ctx.hasCleanup();
                     routeToCancel = cleanupPending || effect != null ? null : ctx.pendingWorkerQueueCancellationLocked();
@@ -714,9 +714,10 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         synchronized (ctx) {
             if (!ctx.acceptDeliveryClaim(claim) || ctx.hasTerminalAction() || ctx.hasCleanup()) { return null; }
             if (result.failed()) {
-                SelectedResponse response = ctx.selectDeliveryFailureLocked(claim.item, result.status(),
+                PublicationPermit permit = ctx.selectDeliveryFailureLocked(claim.item, result.status(),
                         "Delivery failed: " + detailOf(result.cause()), () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
-                return () -> publishFailureAndCleanUp(ctx, response);
+                ResponseResult selected = ctx.selectedResponse();
+                return () -> publishFailureAndCleanUp(ctx, permit, selected);
             }
             if (!ctx.ownsActiveRoute(claim.item)) {
                 return null;
@@ -735,18 +736,20 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     public void failDeliveryPreparation(RequestRoute exact, Throwable cause) {
         BalanceContext ctx = exact.ctx();
-        SelectedResponse response;
+        PublicationPermit permit;
+        ResponseResult selected;
         synchronized (ctx) {
             if (!ownsPreparedDeliveryLocked(ctx, exact)) {
                 return;
             }
-            response = ctx.selectDeliveryFailureLocked(exact, DeliveryResult.Status.NOT_SENT, "Delivery preparation failed: " + detailOf(cause), () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
+            permit = ctx.selectDeliveryFailureLocked(exact, DeliveryResult.Status.NOT_SENT, "Delivery preparation failed: " + detailOf(cause), () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
+            selected = ctx.selectedResponse();
         }
-        publishFailureAndCleanUp(ctx, response);
+        publishFailureAndCleanUp(ctx, permit, selected);
     }
 
-    private void publishFailureAndCleanUp(BalanceContext ctx, SelectedResponse response) {
-        Throwable failure = Failures.run(null, response == null ? null : () -> submitSelectedResponse(response));
+    private void publishFailureAndCleanUp(BalanceContext ctx, PublicationPermit permit, ResponseResult selected) {
+        Throwable failure = Failures.run(null, permit == null ? null : () -> submitResponse(permit, selected));
         failure = Failures.run(failure, () -> resumeCleanup(ctx));
         Failures.rethrow(failure, "request cleanup failed");
     }
@@ -890,57 +893,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             Failures.rethrow(notificationFailure, "Decode capacity publication failed");
         };
-    }
-
-    Runnable settleRoutingFactsLocked(BalanceContext ctx, AdmissionHandle operation, Response failure) {
-        ctx.requireContextLock("admission settlement");
-        CancelReason pendingCancellation = ctx.cancellationReason();
-        AdmissionResult retained = ctx.consumeAdmissionFacts(operation);
-        boolean inactive = retained.inactive();
-        DeferredTerminal pending = retained.terminal();
-        PendingPrefillRetirement retirement = retained.retirement();
-        if (ctx.route() == null && pending != null && pending.kind() == DeferredTerminal.Kind.FAILURE) {
-            if (failure == null) {
-                failure = buildErrorResponse(pending.errorType(), pending.detail());
-            }
-            pending = null;
-        }
-        if (ctx.retainCleanupFacts(inactive, pending)) {
-            return null;
-        }
-        // Authoritative completion takes precedence over retirement and admission failure.
-        if (pending != null && pending.authoritativeWorker()) {
-            return advanceRequestEndLocked(ctx, ctx.route(), pending);
-        }
-        TerminalAction retired = ctx.claimPrefillRetirementLocked(retirement, () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
-        if (retired != null) {
-            return finalizationEffects(retired, null);
-        }
-        if (inactive && pendingCancellation != null) {
-            return finalizationEffects(ctx.decideRequestEndLocked(DeferredTerminal.inactivityExpired("REQUEST_INACTIVE: no matching Engine request status before inactivity timeout"), () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), null);
-        }
-        Runnable effect = null;
-        if (pending != null) {
-            effect = advanceRequestEndLocked(ctx, ctx.route(), pending);
-        } else if (failure != null) {
-            String message = pendingCancellation != null ? pendingCancellation.getMessage()
-                    : failure.getErrorMessage() == null ? "eviction admission failed" : failure.getErrorMessage();
-            TerminalOutcome outcome = pendingCancellation == null ? TerminalOutcome.fail(message) : TerminalOutcome.cancellation(pendingCancellation, message);
-            Response response = pendingCancellation == null ? failure : Response.copyOf(ctx.cancellationResponse());
-            effect = finalizationEffects(ctx.claimFinalizationLocked(null, outcome, response, true, () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), null);
-        }
-        if (effect != null || pendingCancellation == null || !ctx.ownsActiveGenerationLocked()) {
-            return effect;
-        }
-        if (!inactive && ctx.pendingWorkerQueueCancellationLocked() != null) {
-            return effect;
-        }
-        TerminalAction cancelled = pendingCancellation == CancelReason.DEADLINE_EXCEEDED
-                || ctx.requestInactiveLocked(System.currentTimeMillis())
-                ? ctx.decideRequestEndLocked(DeferredTerminal.inactivityExpired(pendingCancellation.getMessage()),
-                        () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL))
-                : ctx.tryTerminateCancellationLocked(() -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
-        return cancelled == null ? effect : finalizationEffects(cancelled, null);
     }
 
     Runnable decideInactivityLocked(BalanceContext ctx, long nowMs, PreemptionRegistration signal) {
@@ -1307,7 +1259,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     private void publishTerminal(TerminalAction action) {
         if (action.publication() != null && action.response() != null) {
-            submitSelectedResponse(BalanceContext.selectPublication(action.requestContext(), action.publication(),
+            submitResponse(action.publication(), BalanceContext.selectPublication(action.requestContext(), action.publication(),
                     ResponseCompletion.RESPONSE, action.response(), null, false));
         }
     }
@@ -1336,9 +1288,11 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             archive = context.claimArchiveLocked(action);
             batchDelivery = context.deliveryClaimKind() == DeliveryClaimKind.BATCH_ENQUEUE;
         }
-        if (archive) { commitTerminalRecord(context, action); }
-        else if (batchDelivery) { enqueueCleanup(context); }
-        else {
+        if (archive) {
+            commitTerminalRecord(context, action);
+        } else if (batchDelivery) {
+            enqueueCleanup(context);
+        } else {
             Throwable releaseFailure = Failures.run(null, () -> resumeCleanup(context));
             if (releaseFailure != null) { recordFailure(releaseFailure); }
         }
@@ -1390,7 +1344,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 } catch (Throwable failure) {
                     Logger.error("Delivery ACK reporting failed request_id={}", delivery.item().requestId(), failure);
                 }
-                return completeFutureResult(BalanceContext.selectPublication(delivery.item().ctx(), delivery.publication(),
+                return completeFutureResult(delivery.publication(), BalanceContext.selectPublication(delivery.item().ctx(), delivery.publication(),
                         ResponseCompletion.RESPONSE, delivery.response(), null, false));
             });
         } catch (RuntimeException | Error failure) {
@@ -1399,29 +1353,30 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    static boolean completeFutureResult(SelectedResponse response) {
-        response.permit().requestContext().requireOutsideContextLock("response completion");
-        if (response.result() == null) { return false; }
-        var result = response.result();
+    static boolean completeFutureResult(PublicationPermit permit, ResponseResult result) {
+        BalanceContext context = permit.requestContext();
+        context.requireOutsideContextLock("response completion");
+        if (result == null) { return false; }
+        var future = context.future();
         return switch (result.completion()) {
-            case RESPONSE -> response.future().completeOwned(result.response());
-            case FAILURE -> response.future().completeExceptionallyOwned(result.failure());
-            case CANCELLATION -> response.future().cancelOwned(result.interrupt());
+            case RESPONSE -> future.completeOwned(result.response());
+            case FAILURE -> future.completeExceptionallyOwned(result.failure());
+            case CANCELLATION -> future.cancelOwned(result.interrupt());
         };
     }
 
-    private void submitSelectedResponse(SelectedResponse response) {
+    private void submitResponse(PublicationPermit permit, ResponseResult result) {
         try {
-            response.permit().requestContext().requireOutsideContextLock("response submission");
-            responseCompletions.submit(response.permit().registration, () -> completeFutureResult(response));
+            permit.requestContext().requireOutsideContextLock("response submission");
+            responseCompletions.submit(permit.registration, () -> completeFutureResult(permit, result));
         } catch (RuntimeException | Error failure) {
-            response.permit().closePublication();
+            permit.closePublication();
             throw failure;
         }
     }
 
-    private boolean completeSelectedResponseNow(SelectedResponse response) {
-        return responseCompletions.completeNow(response.permit().registration, () -> completeFutureResult(response));
+    private boolean completeResponseNow(PublicationPermit permit, ResponseResult result) {
+        return responseCompletions.completeNow(permit.registration, () -> completeFutureResult(permit, result));
     }
 
     // ── 响应：本地结束、结果仲裁与发布交接 ──
@@ -1430,7 +1385,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         if (permit == null) {
             return false;
         }
-        submitSelectedResponse(BalanceContext.selectPublication(ctx, permit, ResponseCompletion.RESPONSE, response, null, false));
+        submitResponse(permit, BalanceContext.selectPublication(ctx, permit, ResponseCompletion.RESPONSE, response, null, false));
         return true;
     }
 
@@ -1454,7 +1409,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 TerminalOutcome.cancel(CancelReason.CLIENT_CANCELLED.getMessage());
         };
         PublicationPermit permit = terminateLocallyAndAcquirePublication(ctx, outcome);
-        return permit != null && completeSelectedResponseNow(BalanceContext.selectPublication(ctx, permit, completion, response, error, interrupt));
+        return permit != null && completeResponseNow(permit, BalanceContext.selectPublication(ctx, permit, completion, response, error, interrupt));
     }
 
     /**
@@ -1493,7 +1448,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
         }
         try {
-            return completeSelectedResponseNow(BalanceContext.selectPublication(ctx, permit, ResponseCompletion.CANCELLATION, null, null, interrupt));
+            return completeResponseNow(permit, BalanceContext.selectPublication(ctx, permit, ResponseCompletion.CANCELLATION, null, null, interrupt));
         } catch (RuntimeException | Error failure) {
             ctx.future().cancelOwned(interrupt);
             throw failure;
@@ -1620,8 +1575,11 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     completed = ctx.completedCleanupActionLocked();
                     start = completed == null ? ctx.tryFinishCleanupLocked() : null;
                 }
-                if (completed != null) { commitTerminalRecord(ctx, completed); }
-                else { executeFinalization(start); }
+                if (completed != null) {
+                    commitTerminalRecord(ctx, completed);
+                } else {
+                    executeFinalization(start);
+                }
                 break;
             }
         } catch (Throwable problem) { error = Failures.append(error, problem); }

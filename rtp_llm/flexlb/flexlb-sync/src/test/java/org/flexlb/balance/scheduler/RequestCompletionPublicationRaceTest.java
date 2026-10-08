@@ -1,8 +1,8 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BalanceContext.AdmissionHandle;
 import org.flexlb.balance.scheduler.BalanceContext.DeliveryClaim;
@@ -414,7 +414,7 @@ class RequestCompletionPublicationRaceTest {
                 }
                 var selected = BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(),
                         BalanceContext.ResponseCompletion.RESPONSE, failure, null, false);
-                completions.submit(selected.permit().registration, () -> AbstractRequestScheduler.completeFutureResult(selected));
+                completions.submit(terminal.publication().registration, () -> AbstractRequestScheduler.completeFutureResult(terminal.publication(), selected));
                 resume.countDown();
                 blockedCallback.get(2, TimeUnit.SECONDS);
                 assertSame(failure, fixture.requestContext().future().get(2, TimeUnit.SECONDS));
@@ -440,7 +440,7 @@ class RequestCompletionPublicationRaceTest {
             try {
                 synchronized (fixture.requestContext()) {
                     assertThrows(IllegalStateException.class, () -> org.springframework.test.util.ReflectionTestUtils
-                            .invokeMethod(fixture.scheduler(), asynchronous ? "submitSelectedResponse" : "completeSelectedResponseNow", selected));
+                            .invokeMethod(fixture.scheduler(), asynchronous ? "submitResponse" : "completeResponseNow", fixture.delivery().publication(), selected));
                 }
                 assertFalse(fixture.requestContext().future().isDone(), "invalid lock-held calls must not run callbacks");
                 assertTrue(((java.util.Set<?>) org.springframework.test.util.ReflectionTestUtils
@@ -457,7 +457,7 @@ class RequestCompletionPublicationRaceTest {
         Fixture fixture = fixture();
         Response success = new Response();
         success.setSuccess(true);
-        BalanceContext.SelectedResponse publishSuccess = BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), BalanceContext.ResponseCompletion.RESPONSE, success, null, false);
+        BalanceContext.ResponseResult publishSuccess = BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), BalanceContext.ResponseCompletion.RESPONSE, success, null, false);
         assertFalse(fixture.requestContext().future().isDone());
         CompletableFuture<Void> callback = fixture.requestContext().future().thenAccept(response ->
                 assertFalse(Thread.holdsLock(fixture.requestContext())));
@@ -469,7 +469,7 @@ class RequestCompletionPublicationRaceTest {
             fixture.scheduler().commitTerminalRecord(fixture.requestContext(), terminal);
             assertEquals(RequestState.Phase.TIMED_OUT, fixture.requestContext().snapshot().state());
         }
-        assertTrue(AbstractRequestScheduler.completeFutureResult(publishSuccess));
+        assertTrue(AbstractRequestScheduler.completeFutureResult(fixture.delivery().publication(), publishSuccess));
         assertSame(success, fixture.requestContext().future().join());
         callback.join();
     }
@@ -479,12 +479,12 @@ class RequestCompletionPublicationRaceTest {
         Fixture fixture = fixture();
         Response success = new Response();
         success.setSuccess(true);
-        BalanceContext.SelectedResponse selected = BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), BalanceContext.ResponseCompletion.RESPONSE, success, null, false);
+        BalanceContext.ResponseResult selected = BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), BalanceContext.ResponseCompletion.RESPONSE, success, null, false);
 
         assertFalse(fixture.requestContext().future().cancel(false));
         assertFalse(fixture.requestContext().future().isDone());
         assertEquals(RequestState.Phase.ACKNOWLEDGED, fixture.requestContext().snapshot().state());
-        assertTrue(AbstractRequestScheduler.completeFutureResult(selected));
+        assertTrue(AbstractRequestScheduler.completeFutureResult(fixture.delivery().publication(), selected));
         assertSame(success, fixture.requestContext().future().join());
     }
 
@@ -503,18 +503,18 @@ class RequestCompletionPublicationRaceTest {
         }
         Response success = new Response();
         success.setSuccess(true);
-        assertFalse(AbstractRequestScheduler.completeFutureResult(BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), BalanceContext.ResponseCompletion.RESPONSE, success, null, false)));
+        assertFalse(AbstractRequestScheduler.completeFutureResult(fixture.delivery().publication(), BalanceContext.selectPublication(fixture.requestContext(), fixture.delivery().publication(), BalanceContext.ResponseCompletion.RESPONSE, success, null, false)));
         assertFalse(fixture.requestContext().future().isDone());
         CompletableFuture<Void> callback = fixture.requestContext().future().handle((response, error) -> {
             assertFalse(Thread.holdsLock(fixture.requestContext()));
             return null;
         });
-        BalanceContext.SelectedResponse publication = switch (form) {
+        BalanceContext.ResponseResult publication = switch (form) {
             case RESPONSE -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), BalanceContext.ResponseCompletion.RESPONSE, failure, null, false);
             case FAILURE -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), BalanceContext.ResponseCompletion.FAILURE, null, new IllegalStateException("worker failed"), false);
             case CANCELLATION -> BalanceContext.selectPublication(fixture.requestContext(), terminal.publication(), BalanceContext.ResponseCompletion.CANCELLATION, null, null, false);
         };
-        assertTrue(AbstractRequestScheduler.completeFutureResult(publication));
+        assertTrue(AbstractRequestScheduler.completeFutureResult(terminal.publication(), publication));
         callback.join();
         assertTrue(fixture.requestContext().future().isDone());
         if (form == TerminalForm.RESPONSE) {

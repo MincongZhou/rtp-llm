@@ -702,6 +702,48 @@ class RequestContextLifecycleTest {
     }
 
     @Test
+    void workerTerminalDuringAdmissionWinsOverRetirementAndAdmissionFailure() throws Exception {
+        Registered registered = registerItem(7111L);
+        RequestRoute original = registered.item();
+        BalanceContext context = original.ctx();
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        when(prefill.getStatus()).thenReturn(org.flexlb.dao.master.WorkerStatus.createDiscovered(
+                org.flexlb.dao.route.RoleType.PREFILL, "test", "127.0.0.1", 8000, 8001, "test"));
+        RequestRoute route = RequestRoute.create(context, original.routeResponse(), null, null,
+                prefill, original.decodeEp(), original.decodeReservation(), original.enqueuedAtMs());
+        var callbacks = new java.util.concurrent.atomic.AtomicInteger();
+        var published = registered.future().thenAccept(response -> {
+            assertFalse(Thread.holdsLock(context));
+            callbacks.incrementAndGet();
+        });
+        try (var admission = lifecycle.claimAdmissionHandle(route.requestId(), registered.future());
+                var finish = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(admission);
+            assertEquals(PlacementResult.Status.SUCCESS,
+                    lifecycle.commitRoute(route, RequestProtocolTestSupport.publication(() -> true)));
+            lifecycle.onPrefillGenerationRetired(prefill, List.of(route));
+            lifecycle.runtime.continuations().awaitIdle();
+            RequestProtocolTestSupport.applyPrefillStatus(lifecycle, context, prefill,
+                    org.flexlb.dao.route.RoleType.PREFILL,
+                    org.flexlb.balance.endpoint.PrefillState.PrefillRequestStatus.terminal(route,
+                            org.flexlb.balance.endpoint.PrefillState.PrefillRequestStatus.Kind.FAILED, 42L));
+            assertFalse(registered.future().isDone(), "the routing owner still retains all terminal evidence");
+            admission.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
+            admission.finish();
+        }
+        assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(),
+                registered.future().get(5, TimeUnit.SECONDS).getCode());
+        published.get(5, TimeUnit.SECONDS);
+        lifecycle.runtime.continuations().awaitIdle();
+        assertEquals(1, callbacks.get());
+        assertEquals(RequestStage.FINISHED, context.stage());
+        assertEquals(RequestState.Phase.FAILED, context.snapshot().state());
+        assertEquals(0, SchedulerTestSupport.repository(lifecycle).liveRequestCount());
+        verify(route.decodeEp()).release(route.decodeReservation(), DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
+        org.mockito.Mockito.verify(prefill, org.mockito.Mockito.never()).releaseRequest(route);
+    }
+
+    @Test
     void admissionFailurePreservesAnEarlierCancellation() throws Exception {
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(304L));
         AdmissionHandle admission = lifecycle.claimAdmissionHandle(304L, future);
@@ -926,18 +968,20 @@ class RequestContextLifecycleTest {
         var claim = lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 707L, 1L), 21L, "victim").orElseThrow();
         assertTrue(lifecycle.updatePreemption(claim, org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         delivery.recordWorkerCompletion(registered.item());
-        BalanceContext.SelectedResponse response;
+        BalanceContext.PublicationPermit permit;
+        BalanceContext.ResponseResult response;
         synchronized (context) {
             context.retainPreemptionTerminalLocked(claim, DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, true, 0L));
-            response = context.selectDeliveryFailureLocked(registered.item(), org.flexlb.balance.delivery.DeliveryResult.Status.UNCERTAIN,
+            permit = context.selectDeliveryFailureLocked(registered.item(), org.flexlb.balance.delivery.DeliveryResult.Status.UNCERTAIN,
                     "delivery abandoned while cancellation was pending",
                     () -> lifecycle.requirePublicationPermitLocked(context, BalanceContext.PublicationKind.TERMINAL));
+            response = context.selectedResponse();
             var pass = context.beginCleanup();
             context.finishCleanup(pass, true, false);
         }
-        if (response != null) {
-            try { AbstractRequestScheduler.completeFutureResult(response); }
-            finally { response.permit().closePublication(); }
+        if (permit != null) {
+            try { AbstractRequestScheduler.completeFutureResult(permit, response); }
+            finally { permit.closePublication(); }
         }
         assertTrue(lifecycle.updatePreemption(claim, org.flexlb.balance.preemption.PreemptionCancelPhase.NOT_FOUND_STALE));
         var source = registered.item().decodeEp();

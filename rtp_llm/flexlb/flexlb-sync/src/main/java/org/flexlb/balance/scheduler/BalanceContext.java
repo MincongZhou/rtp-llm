@@ -2,6 +2,10 @@ package org.flexlb.balance.scheduler;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
+import io.opentelemetry.context.Context;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
@@ -41,11 +45,6 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 import static org.flexlb.dao.loadbalance.Response.buildSuccessResponse;
-
-import io.opentelemetry.context.Context;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.ToString;
 
 /**
  * 单个请求的运行状态：输入快照、路由与投递所有权、前端结果、取消及资源清理进度。
@@ -932,8 +931,11 @@ public class BalanceContext {
             exact.tryFinish();
         }
         if (cleanup != null) {
-            if (terminal != null) { recordCleanupSettlement(false, true, false); }
-            else { detachPreemptionOwnerLocked(exact); }
+            if (terminal != null) {
+                recordCleanupSettlement(false, true, false);
+            } else {
+                detachPreemptionOwnerLocked(exact);
+            }
             return null;
         }
         detachPreemptionOwnerLocked(exact);
@@ -1273,7 +1275,7 @@ public class BalanceContext {
         boolean cleanupRequired() { synchronized (owner) { return abandonmentReason != null; } }
     }
 
-    static SelectedResponse selectPublication(BalanceContext ctx, PublicationPermit permit, ResponseCompletion completion, Response response, Throwable failure, boolean mayInterruptIfRunning) {
+    static ResponseResult selectPublication(BalanceContext ctx, PublicationPermit permit, ResponseCompletion completion, Response response, Throwable failure, boolean mayInterruptIfRunning) {
         ctx.requireOutsideContextLock("response selection");
         checkArgument(permit.requestContext == ctx
                 && (completion == ResponseCompletion.RESPONSE
@@ -1282,7 +1284,7 @@ public class BalanceContext {
         permit.consumeForSelection();
         try {
             synchronized (ctx) {
-                return new SelectedResponse(permit, ctx.future(), ctx.claimPublicationResultLocked(permit.kind, completion, response, failure, mayInterruptIfRunning));
+                return ctx.claimPublicationResultLocked(permit.kind, completion, response, failure, mayInterruptIfRunning);
             }
         } catch (RuntimeException | Error selectionFailure) {
             permit.closePublication();
@@ -1337,11 +1339,6 @@ public class BalanceContext {
 
         RESPONSE, FAILURE, CANCELLATION
     }
-
-    /**
-     * Frozen response selection; a null result publishes nothing.
-     */
-    record SelectedResponse(PublicationPermit permit, RequestFuture future, ResponseResult result) { }
 
     record ResponseResult(ResponseCompletion completion, Response response, Throwable failure, boolean interrupt) { }
 
@@ -1515,7 +1512,7 @@ public class BalanceContext {
         }
     }
     /** 投递失败可先发布错误，再在 FINALIZING 中等待资源结算；不得据此立即归档请求。 */
-    SelectedResponse selectDeliveryFailureLocked(RequestRoute exact, DeliveryResult.Status source, String detail, Supplier<PublicationPermit> publication) {
+    PublicationPermit selectDeliveryFailureLocked(RequestRoute exact, DeliveryResult.Status source, String detail, Supplier<PublicationPermit> publication) {
         this.requireContextLock("request failure");
         if (!this.ownsActiveRoute(exact) || this.cleanup != null) {
             return null;
@@ -1534,7 +1531,7 @@ public class BalanceContext {
         }
         this.selectedResponse = new ResponseResult(ResponseCompletion.RESPONSE, response, null, false);
         permit.consumeForSelection();
-        return new SelectedResponse(permit, this.future(), this.selectedResponse);
+        return permit;
     }
 
     /** 注册时冻结调度需求并安装受控 Future；RequestRepository 在此后发布 context。 */
@@ -1636,30 +1633,77 @@ public class BalanceContext {
         return null;
     }
 
-    record AdmissionResult(boolean inactive, DeferredTerminal terminal, PendingPrefillRetirement retirement) { }
-
-    AdmissionResult consumeAdmissionFacts(AdmissionHandle exact) {
+    /** Settle the completed routing operation's retained evidence into this request's outcome. */
+    TerminalAction settleAdmissionLocked(AdmissionHandle operation, Response failure, Supplier<PublicationPermit> publication) {
         requireContextLock("admission settlement");
-        AdmissionResult result = new AdmissionResult(exact.inactivityExpired, exact.observedTerminal, exact.prefillRetirement);
-        exact.inactivityExpired = false;
-        exact.observedTerminal = null;
-        exact.prefillRetirement = null;
-        return result;
+        checkState(operation.owner == this && admission == null && preemption == null,
+                "routing settlement requires the completed request admission");
+        CancelReason pendingCancellation = this.cancellationReason();
+        boolean inactive = operation.inactivityExpired;
+        DeferredTerminal pending = operation.observedTerminal;
+        PendingPrefillRetirement retirement = operation.prefillRetirement;
+        operation.inactivityExpired = false;
+        operation.observedTerminal = null;
+        operation.prefillRetirement = null;
+        if (this.route() == null && pending != null && pending.kind() == DeferredTerminal.Kind.FAILURE) {
+            if (failure == null) {
+                failure = buildErrorResponse(pending.errorType(), pending.detail());
+            }
+            pending = null;
+        }
+        if (cleanup != null) {
+            cleanup.expired |= inactive;
+            if (pending != null && pending.decodeTerminalAlreadyApplied()) {
+                recordCleanupSettlement(false, true, true);
+            }
+            return null;
+        }
+        // Authoritative completion takes precedence over retirement and admission failure.
+        if (pending != null && pending.authoritativeWorker()) {
+            return decideRetainedRequestEndLocked(pending, publication);
+        }
+        TerminalAction retired = this.claimPrefillRetirementLocked(retirement, publication);
+        if (retired != null) {
+            return retired;
+        }
+        if (inactive && pendingCancellation != null) {
+            return this.decideRequestEndLocked(DeferredTerminal.inactivityExpired("REQUEST_INACTIVE: no matching Engine request status before inactivity timeout"), publication);
+        }
+        TerminalAction action = null;
+        if (pending != null) {
+            action = decideRetainedRequestEndLocked(pending, publication);
+        } else if (failure != null) {
+            String message = pendingCancellation != null ? pendingCancellation.getMessage()
+                    : failure.getErrorMessage() == null ? "eviction admission failed" : failure.getErrorMessage();
+            TerminalOutcome outcome = pendingCancellation == null ? TerminalOutcome.fail(message) : TerminalOutcome.cancellation(pendingCancellation, message);
+            Response response = pendingCancellation == null ? failure : Response.copyOf(this.cancellationResponse());
+            action = this.claimFinalizationLocked(null, outcome, response, true, publication);
+        }
+        if (action != null || pendingCancellation == null || !this.ownsActiveGenerationLocked()) {
+            return action;
+        }
+        if (!inactive && this.pendingWorkerQueueCancellationLocked() != null) {
+            return null;
+        }
+        if (pendingCancellation == CancelReason.DEADLINE_EXCEEDED
+                || requestInactiveLocked(System.currentTimeMillis())) {
+            return decideRequestEndLocked(DeferredTerminal.inactivityExpired(pendingCancellation.getMessage()), publication);
+        }
+        return tryTerminateCancellationLocked(publication);
+    }
+
+    private TerminalAction decideRetainedRequestEndLocked(DeferredTerminal event, Supplier<PublicationPermit> publication) {
+        if (route == null || !ownsResourceTrackingLocked()
+                || !event.authoritativeWorker() && !ownsActiveRoute(route)) {
+            return null;
+        }
+        // Admission excludes preemption, and cleanup evidence was already handled by settleAdmissionLocked.
+        return decideRequestEndLocked(event, publication);
     }
 
     void retainAdmissionExpiry() {
         requireContextLock("admission expiry");
         admission.inactivityExpired = true;
-    }
-
-    boolean retainCleanupFacts(boolean inactive, DeferredTerminal terminal) {
-        requireContextLock("cleanup evidence");
-        if (cleanup == null) { return false; }
-        cleanup.expired |= inactive;
-        if (terminal != null && terminal.decodeTerminalAlreadyApplied()) {
-            recordCleanupSettlement(false, true, true);
-        }
-        return true;
     }
 
     boolean ownsPreparedDeliveryLocked(RequestRoute exact) {
