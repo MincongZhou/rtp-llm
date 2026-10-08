@@ -168,14 +168,14 @@ public class CostBasedPrefillStrategy {
             int priority, RoleType role, String group) {
         AdmissionRejectReason reason = null;
         int workerCount = 0;
-        long observedRequestCount = 0;
+        long outstandingRequestCount = 0;
         for (var entry : directory) {
             PrefillEndpoint endpoint = entry.endpoint();
             if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) {
                 continue;
             }
             workerCount++;
-            observedRequestCount += endpoint.observedRequestCount();
+            outstandingRequestCount += endpoint.outstandingRequestCount();
             AdmissionRejectReason workerReason = endpoint.admissionRejectReason(priority);
             if (reason == null) {
                 reason = workerReason;
@@ -192,7 +192,7 @@ public class CostBasedPrefillStrategy {
             case RESOURCE_EXHAUSTED -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
             case UNSPECIFIED -> Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
         };
-        return blockedWithDiagnostics(failure, role, workerCount, Map.of("observedRequests", observedRequestCount));
+        return blockedWithDiagnostics(failure, role, workerCount, Map.of("observedRequests", outstandingRequestCount));
     }
 
     private static PlacementResult<SelectedRole, RoleType> blockedWithDiagnostics(

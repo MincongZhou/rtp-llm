@@ -51,7 +51,7 @@ class TwinOverloadAdmissionTest {
         commitBatch(endpoint, config, 2L, 9L);
 
         assertEquals(2, endpoint.ownershipStats().batchCount());
-        assertEquals(16, endpoint.observedRequestCount(),
+        assertEquals(16, endpoint.outstandingRequestCount(),
                 "maxRequests=8 bounds one decision, not the engine's total inflight work");
     }
 
@@ -60,24 +60,24 @@ class TwinOverloadAdmissionTest {
         FlexlbConfig config = config(1);
         PrefillEndpoint endpoint = prefill(config);
         commitBatch(endpoint, config, 11L, 1L);
-        assertEquals(8, endpoint.observedRequestCount());
+        assertEquals(8, endpoint.outstandingRequestCount());
         assertTrue(!endpoint.batchAdmissionAvailability(1).isAvailable());
 
         Map<String, TaskInfo> finished = tasks(1L, 7, 11L, TaskPhase.RUNNING);
         applyStatus(endpoint, tasks(8L, 1, 11L, TaskPhase.RUNNING), finished);
         assertEquals(1, endpoint.ownershipStats().batchCount());
-        assertEquals(1, endpoint.observedRequestCount(),
+        assertEquals(1, endpoint.outstandingRequestCount(),
                 "completed members immediately leave ownership while the last member retains the batch");
         assertTrue(!endpoint.batchAdmissionAvailability(1).isAvailable(),
                 "seven finished members do not release the final member's batch slot");
 
         applyStatus(endpoint, Map.of(), tasks(8L, 1, 11L, TaskPhase.RUNNING));
         assertEquals(0, endpoint.ownershipStats().batchCount());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
         assertTrue(endpoint.batchAdmissionAvailability(1).isAvailable());
         // The full snapshot may repeat across polls without releasing ownership twice.
         applyStatus(endpoint, Map.of(), tasks(8L, 1, 11L, TaskPhase.RUNNING));
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
     }
 
     @ParameterizedTest
@@ -86,10 +86,10 @@ class TwinOverloadAdmissionTest {
         FlexlbConfig config = config(2);
         PrefillEndpoint endpoint = prefill(config);
         commitBatch(endpoint, config, 70L, 101L);
-        assertEquals(8, endpoint.observedRequestCount());
+        assertEquals(8, endpoint.outstandingRequestCount());
 
         applyStatus(endpoint, tasks(101L, 8, 70L, phase), Map.of());
-        assertEquals(8, endpoint.observedRequestCount(),
+        assertEquals(8, endpoint.outstandingRequestCount(),
                 "the local batch and its engine observation describe the same eight requests");
         assertEquals(1, endpoint.ownershipStats().batchCount());
         assertEquals(1, endpoint.ownershipStats().batchCount(),
@@ -100,7 +100,7 @@ class TwinOverloadAdmissionTest {
                 "repeated status must neither release nor duplicate the local batch slot");
 
         applyStatus(endpoint, Map.of(), tasks(101L, 8, 70L, phase));
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -146,10 +146,10 @@ class TwinOverloadAdmissionTest {
         config.setDispatcher(DispatcherConfig.nonBatch());
         PrefillEndpoint endpoint = prefill(config);
         applyStatus(endpoint, tasks(101L, 8, 70L, TaskPhase.RUNNING), Map.of());
-        assertEquals(8, endpoint.observedRequestCount());
+        assertEquals(8, endpoint.outstandingRequestCount());
         assertTrue(endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().isEmpty());
         applyStatus(endpoint, Map.of(), tasks(101L, 8, 70L, TaskPhase.RUNNING));
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
         assertEquals(0L, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
     }
 

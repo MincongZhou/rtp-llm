@@ -109,7 +109,7 @@ class PrefillEndpointTest {
                 }
             }
             assertFalse(direct.captureRouteProjectionInputs().work().containsRequest(999L));
-            assertEquals(0, direct.observedRequestCount());
+            assertEquals(0, direct.outstandingRequestCount());
         } finally {
             direct.close();
         }
@@ -186,7 +186,7 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.ownershipStats().batchCount());
         assertEquals(1,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -212,7 +212,7 @@ class PrefillEndpointTest {
         assertFalse(endpoint.releaseRequest(first));
         assertEquals(1, endpoint.ownershipStats().locallyOwnedRequests());
         assertEquals(1, endpoint.ownershipStats().batchCount());
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
         assertEquals(1, endpoint.captureRouteProjectionInputs().work().batches().size());
 
         assertTrue(endpoint.releaseRequest(sibling));
@@ -220,7 +220,7 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.ownershipStats().locallyOwnedRequests());
         assertEquals(0, endpoint.ownershipStats().batchCount());
         assertEquals(0, endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -233,7 +233,7 @@ class PrefillEndpointTest {
         registerBatch(endpoint, 8L, 100, List.of(replacement));
         assertFalse(endpoint.releaseRequest(original));
         assertEquals(1, endpoint.ownershipStats().batchCount());
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
         assertTrue(endpoint.releaseRequest(replacement));
         assertEquals(0, endpoint.ownershipStats().batchCount());
     }
@@ -248,7 +248,7 @@ class PrefillEndpointTest {
         registerBatch(endpoint, 2L, 50, List.of(item3));
 
         assertEquals(2, endpoint.ownershipStats().batchCount());
-        assertEquals(3, endpoint.observedRequestCount());
+        assertEquals(3, endpoint.outstandingRequestCount());
     }
 
     // ---- repack batch ----
@@ -263,7 +263,7 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.ownershipStats().batchCount());
         assertEquals(1,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
         WorkSnapshot remaining = endpoint.captureRouteProjectionInputs().work();
         assertFalse(remaining.hasUnknownWork());
         assertEquals(100L, remaining.totalRemainingWorkMs().orElseThrow());
@@ -300,7 +300,7 @@ class PrefillEndpointTest {
 
             WorkSnapshot snapshot = invalidPredictorEndpoint
                     .captureRouteProjectionInputs().work();
-            assertEquals(1, invalidPredictorEndpoint.observedRequestCount(),
+            assertEquals(1, invalidPredictorEndpoint.outstandingRequestCount(),
                     "membership settlement must not depend on prediction");
             assertEquals(List.of(1L), snapshot.batches().getFirst().requestIds());
             assertEquals(360L, snapshot.batches().getFirst().remainingWorkMs().orElseThrow());
@@ -311,7 +311,7 @@ class PrefillEndpointTest {
                     invalidPredictorEndpoint, 1L, 1L, 40L);
             assertEquals(0, invalidPredictorEndpoint.ownershipStats().batchCount(),
                     "fallback prediction must not block later lifecycle settlement");
-            assertEquals(0, invalidPredictorEndpoint.observedRequestCount());
+            assertEquals(0, invalidPredictorEndpoint.outstandingRequestCount());
         } finally {
             invalidPredictorEndpoint.close();
         }
@@ -360,7 +360,7 @@ class PrefillEndpointTest {
         endpoint.rollbackReservation(open);
         endpoint.rollbackReservation(open);
         assertEquals(1, notifications.get());
-        assertEquals(0L, endpoint.observedRequestCount());
+        assertEquals(0L, endpoint.outstandingRequestCount());
         var second = createRequestRoute(91L, 100L, 0L);
         PrefillState.RouteReservation consumed;
         try (var pin = endpoint.tryPinGeneration()) { consumed = endpoint.reserveUnqueuedRoute(pin, second, 10L).reservation(); }
@@ -390,19 +390,19 @@ class PrefillEndpointTest {
         assertFalse(endpoint.releaseRequest(first));
         endpoint.rollbackReservation(preparation);
         assertEquals(1, notifications.get());
-        assertEquals(0L, endpoint.observedRequestCount());
+        assertEquals(0L, endpoint.outstandingRequestCount());
 
         var replacement = createRequestRoute(90L, 100L, 0L);
         var replacementPreparation = EndpointTestSupport.reserveUnqueued(endpoint, replacement, 20L);
         try (var commit = endpoint.tryBeginRouteCommitAdmission();
              var handoff = commit.commit(List.of(replacement), List.of(replacementPreparation))) {
             assertFalse(endpoint.releaseRequest(first));
-            assertEquals(1L, endpoint.observedRequestCount());
+            assertEquals(1L, endpoint.outstandingRequestCount());
             assertTrue(endpoint.releaseRequest(replacement));
         }
         endpoint.rollbackReservation(replacementPreparation);
         assertEquals(2, notifications.get());
-        assertEquals(0L, endpoint.observedRequestCount());
+        assertEquals(0L, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -418,9 +418,9 @@ class PrefillEndpointTest {
 
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
         assertEquals(360L, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
-        assertEquals(1L, endpoint.observedRequestCount());
+        assertEquals(1L, endpoint.outstandingRequestCount());
         assertTrue(endpoint.releaseRequest(survivor));
-        assertEquals(0L, endpoint.observedRequestCount());
+        assertEquals(0L, endpoint.outstandingRequestCount());
         assertEquals(0L, endpoint.ownershipStats().batchCount());
     }
 
@@ -440,7 +440,7 @@ class PrefillEndpointTest {
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
         assertEquals(expectedMs, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
         assertTrue(endpoint.releaseRequest(survivor));
-        assertEquals(0L, endpoint.observedRequestCount());
+        assertEquals(0L, endpoint.outstandingRequestCount());
     }
 
     // ---- calibrate ----
@@ -473,7 +473,7 @@ class PrefillEndpointTest {
         assertDoesNotThrow(() -> calibrate(Map.of("9", finished), Map.of()));
 
         assertEquals(0, endpoint.ownershipStats().batchCount());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
         verify(endpointReporter).reportBatchCompletion("127.0.0.1", 9L, 100L, 125L);
     }
 
@@ -494,7 +494,7 @@ class PrefillEndpointTest {
         calibrate(finished, Map.of());
 
         assertEquals(1, endpoint.ownershipStats().batchCount());
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -509,14 +509,14 @@ class PrefillEndpointTest {
 
         assertEquals(1, endpoint.ownershipStats().batchCount(),
                 "one finished member must not release the whole batch");
-        assertEquals(1, endpoint.observedRequestCount(),
+        assertEquals(1, endpoint.outstandingRequestCount(),
                 "the still-running long member must remain in Master accounting");
 
         TaskInfo finishedLong = taskInfo(2L, 1L, null, 0, 1_900);
         calibrate(Map.of("2", finishedLong), Map.of());
 
         assertEquals(0, endpoint.ownershipStats().batchCount());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -532,13 +532,13 @@ class PrefillEndpointTest {
         calibrate(Map.of("1", success, "2", failure), Map.of("3", runningTask));
 
         assertEquals(1, endpoint.ownershipStats().batchCount());
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
 
         // WorkerStatus may repeat a terminal observation in adjacent snapshots.
         // Repeating it must not decrement the survivor count again.
         calibrate(Map.of("1", success), Map.of("3", runningTask));
         assertEquals(1, endpoint.ownershipStats().batchCount());
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -552,14 +552,14 @@ class PrefillEndpointTest {
         calibrate(Map.of("1", firstFailure, "2", secondFailure), Map.of());
 
         assertEquals(0, endpoint.ownershipStats().batchCount());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
         verify(endpointReporter, never()).reportBatchCompletion(
                 anyString(), org.mockito.ArgumentMatchers.anyLong(),
                 org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong());
 
         calibrate(Map.of("1", firstFailure, "2", secondFailure), Map.of());
         assertEquals(0, endpoint.ownershipStats().batchCount());
-        assertEquals(0, endpoint.observedRequestCount(),
+        assertEquals(0, endpoint.outstandingRequestCount(),
                 "repeated failure deltas must not decrement the ledger twice");
     }
 
@@ -571,7 +571,7 @@ class PrefillEndpointTest {
         calibrate(Map.of("1", success), Map.of());
         calibrate(Map.of("1", success), Map.of());
 
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
         verify(endpointReporter).reportBatchCompletion("127.0.0.1", 1L, 100L, 40L);
     }
 
@@ -712,7 +712,7 @@ class PrefillEndpointTest {
         calibrate(Map.of("101", priorityCanceledTask(101L, -1L)), Map.of());
 
         assertEquals(1, endpoint.ownershipStats().batchCount());
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -728,7 +728,7 @@ class PrefillEndpointTest {
         calibrate(Map.of("101", finished), Map.of());
 
         assertEquals(0, endpoint.ownershipStats().individuallyOwnedRequests());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -736,7 +736,7 @@ class PrefillEndpointTest {
             throws Exception {
         PrefillState.RouteReservation registration =
                 EndpointTestSupport.reserveUnqueued(endpoint, createRequestRoute(102L, 100, 0), 100L);
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
@@ -745,7 +745,7 @@ class PrefillEndpointTest {
             executor.shutdownNow();
         }
 
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -759,7 +759,7 @@ class PrefillEndpointTest {
         // A missing-batch-id terminal cannot be attributed to the batch, so no
         // member is retired: both members remain committed.
         assertEquals(1, endpoint.ownershipStats().batchCount());
-        assertEquals(2, endpoint.observedRequestCount(),
+        assertEquals(2, endpoint.outstandingRequestCount(),
                 "a terminal without a valid batch id retires no batch member");
 
         TaskInfo survivingSuccess = new TaskInfo();
@@ -771,7 +771,7 @@ class PrefillEndpointTest {
         // whose only terminal named no batch id, stays with the original batch.
         assertEquals(1, endpoint.ownershipStats().batchCount(),
                 "the exact-batch terminal retires only its own member");
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -791,7 +791,7 @@ class PrefillEndpointTest {
         assertEquals(1,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
         assertEquals(0, endpoint.ownershipStats().individuallyOwnedRequests());
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
 
         TaskInfo foreignBatchMemberSuccess = new TaskInfo();
         foreignBatchMemberSuccess.setRequestId(201L);
@@ -817,7 +817,7 @@ class PrefillEndpointTest {
                         == PrefillState.CapacityStatus.ACQUIRED,
                 "the canonical ledger rejects ambiguous duplicate live owners");
         assertEquals(1, endpoint.ownershipStats().batchCount());
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -829,16 +829,16 @@ class PrefillEndpointTest {
 
         calibrate(Map.of("102", priorityCanceledTask(102L, -1L)), Map.of());
         assertEquals(1, endpoint.ownershipStats().batchCount());
-        assertEquals(2, endpoint.observedRequestCount());
+        assertEquals(2, endpoint.outstandingRequestCount());
 
         TaskInfo canceled = priorityCanceledTask(101L, -1L);
         calibrate(Map.of("101", canceled), Map.of());
         assertEquals(1, endpoint.ownershipStats().batchCount(),
                 "generic endpoint calibration must not bypass the exact-batch reducer");
-        assertEquals(2, endpoint.observedRequestCount());
+        assertEquals(2, endpoint.outstandingRequestCount());
 
         assertEquals(1, endpoint.ownershipStats().batchCount());
-        assertEquals(2, endpoint.observedRequestCount());
+        assertEquals(2, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -856,12 +856,12 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.ownershipStats().batchCount());
         assertEquals(0,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
 
         assertEquals(0, endpoint.ownershipStats().batchCount());
         assertEquals(0,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -958,7 +958,7 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.ownershipStats().batchCount());
         assertEquals(0,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -1028,7 +1028,7 @@ class PrefillEndpointTest {
 
         assertEquals(1, endpoint.ownershipStats().batchCount(),
                 "sibling success must not erase the reconciling batch member");
-        assertEquals(1, endpoint.observedRequestCount());
+        assertEquals(1, endpoint.outstandingRequestCount());
 
         TaskInfo ambiguousMemberSuccess = new TaskInfo();
         ambiguousMemberSuccess.setBatchId(7L);
@@ -1037,10 +1037,10 @@ class PrefillEndpointTest {
         calibrate(Map.of("101", ambiguousMemberSuccess), Map.of());
         assertEquals(0, endpoint.ownershipStats().batchCount(),
                 "an exact-batch terminal settles the remaining member");
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
 
         assertEquals(0, endpoint.ownershipStats().batchCount());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
     }
 
     @Test
@@ -1055,15 +1055,15 @@ class PrefillEndpointTest {
         calibrate(Map.of("101", firstFailure, "102", siblingFailure), Map.of());
 
         assertEquals(0, endpoint.ownershipStats().batchCount());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
 
         assertEquals(0, endpoint.ownershipStats().batchCount());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
         verify(endpointReporter, never()).reportBatchCompletion(
                 anyString(), org.mockito.ArgumentMatchers.anyLong(),
                 org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong());
 
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
     }
 
     // ---- committed remaining work ----
@@ -1143,14 +1143,14 @@ class PrefillEndpointTest {
 
         assertTrue(endpoint.releaseRequest(item));
         assertEquals(0, endpoint.ownershipStats().batchCount());
-        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0, endpoint.outstandingRequestCount());
         assertFalse(endpoint.releaseRequest(item));
     }
 
-    // ---- observedRequestCount ----
+    // ---- outstandingRequestCount ----
 
     @Test
-    void observedRequestCountUnionsEngineTasksWithLocalLedger() {
+    void outstandingRequestCountUnionsEngineTasksWithLocalLedger() {
         registerBatch(endpoint, 1L, 100, List.of(
                 createRequestRoute(101L, 500, 0),
                 createRequestRoute(102L, 500, 0)));
@@ -1172,16 +1172,16 @@ class PrefillEndpointTest {
                 "999", overlayOnly));
         EndpointTestSupport.applyStatus(endpoint, response);
 
-        assertEquals(4, endpoint.observedRequestCount(),
+        assertEquals(4, endpoint.outstandingRequestCount(),
                 "two local requests plus two unique Engine-only tasks");
 
         response.setRunningTaskInfo(Map.of());
         EndpointTestSupport.applyStatus(endpoint, response);
-        assertEquals(2, endpoint.observedRequestCount());
+        assertEquals(2, endpoint.outstandingRequestCount());
     }
 
     @Test
-    void observedRequestCountFallsBackToEngineQueryLengthScalars() {
+    void outstandingRequestCountFallsBackToEngineQueryLengthScalars() {
         registerBatch(endpoint, 1L, 100, List.of(createRequestRoute(101L, 500, 0)));
 
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -1191,14 +1191,14 @@ class PrefillEndpointTest {
         response.setRunningQueryLen(2);
         EndpointTestSupport.applyStatus(endpoint, response);
 
-        assertEquals(6, endpoint.observedRequestCount(),
+        assertEquals(6, endpoint.outstandingRequestCount(),
                 "an unseen local shadow cannot prove identity with scalar Engine work");
         assertTrue(endpoint.captureRouteProjectionInputs().work().hasUnknownWork());
         assertTrue(endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().isEmpty());
     }
 
     @Test
-    void observedRequestCountUsesConservativeScalarBoundForPartialTaskDetails() {
+    void outstandingRequestCountUsesConservativeScalarBoundForPartialTaskDetails() {
         registerBatch(endpoint, 1L, 100, List.of(createRequestRoute(101L, 500, 0)));
 
         TaskInfo overlapping = taskInfo(101L, 1L, TaskPhase.RUNNING, 0, 0);
@@ -1209,20 +1209,20 @@ class PrefillEndpointTest {
         response.setRunningQueryLen(2);
         EndpointTestSupport.applyStatus(endpoint, response);
 
-        assertEquals(5, endpoint.observedRequestCount(),
+        assertEquals(5, endpoint.outstandingRequestCount(),
                 "scalar active count must cover a partial detail list without double-counting local tasks");
     }
 
     @Test
-    void observedRequestCountIncludesBatcherQueue() throws InterruptedException {
+    void outstandingRequestCountIncludesBatcherQueue() throws InterruptedException {
         PrefillEndpoint queuedEndpoint = newFixedWindowEndpoint(60_000L);
         try {
-            assertEquals(0, queuedEndpoint.observedRequestCount());
+            assertEquals(0, queuedEndpoint.outstandingRequestCount());
             RequestRoute item = createRequestRoute(
                     queuedEndpoint, 1L, 500L, 200L);
             assertTrue(EndpointTestSupport.offer(queuedEndpoint, item));
 
-            assertEquals(1, queuedEndpoint.observedRequestCount(),
+            assertEquals(1, queuedEndpoint.outstandingRequestCount(),
                     "pending count includes the canonical ACTIVE queue owner");
         } finally {
             queuedEndpoint.close();
@@ -1247,7 +1247,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void observedRequestCountCannotMissActiveToCommittedHandoff()
+    void outstandingRequestCountCannotMissActiveToCommittedHandoff()
             throws Exception {
         PrefillEndpoint handoffEndpoint = newFixedWindowEndpoint(60_000);
         long requestId = 222L;
@@ -1259,7 +1259,7 @@ class PrefillEndpointTest {
                     active, "test exact ownership handoff"));
             registerDirect(handoffEndpoint, requestId, 100L);
 
-            assertEquals(1L, handoffEndpoint.observedRequestCount());
+            assertEquals(1L, handoffEndpoint.outstandingRequestCount());
             assertEquals(0, handoffEndpoint.queuedRequestCount());
             assertEquals(1,
                     handoffEndpoint.captureRouteProjectionInputs()
@@ -1473,7 +1473,7 @@ class PrefillEndpointTest {
             assertTrue(delivered.await(2, TimeUnit.SECONDS),
                     "zero predicted execution time must not require a later status update");
             assertEquals(0, routeEndpoint.queuedRequestCount());
-            assertEquals(1, routeEndpoint.observedRequestCount(),
+            assertEquals(1, routeEndpoint.outstandingRequestCount(),
                     "delivery must retain ownership until Engine completion");
         } finally {
             routeEndpoint.close();
@@ -1519,7 +1519,7 @@ class PrefillEndpointTest {
             assertTrue(delivered.await(2, TimeUnit.SECONDS),
                     "unknown preceding execution time must not become an admission gate");
             assertEquals(0, routeEndpoint.queuedRequestCount());
-            assertEquals(2, routeEndpoint.observedRequestCount(),
+            assertEquals(2, routeEndpoint.outstandingRequestCount(),
                     "Engine work and the delivered route retain separate identities");
 
             for (int repeat = 0; repeat < 20; repeat++) {
@@ -1538,7 +1538,7 @@ class PrefillEndpointTest {
         status.lock.lock();
         try {
             response.setStatusVersion(status.appliedStatusCursor().statusVersion());
-            projection = endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response));
+            projection = endpoint.applyStatusHeartbeat(status, status.freezeStatusResponse(response));
         } finally {
             status.lock.unlock();
         }

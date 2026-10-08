@@ -292,7 +292,7 @@ class WorkerBatcherQueueTest {
                             == RequestState.Phase.CANCELLED
                             && WorkerBatcherTestSupport.state(runtime).queueDepth() == 0);
             assertEquals(0, WorkerBatcherTestSupport.state(runtime).queueDepth());
-            assertEquals(0L, WorkerBatcherTestSupport.state(runtime).observedRequestCount());
+            assertEquals(0L, WorkerBatcherTestSupport.state(runtime).outstandingRequestCount());
             assertEquals(1, releases.get(), "the exact waiting resource seat is released once");
             assertFalse(org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(
                     WorkerBatcherTestSupport.state(runtime), queued));

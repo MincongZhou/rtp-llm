@@ -565,7 +565,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     @Override
-    public Runnable observeStatusHeartbeat(
+    public Runnable applyStatusHeartbeat(
             WorkerStatus ws,
             WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
@@ -620,8 +620,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /**
      * Diagnostic snapshot of canonical local plus worker-reported ownership.
      */
-    public long observedRequestCount() {
-        return prefillState.observedRequestCount();
+    public long outstandingRequestCount() {
+        return prefillState.outstandingRequestCount();
     }
 
     /**

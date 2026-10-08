@@ -115,7 +115,7 @@ class PdfusionSchedulingTest {
             assertEquals(0, endpoints.getEndpointCount(RoleType.DECODE));
             assertEquals(1, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle).liveRequestCount());
             PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getIpPort());
-            assertEquals(1, endpoint.observedRequestCount());
+            assertEquals(1, endpoint.outstandingRequestCount());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
             assertTrue(committedWork.containsRequest(requestId));
             TaskInfo finished = new TaskInfo();
@@ -135,7 +135,7 @@ class PdfusionSchedulingTest {
             }
             projection.run();
             lifecycle.runtime.continuations().awaitIdle();
-            assertEquals(0, endpoint.observedRequestCount());
+            assertEquals(0, endpoint.outstandingRequestCount());
             assertEquals(0, endpoint.ownershipStats().batchCount());
             assertTrue(committedWork.containsRequest(requestId), "published snapshots stay immutable");
             assertTrue(!endpoint.captureRouteProjectionInputs().work().containsRequest(requestId));

@@ -925,7 +925,7 @@ class RequestContextLifecycleTest {
         var context = registered.item().ctx();
         var claim = lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 707L, 1L), 21L, "victim").orElseThrow();
         assertTrue(lifecycle.updatePreemption(claim, org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT));
-        delivery.observeWorkerCompletion(registered.item());
+        delivery.recordWorkerCompletion(registered.item());
         BalanceContext.SelectedResponse response;
         synchronized (context) {
             context.retainPreemptionTerminalLocked(claim, DeferredTerminal.worker(WorkerTerminalSource.PREFILL_ENDPOINT, true, 0L));

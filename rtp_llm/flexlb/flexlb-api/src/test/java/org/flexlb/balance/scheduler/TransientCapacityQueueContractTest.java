@@ -638,18 +638,18 @@ class TransientCapacityQueueContractTest {
             int capacityRequests = waiting.size();
             awaitCondition(() -> fixture.decodeEndpoint.resourceSnapshot()
                     .reservedCount() == capacityRequests
-                    && fixture.prefillEndpoint.observedRequestCount() == capacityRequests, 2_000L);
+                    && fixture.prefillEndpoint.outstandingRequestCount() == capacityRequests, 2_000L);
             assertEquals(capacityRequests,
                     fixture.decodeEndpoint.resourceSnapshot().reservedCount(),
                     () -> "batch credits must not become an extra worker request-count limit: prefill="
-                            + fixture.prefillEndpoint.observedRequestCount()
+                            + fixture.prefillEndpoint.outstandingRequestCount()
                             + ", queued=" + fixture.runtime.requestRegistry().getQueuedRequestCount()
                             + ", done=" + waiting.stream().filter(CompletableFuture::isDone).count()
                             + ", attempts=" + fixture.metrics.totalPlacementAttempts());
             assertFalse(fixture.submission.awaitCommands(1, 100, TimeUnit.MILLISECONDS));
             assertEquals(List.of(2, 2), fixture.submission.submittedItems.stream().map(List::size).toList(),
                     "each dispatched group respects decision.maxRequests");
-            assertEquals(capacityRequests, fixture.prefillEndpoint.observedRequestCount());
+            assertEquals(capacityRequests, fixture.prefillEndpoint.outstandingRequestCount());
             assertEquals(capacityRequests - 4, fixture.prefillEndpoint.queuedRequestCount(),
                     "two in-flight batches leave the other requests on the worker queue");
             assertEquals(0,

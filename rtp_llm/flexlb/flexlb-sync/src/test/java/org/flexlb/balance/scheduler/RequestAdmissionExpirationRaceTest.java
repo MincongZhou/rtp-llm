@@ -231,7 +231,7 @@ class RequestAdmissionExpirationRaceTest {
                     assertTrue(requestContext.inactivityDeadlineAtMs().isEmpty(),
                             "the fired deadline stays disarmed until the admission is completed");
                 }
-                RequestProtocolTestSupport.observeDecode(registry, decode,
+                RequestProtocolTestSupport.applyDecodeStatus(registry, decode,
                         DecodeResources.DecodeRequestStatus.active(reservation));
                 synchronized (requestContext) {
                     requestContext.scheduler().acceptDecodeStatus(requestContext, decode, DecodeResources.DecodeRequestStatus.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));

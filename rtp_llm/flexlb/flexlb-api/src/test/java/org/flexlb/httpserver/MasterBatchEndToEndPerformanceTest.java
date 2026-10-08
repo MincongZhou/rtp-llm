@@ -359,7 +359,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @BeforeEach
     void startMasterGrpcServer() throws Exception {
         publishDecodeCapacity(1_000_000_000L, 2_000_000_000L);
-        observeAcceptedBatches(mockPrefillWorker);
+        attachAcceptedBatchHandler(mockPrefillWorker);
         simulatedStatusThread = new Thread(
                 this::applySimulatedCompletions, "flexlb-perf-engine-status");
         simulatedStatusThread.setDaemon(true);
@@ -843,7 +843,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 MockPrefillWorker worker = addPrefillWorker(
                         MockWorkerBehavior.builder().build(),
                         grpcPort);
-                observeAcceptedBatches(worker);
+                attachAcceptedBatchHandler(worker);
             } else {
                 addLogicalPrefillEndpoint(additionalIndex + 1);
             }
@@ -992,7 +992,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
     }
 
-    private void observeAcceptedBatches(MockPrefillWorker worker) {
+    private void attachAcceptedBatchHandler(MockPrefillWorker worker) {
         worker.getRpcService().onAcceptedBatch(batch -> {
             try {
                 for (var slot : batch.getDpSlotsList()) {
@@ -1146,7 +1146,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, address);
             assertEquals(0, endpoint.ownershipStats().batchCount(), address + " retained batch credits");
             assertEquals(0, endpoint.ownershipStats().locallyOwnedRequests(), address + " retained Prefill ownership");
-            assertEquals(0L, endpoint.observedRequestCount(), address + " retained Prefill requests");
+            assertEquals(0L, endpoint.outstandingRequestCount(), address + " retained Prefill requests");
         }
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.DECODE)) {
             DecodeEndpoint endpoint = (DecodeEndpoint) endpointRegistry.get(RoleType.DECODE, address);

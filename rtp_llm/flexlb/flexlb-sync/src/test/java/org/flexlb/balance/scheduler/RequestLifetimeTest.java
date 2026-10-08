@@ -103,11 +103,11 @@ class RequestLifetimeTest {
         synchronized (fixture.requestContext) {
             RequestProtocolTestSupport.inspect(fixture.scheduler, fixture.requestContext, "applyDeliveryPredictionLocked", emptyWork(1_000L), 100L, 1_000L);
             assertEquals(11_200L, fixture.requestContext.decisionDeadlineAtMs().orElseThrow());
-            observePrefillAt(fixture, false, 1_100L);
+            recordPrefillStatusAt(fixture, false, 1_100L);
             assertTrue(fixture.requestContext.decisionDeadlineAtMs().isEmpty());
-            observePrefillAt(fixture, true, 5_000L);
+            recordPrefillStatusAt(fixture, true, 5_000L);
             assertEquals(15_000L, fixture.requestContext.decisionDeadlineAtMs().orElseThrow());
-            observePrefillAt(fixture, true, 5_020L);
+            recordPrefillStatusAt(fixture, true, 5_020L);
             assertEquals(15_000L, fixture.requestContext.decisionDeadlineAtMs().orElseThrow());
             var timer = mock(ExpirationTimer.DecisionDeadline.class);
             when(timer.deadlineAtMs()).thenReturn(15_000L);
@@ -124,12 +124,12 @@ class RequestLifetimeTest {
     void completionAndAcceptanceBeforeDeliveryRemainAuthoritative() {
         Fixture fixture = fixture(true);
         synchronized (fixture.requestContext) {
-            observePrefillAt(fixture, true, 1_000L);
+            recordPrefillStatusAt(fixture, true, 1_000L);
             RequestProtocolTestSupport.inspect(fixture.scheduler, fixture.requestContext, "applyDeliveryPredictionLocked", emptyWork(1_000L), 100L, 1_010L);
             assertEquals(11_000L, fixture.requestContext.decisionDeadlineAtMs().orElseThrow());
             fixture.requestContext.markDecodeAcceptedLocked();
-            observePrefillAt(fixture, false, 2_000L);
-            observePrefillAt(fixture, true, 2_000L);
+            recordPrefillStatusAt(fixture, false, 2_000L);
+            recordPrefillStatusAt(fixture, true, 2_000L);
             assertTrue(fixture.requestContext.decodeAccepted());
             assertTrue(fixture.requestContext.decisionDeadlineAtMs().isEmpty());
             assertThrows(IllegalStateException.class, () -> RequestProtocolTestSupport.inspect(fixture.scheduler, fixture.requestContext, "applyDeliveryPredictionLocked", emptyWork(2_000L), 100L, 2_000L));
@@ -143,7 +143,7 @@ class RequestLifetimeTest {
             RequestProtocolTestSupport.inspect(fixture.scheduler, fixture.requestContext, "applyDeliveryPredictionLocked", unknownWork(1_000L), 100L, 1_000L);
             assertTrue(fixture.requestContext.decisionDeadlineAtMs().isEmpty());
             assertFalse(RequestProtocolTestSupport.<Boolean>inspect(fixture.scheduler, fixture.requestContext, "needsDecisionConfirmationLocked"));
-            observePrefillAt(fixture, true, 2_000L);
+            recordPrefillStatusAt(fixture, true, 2_000L);
             assertEquals(12_000L, fixture.requestContext.decisionDeadlineAtMs().orElseThrow());
         }
     }
@@ -153,9 +153,9 @@ class RequestLifetimeTest {
         Fixture fixture = fixture(true);
         synchronized (fixture.requestContext) {
             RequestProtocolTestSupport.inspect(fixture.scheduler, fixture.requestContext, "applyDeliveryPredictionLocked", emptyWork(1_000L), 100L, 1_000L);
-            observePrefillAt(fixture, false, 1_100L);
+            recordPrefillStatusAt(fixture, false, 1_100L);
             assertTrue(fixture.requestContext.decisionDeadlineAtMs().isEmpty());
-            observePrefillAt(fixture, true, 3_601_000L);
+            recordPrefillStatusAt(fixture, true, 3_601_000L);
             assertEquals(3_611_000L, fixture.requestContext.decisionDeadlineAtMs().orElseThrow());
         }
     }
@@ -206,10 +206,10 @@ class RequestLifetimeTest {
             startPrediction(fixture.scheduler, fixture.requestContext);
             when(exact.deadlineAtMs()).thenReturn(fixture.requestContext.decisionDeadlineAtMs().orElseThrow());
             assertTrue(fixture.requestContext.installDecisionDeadline(exact));
-            observePrefill(fixture.scheduler, fixture.requestContext, fixture.item, false);
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, false);
             assertStaleDecisionHasNoEffect(fixture, exact);
             assertFalse(RequestProtocolTestSupport.<Boolean>inspect(fixture.scheduler, fixture.requestContext, "needsDecisionConfirmationLocked"));
-            observePrefill(fixture.scheduler, fixture.requestContext, fixture.item, true);
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, true);
             assertTrue(fixture.requestContext.decisionDeadlineAtMs().orElseThrow() > System.currentTimeMillis());
             fixture.requestContext.markDecodeAcceptedLocked();
             assertFalse(RequestProtocolTestSupport.<Boolean>inspect(fixture.scheduler, fixture.requestContext, "needsDecisionConfirmationLocked"));
@@ -227,7 +227,7 @@ class RequestLifetimeTest {
             startPrediction(fixture.scheduler, fixture.requestContext);
             when(decision.deadlineAtMs()).thenReturn(fixture.requestContext.decisionDeadlineAtMs().orElseThrow());
             fixture.requestContext.installDecisionDeadline(decision);
-            observePrefill(fixture.scheduler, fixture.requestContext, fixture.item, false);
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, false);
             assertStaleDecisionHasNoEffect(fixture, decision);
             assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.requestContext, "consumeInactivityDeadlineLocked", full));
         }
@@ -247,7 +247,7 @@ class RequestLifetimeTest {
             assertFalse(fixture.requestContext.snapshot().detail().startsWith("SUSPECTED_LOST"));
             assertEquals(CancelReason.DEADLINE_EXCEEDED, fixture.requestContext.cancellationReason());
             assertFalse(RequestProtocolTestSupport.<Boolean>inspect(fixture.scheduler, fixture.requestContext, "needsDecisionConfirmationLocked"));
-            observePrefill(fixture.scheduler, fixture.requestContext, fixture.item, true);
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, true);
             assertFalse(RequestProtocolTestSupport.<Boolean>inspect(fixture.scheduler, fixture.requestContext, "needsDecisionConfirmationLocked"));
         }
     }
@@ -258,7 +258,7 @@ class RequestLifetimeTest {
         synchronized (fixture.requestContext) {
             expireDecision(fixture);
             assertTrue(fixture.requestContext.snapshot().detail().startsWith("SUSPECTED_LOST"));
-            observePrefill(fixture.scheduler, fixture.requestContext, fixture.item, false);
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, false);
             fixture.requestContext.reconcileDecisionEvidenceLocked();
             assertFalse(RequestProtocolTestSupport.<Boolean>inspect(fixture.scheduler, fixture.requestContext, "needsDecisionConfirmationLocked"));
             assertFalse(fixture.requestContext.snapshot().detail().contains("SUSPECTED_LOST"));
@@ -271,11 +271,11 @@ class RequestLifetimeTest {
         Fixture fixture = fixture(true);
         synchronized (fixture.requestContext) {
             expireDecision(fixture);
-            observePrefill(fixture.scheduler, fixture.requestContext, fixture.item, false);
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, false);
             fixture.requestContext.markAwaitingConfirmationLocked("late transport uncertainty");
             assertFalse(fixture.requestContext.snapshot().detail().contains("SUSPECTED_LOST"));
             assertFalse((fixture.requestContext.cancellationReason() != null));
-            observePrefill(fixture.scheduler, fixture.requestContext, fixture.item, true);
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, true);
             assertTrue(fixture.requestContext.decisionDeadlineAtMs().orElseThrow() > System.currentTimeMillis());
         }
     }
@@ -371,7 +371,7 @@ class RequestLifetimeTest {
             synchronized (requestContext) {
                 assertEquals(evidenceSource == RoleType.DECODE, requestContext.decodeAccepted());
                 assertTrue(requestContext.isLiveGeneration());
-                observePrefill(registry, requestContext, item, true);
+                preparePrefillStatusEffects(registry, requestContext, item, true);
                 assertFalse(RequestProtocolTestSupport.<Boolean>inspect(registry, requestContext, "needsDecisionConfirmationLocked"));
             }
         } finally {
@@ -600,7 +600,7 @@ class RequestLifetimeTest {
         }
     }
 
-    private static void observePrefillAt(Fixture fixture, boolean completed, long nowMs) {
+    private static void recordPrefillStatusAt(Fixture fixture, boolean completed, long nowMs) {
         fixture.requestContext.scheduler().acceptPrefillStatus(fixture.requestContext, fixture.item.prefillEp(), RoleType.PREFILL, completed ? PrefillState.PrefillRequestStatus.terminal(fixture.item, PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L) : PrefillState.PrefillRequestStatus.active(fixture.item), nowMs);
     }
 
@@ -629,7 +629,7 @@ class RequestLifetimeTest {
         return new Fixture(requestOwner, config, context, item);
     }
 
-    private static Runnable observePrefill(AbstractRequestScheduler scheduler, BalanceContext requestContext, RequestRoute item, boolean completed) {
+    private static Runnable preparePrefillStatusEffects(AbstractRequestScheduler scheduler, BalanceContext requestContext, RequestRoute item, boolean completed) {
         return requestContext.scheduler().acceptPrefillStatus(requestContext, item.prefillEp(), RoleType.PREFILL, completed ? PrefillState.PrefillRequestStatus.terminal(item, PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L) : PrefillState.PrefillRequestStatus.active(item), System.currentTimeMillis());
     }
 

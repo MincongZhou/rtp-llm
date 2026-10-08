@@ -276,9 +276,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return () -> { };
     }
 
-    public Runnable observeStatusHeartbeat(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
+    public Runnable applyStatusHeartbeat(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
-        List<DecodeRequestStatus> requestStatuses = state.observeHeartbeat(observation);
+        List<DecodeRequestStatus> requestStatuses = state.collectHeartbeatRequestStatuses(observation);
         return () -> notifyRequestStatuses(requestStatuses);
     }
 

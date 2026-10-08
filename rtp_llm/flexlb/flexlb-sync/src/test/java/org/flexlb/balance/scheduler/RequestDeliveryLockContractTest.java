@@ -342,7 +342,7 @@ class RequestDeliveryLockContractTest {
                                 })) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
                 assertTrue(queuePublished.await(5, TimeUnit.SECONDS));
                 assertEquals(List.of(registered.item()), state.captureQueue(1).items());
-                assertEquals(1L, state.observedRequestCount());
+                assertEquals(1L, state.outstandingRequestCount());
 
                 Future<RequestState> cancellation =
                         operations.submit(() -> lifecycle.cancel(
@@ -366,7 +366,7 @@ class RequestDeliveryLockContractTest {
         verify(prefill).releaseRequest(registered.item());
         assertEquals(1, releases.get());
         assertTrue(state.captureQueue(1).items().isEmpty());
-        assertEquals(0L, state.observedRequestCount());
+        assertEquals(0L, state.outstandingRequestCount());
         assertFalse(org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(state, registered.item()),
                 "late exact cleanup must be idempotent");
     }
@@ -545,7 +545,7 @@ class RequestDeliveryLockContractTest {
                 null, decode, reservation, System.currentTimeMillis());
         bind(lifecycle, new Registered(item, future));
         if (acceptanceBeforeClaim) {
-            RequestProtocolTestSupport.observeDecode(lifecycle, decode, DecodeResources.DecodeRequestStatus.active(reservation));
+            RequestProtocolTestSupport.applyDecodeStatus(lifecycle, decode, DecodeResources.DecodeRequestStatus.active(reservation));
         }
         DeliveryClaim claim = batch
                 ? RequestProtocolTestSupport.claimBatchWithoutPrediction(lifecycle, item, 704L, () -> true)

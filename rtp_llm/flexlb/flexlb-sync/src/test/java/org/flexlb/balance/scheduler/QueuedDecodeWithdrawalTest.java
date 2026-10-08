@@ -215,7 +215,7 @@ class QueuedDecodeWithdrawalTest {
             assertNotNull(admission);
             assertTrue((registry.commitRoute(next, RequestProtocolTestSupport.publication(() -> true)) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
         }
-        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeResources.DecodeRequestStatus.terminal(item.decodeReservation(), 0));
+        RequestProtocolTestSupport.applyDecodeStatus(registry, decode, DecodeResources.DecodeRequestStatus.terminal(item.decodeReservation(), 0));
         assertSame(next, registry.findRequestContext(1).activeRoute());
         assertFalse(item.future().isDone(), "old reservation evidence must not terminate the new route");
     }

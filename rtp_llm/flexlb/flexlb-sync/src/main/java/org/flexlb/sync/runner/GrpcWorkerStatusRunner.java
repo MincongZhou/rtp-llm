@@ -191,7 +191,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     // running_tasks is a full active snapshot even when its
                     // status_version is unchanged. Derive exact endpoint-owned
                     // liveness facts without replaying versioned mutation.
-                    statusProjection = ep.observeStatusHeartbeat(
+                    statusProjection = ep.applyStatusHeartbeat(
                             workerStatus, observation);
                 }
             } finally {

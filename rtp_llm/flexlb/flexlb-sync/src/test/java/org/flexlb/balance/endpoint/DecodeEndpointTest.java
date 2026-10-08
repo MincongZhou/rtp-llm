@@ -62,7 +62,7 @@ class DecodeEndpointTest {
                         : allocated ? DecodeTaskPhase.ACCEPTED_NOT_RUNNING : DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
                 endpoint.resourceSnapshot().requests().get(100L).phase());
 
-        endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response)).run();
+        endpoint.applyStatusHeartbeat(status, status.freezeStatusResponse(response)).run();
         verify(sink, times(2)).onDecodeStatus(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq(endpoint), org.mockito.ArgumentMatchers.eq(requestStatus));
         assertEquals(allocated, endpoint.isAcceptedByEngine(reservation));
 

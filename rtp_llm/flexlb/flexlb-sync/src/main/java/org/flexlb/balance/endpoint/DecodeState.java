@@ -904,7 +904,8 @@ final class DecodeState {
         }
     }
 
-    List<DecodeRequestStatus> observeHeartbeat(WorkerStatus.StatusObservation observation) {
+    /** Collect active statuses matched to exact local reservations for Scheduler notification. */
+    List<DecodeRequestStatus> collectHeartbeatRequestStatuses(WorkerStatus.StatusObservation observation) {
         checkArgument(observation.owner() == status, "Status observation belongs to another Decode generation");
         List<DecodeRequestStatus> requestStatuses = new ArrayList<>(
                 observation.runningTasks().size());
@@ -969,7 +970,7 @@ final class DecodeState {
                 if (discoveredByEngine) {
                     current = new DecodeRequestState(0L, 0L, DecodeRequestState.DEFAULT_PRIORITY, 0L);
                 }
-                current.observeAllocation(task.inputLength(), allocatedPhase, now);
+                current.recordEngineAllocation(task.inputLength(), allocatedPhase, now);
                 if (discoveredByEngine) {
                     decodeRequests.put(requestId, current);
                 }
@@ -1419,7 +1420,7 @@ final class DecodeState {
         boolean priorityKnown() { return reservationToken > 0L; }
 
         /** First allocation replaces local estimates; later reports only renew phase and activity. */
-        void observeAllocation(long engineKvTokens, DecodeTaskPhase phase, long observedAtMs) {
+        void recordEngineAllocation(long engineKvTokens, DecodeTaskPhase phase, long observedAtMs) {
             if (!confirmed()) {
                 kvTokens = Math.max(0L, engineKvTokens);
                 expectedKvTokens = kvTokens;

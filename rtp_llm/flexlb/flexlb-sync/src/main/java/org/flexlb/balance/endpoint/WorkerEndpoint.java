@@ -93,10 +93,12 @@ public class WorkerEndpoint {
     }
 
     /**
-     * Project active-request ownership from a successful same-version status
-     * heartbeat without replaying versioned endpoint state or terminal facts.
+     * Apply active-request facts from a successful same-version status heartbeat
+     * without replaying versioned endpoint state or terminal facts.
+     *
+     * @return request notifications to run after releasing {@link WorkerStatus#lock}
      */
-    public Runnable observeStatusHeartbeat(
+    public Runnable applyStatusHeartbeat(
             WorkerStatus ws,
             WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);

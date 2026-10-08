@@ -167,7 +167,7 @@ class WorkerEndpointTest {
         registerBatch(5L, 9999, first, failed, third);
         assertTrue(endpoint.releaseRequest(failed));
 
-        assertEquals(2, endpoint.observedRequestCount());
+        assertEquals(2, endpoint.outstandingRequestCount());
     }
 
     @Test

@@ -192,7 +192,7 @@ class RequestInactivityTest {
         acknowledgeDelivery();
         for (int observation = 1; observation <= 6; observation++) {
             long observedAt = registeredAtMs + observation * (TIMEOUT_MS / 2L);
-            observeActive(source, observedAt);
+            recordWorkerActivity(source, observedAt);
             RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, observedAt + TIMEOUT_MS / 2L - 1L);
             assertLiveAndCharged();
         }
@@ -204,7 +204,7 @@ class RequestInactivityTest {
     void silenceRequestsCleanupAtTheLastMatchingStatusDeadline(RoleType source) throws Exception {
         acknowledgeDelivery();
         long lastStatusAt = registeredAtMs + 2L * TIMEOUT_MS;
-        observeActive(source, lastStatusAt);
+        recordWorkerActivity(source, lastStatusAt);
         RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, lastStatusAt + TIMEOUT_MS - 1L);
         assertLiveAndCharged();
 
@@ -212,9 +212,9 @@ class RequestInactivityTest {
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
 
         // A delayed status or timer callback cannot reopen or double-release this generation.
-        RequestProtocolTestSupport.observePrefill(registry, prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item));
-        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeResources.DecodeRequestStatus.active(item.decodeReservation()));
-        RequestProtocolTestSupport.observeDecode(registry, decode, DecodeResources.DecodeRequestStatus.terminal(item.decodeReservation(), 0L));
+        RequestProtocolTestSupport.applyPrefillStatus(registry, prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item));
+        RequestProtocolTestSupport.applyDecodeStatus(registry, decode, DecodeResources.DecodeRequestStatus.active(item.decodeReservation()));
+        RequestProtocolTestSupport.applyDecodeStatus(registry, decode, DecodeResources.DecodeRequestStatus.terminal(item.decodeReservation(), 0L));
         RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, lastStatusAt + 2L * TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
     }
@@ -321,7 +321,7 @@ class RequestInactivityTest {
             assertTrue(RequestProtocolTestSupport.<Boolean>inspect(registry, requestContext, "requestInactiveLocked", originalDeadline), "the timer's earlier observation is expired");
         }
 
-        observeActive(source, originalDeadline - 1L);
+        recordWorkerActivity(source, originalDeadline - 1L);
         RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, originalDeadline);
 
         assertLiveAndCharged();
@@ -331,7 +331,7 @@ class RequestInactivityTest {
         }
     }
 
-    private void observeActive(RoleType source, long nowMs) {
+    private void recordWorkerActivity(RoleType source, long nowMs) {
         synchronized (requestContext) {
             if (source == RoleType.PREFILL) {
                 requestContext.scheduler().acceptPrefillStatus(requestContext, prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item), nowMs);

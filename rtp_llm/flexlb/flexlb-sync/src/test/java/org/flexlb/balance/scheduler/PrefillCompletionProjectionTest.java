@@ -107,7 +107,7 @@ class PrefillCompletionProjectionTest {
                 requests.publishRoute(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
             }
             assertTrue(future.get(2L, TimeUnit.SECONDS).isSuccess());
-            assertEquals(1L, prefill.observedRequestCount());
+            assertEquals(1L, prefill.outstandingRequestCount());
 
             TaskInfo task = new TaskInfo();
             task.setRequestId(101L);
@@ -126,7 +126,7 @@ class PrefillCompletionProjectionTest {
 
             applyStatus(prefill, status(3L, Map.of(), Map.of("101", task)));
             requests.runtime.continuations().awaitIdle();
-            assertEquals(0L, prefill.observedRequestCount());
+            assertEquals(0L, prefill.outstandingRequestCount());
             synchronized (requestContext) {
                 assertTrue(requestContext.isLiveGeneration(), "Prefill completion must retain the Decode lifecycle");
                 assertTrue(requestContext.decisionDeadlineAtMs().isEmpty());
@@ -146,7 +146,7 @@ class PrefillCompletionProjectionTest {
 
             applyStatus(prefill, status(4L, Map.of(), Map.of("101", task)));
             requests.runtime.continuations().awaitIdle();
-            assertEquals(0L, prefill.observedRequestCount());
+            assertEquals(0L, prefill.outstandingRequestCount());
 
             var decodeFinished = decodeStatus(3L, Map.of());
             decodeFinished.setFinishedTaskInfo(Map.of("101", task));

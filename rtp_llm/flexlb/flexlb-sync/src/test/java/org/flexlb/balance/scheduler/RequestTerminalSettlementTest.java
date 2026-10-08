@@ -124,7 +124,7 @@ class RequestTerminalSettlementTest {
         sender.complete(DeliveryResult.uncertain(new IllegalStateException("reply lost")));
         PreemptionRegistration claim = f.requestContext().tryInstallPreemption(RESERVATION, 4L, "victim");
         assertTrue(f.scheduler().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
-        RequestProtocolTestSupport.observeDecode(f.scheduler(), f.requestContext(), f.item().decodeEp(), DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 0L));
+        RequestProtocolTestSupport.applyDecodeStatus(f.scheduler(), f.requestContext(), f.item().decodeEp(), DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 0L));
         verify(f.item().decodeEp(), never()).reconcilePreemptionResources(anyLong(), argThat(update -> update.kind() == DecodeResources.PreemptionUpdate.Kind.FINISHED));
         f.scheduler().runtime.continuations().awaitIdle();
         assertTrue((f.requestContext().stage() == BalanceContext.RequestStage.FINISHED));
@@ -192,12 +192,12 @@ class RequestTerminalSettlementTest {
             return null;
         }).when(f.item().decodeEp()).publishCapacityRelease();
         var failed = PrefillState.PrefillRequestStatus.terminal(f.item(), PrefillState.PrefillRequestStatus.Kind.FAILED, 9L);
-        RequestProtocolTestSupport.observePrefill(f.scheduler(), f.requestContext(), f.item().prefillEp(), RoleType.PREFILL, failed);
+        RequestProtocolTestSupport.applyPrefillStatus(f.scheduler(), f.requestContext(), f.item().prefillEp(), RoleType.PREFILL, failed);
         assertFalse((f.requestContext().stage() == BalanceContext.RequestStage.FINISHED));
         assertFalse(claim.isFinished());
         assertFalse(f.requestContext().future().isDone());
         verify(f.item().decodeEp(), never()).publishCapacityRelease();
-        RequestProtocolTestSupport.observePrefill(f.scheduler(), f.requestContext(), f.item().prefillEp(), RoleType.PREFILL, failed);
+        RequestProtocolTestSupport.applyPrefillStatus(f.scheduler(), f.requestContext(), f.item().prefillEp(), RoleType.PREFILL, failed);
         verify(f.item().decodeEp(), times(2)).reconcilePreemptionResources(4L, DecodeResources.PreemptionUpdate.finished(RESERVATION));
         assertEquals(RequestState.Phase.FAILED, f.requestContext().snapshot().state());
         f.scheduler().runtime.continuations().awaitIdle();
@@ -230,7 +230,7 @@ class RequestTerminalSettlementTest {
         var requestStatus = priorityCanceled ? PrefillState.PrefillRequestStatus.terminal(f.item(),
                 PrefillState.PrefillRequestStatus.Kind.PRIORITY_CANCELED, 0L)
                 : PrefillState.PrefillRequestStatus.active(f.item());
-        RequestProtocolTestSupport.observePrefill(f.scheduler(), f.requestContext(), f.item().prefillEp(), RoleType.PREFILL, requestStatus);
+        RequestProtocolTestSupport.applyPrefillStatus(f.scheduler(), f.requestContext(), f.item().prefillEp(), RoleType.PREFILL, requestStatus);
 
         verify(f.item().decodeEp()).reconcilePreemptionResources(31L, update);
         verify(f.item().decodeEp()).publishCapacityRelease();
@@ -270,7 +270,7 @@ class RequestTerminalSettlementTest {
                 "finished context preserves the original cancellation fact");
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, () -> delivery.complete(DeliveryResult.delivered()));
         assertFalse(f.scheduler().completePreemption(claim, "late Cancel ACK"));
-        RequestProtocolTestSupport.observeDecode(f.scheduler(), requestContext, f.item().decodeEp(), DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 0L));
+        RequestProtocolTestSupport.applyDecodeStatus(f.scheduler(), requestContext, f.item().decodeEp(), DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 0L));
         RequestProtocolTestSupport.expireInactivity(f.scheduler(), requestContext, inactivity, Long.MAX_VALUE);
         assertEquals(ended, requestContext.snapshot());
         verify(f.item().decodeEp()).release(RESERVATION, DecodeResources.ReleaseReason.NOT_SENT);
@@ -301,7 +301,7 @@ class RequestTerminalSettlementTest {
             f.scheduler().onDecodeGenerationRetired(f.item().decodeEp(), java.util.List.of(RESERVATION));
             f.scheduler().runtime.continuations().awaitIdle();
         } else {
-            RequestProtocolTestSupport.observeDecode(f.scheduler(), f.requestContext(), f.item().decodeEp(),
+            RequestProtocolTestSupport.applyDecodeStatus(f.scheduler(), f.requestContext(), f.item().decodeEp(),
                     DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 0L));
         }
         assertFalse((f.requestContext().stage() == BalanceContext.RequestStage.FINISHED));
@@ -330,7 +330,7 @@ class RequestTerminalSettlementTest {
             return DecodeResources.ReservationReleaseResult.RELEASED;
         }).when(f.item().decodeEp()).release(RESERVATION, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
         assertTrue(delivery.tryStartSend());
-        RequestProtocolTestSupport.observeDecode(f.scheduler(), requestContext, f.item().decodeEp(), DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 42L));
+        RequestProtocolTestSupport.applyDecodeStatus(f.scheduler(), requestContext, f.item().decodeEp(), DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 42L));
         assertEquals(RequestState.Phase.FAILED, requestContext.snapshot().state());
         delivery.complete(DeliveryResult.delivered());
         f.scheduler().runtime.continuations().awaitIdle();
@@ -361,7 +361,7 @@ class RequestTerminalSettlementTest {
             assertFalse(context.installInactivityDeadline(mock(ExpirationTimer.InactivityDeadline.class)));
             return null;
         }).when(inactivity).cancel();
-        delivery.observeWorkerCompletion(f.item());
+        delivery.recordWorkerCompletion(f.item());
         f.scheduler().runtime.continuations().awaitIdle();
         assertEquals(BalanceContext.RequestStage.FINALIZING, context.stage(),
                 "resource evidence cannot archive before the terminal execution owner finishes");

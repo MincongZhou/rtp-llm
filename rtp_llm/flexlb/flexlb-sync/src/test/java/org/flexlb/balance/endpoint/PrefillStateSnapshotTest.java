@@ -74,16 +74,16 @@ class PrefillStateSnapshotTest {
                      var generationHandoff = generation.tryAcquireHandoff()) {
                     assertThrows(IllegalStateException.class,
                             () -> state.commitRouteGroupLocked(List.of(request), List.of(reservation), generationHandoff));
-                    assertEquals(1L, state.observedRequestCount());
+                    assertEquals(1L, state.outstandingRequestCount());
                     try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(request),
                             List.of(reservation), generationHandoff)) {
-                        assertEquals(1L, state.observedRequestCount());
+                        assertEquals(1L, state.outstandingRequestCount());
                     }
                 }
             }
         }
         assertTrue(EndpointTestSupport.releaseRequest(state, request));
-        assertEquals(0L, state.observedRequestCount());
+        assertEquals(0L, state.outstandingRequestCount());
         assertEquals(0, state.captureQueueCounters().batchSlots());
     }
 
@@ -129,9 +129,9 @@ class PrefillStateSnapshotTest {
             otherHandoff.close();
             handoff.close();
             assertEquals(1, drained.get());
-            assertEquals(1L, state.observedRequestCount(), "closing handoff cannot release committed capacity");
+            assertEquals(1L, state.outstandingRequestCount(), "closing handoff cannot release committed capacity");
             assertTrue(EndpointTestSupport.releaseRequest(state, request));
-            assertEquals(0L, state.observedRequestCount());
+            assertEquals(0L, state.outstandingRequestCount());
         }
     }
 
@@ -412,7 +412,7 @@ class PrefillStateSnapshotTest {
                     List.of(first, second), new long[]{30L, 40L}, permit));
         }
         assertEquals(replaced ? List.of(first, replacement) : List.of(first), waitingItems());
-        assertEquals(replaced ? 2L : 1L, state.observedRequestCount());
+        assertEquals(replaced ? 2L : 1L, state.outstandingRequestCount());
         assertTrue(state.committedSnapshot().requests().isEmpty(),
                 "failed validation must not commit an earlier member");
         RequestRoute validSecond = replaced ? replacement : second;
@@ -469,7 +469,7 @@ class PrefillStateSnapshotTest {
         var batch = state.reserveBatch(head, 11L, 1, generation.tryAcquireHandoff()).reservation();
         try (var preparation = EndpointTestSupport.preparation(batch)) {
             assertEquals(PrefillState.RequestRelease.QUEUED, state.releaseRequest(head));
-            assertEquals(0L, state.observedRequestCount());
+            assertEquals(0L, state.outstandingRequestCount());
             assertEquals(1, state.captureQueueCounters().batchSlots());
             assertEquals(PrefillState.RequestRelease.NONE, state.releaseRequest(head));
         }
@@ -483,7 +483,7 @@ class PrefillStateSnapshotTest {
         assertEquals(PrefillState.RequestRelease.COMMITTED, state.releaseRequest(first));
         assertEquals(PrefillState.RequestRelease.NONE, state.releaseRequest(first));
         assertEquals(List.of(2L), state.committedSnapshot().batches().getFirst().requestIds());
-        assertEquals(1L, state.observedRequestCount());
+        assertEquals(1L, state.outstandingRequestCount());
         assertEquals(1, state.captureQueueCounters().batchSlots());
         assertEquals(PrefillState.RequestRelease.COMMITTED, state.releaseRequest(second));
         assertEquals(0, state.captureQueueCounters().batchSlots());
@@ -549,7 +549,7 @@ class PrefillStateSnapshotTest {
                     List.of(first, second), new long[]{30L, 40L}, permit));
         }
         assertEquals(List.of(first), waitingItems());
-        assertEquals(2L, state.observedRequestCount(),
+        assertEquals(2L, state.outstandingRequestCount(),
                 "failed validation preserves both canonical request owners");
         assertTrue(state.committedSnapshot().requests().isEmpty());
         assertTrue(waiting.add(second));
@@ -604,7 +604,7 @@ class PrefillStateSnapshotTest {
         assertTrue(retired.batchCompletions().isEmpty());
         assertEquals(1, drained.get());
         assertEquals(0, state.captureQueueCounters().batchSlots());
-        assertEquals(0, state.observedRequestCount());
+        assertEquals(0, state.outstandingRequestCount());
         assertTrue(waiting.isEmpty());
         EndpointTestSupport.rollback(lease);
         assertEquals(1, drained.get(), "late lease cleanup cannot release the generation twice");
@@ -627,7 +627,7 @@ class PrefillStateSnapshotTest {
         assertEquals(10L, retired.batchCompletions().getFirst().batchId());
         assertFalse(retired.batchCompletions().getFirst().learningEligible());
         assertEquals(0, state.captureQueueCounters().batchSlots());
-        assertEquals(0, state.observedRequestCount());
+        assertEquals(0, state.outstandingRequestCount());
         assertFalse(EndpointTestSupport.releaseRequest(state, first));
         assertFalse(EndpointTestSupport.releaseRequest(state, second));
         assertTrue(state.retireGenerationOwnership().batchCompletions().isEmpty());
@@ -656,16 +656,16 @@ class PrefillStateSnapshotTest {
             assertThrows(IllegalArgumentException.class, () -> other.rollbackPreparation(localReservation));
             assertThrows(IllegalArgumentException.class, () -> EndpointTestSupport.commitRoutes(other,
                     List.of(otherRequest), List.of(localReservation), permit));
-            assertEquals(1L, state.observedRequestCount());
-            assertEquals(1L, other.observedRequestCount());
+            assertEquals(1L, state.outstandingRequestCount());
+            assertEquals(1L, other.outstandingRequestCount());
             try (var handoff = EndpointTestSupport.commitRoutes(other,
                     List.of(otherRequest), List.of(otherReservation), permit)) {
                 assertTrue(other.releaseRequest(otherRequest) == PrefillState.RequestRelease.COMMITTED);
             }
-            assertEquals(1L, state.observedRequestCount(), "foreign settlement cannot release the local owner");
+            assertEquals(1L, state.outstandingRequestCount(), "foreign settlement cannot release the local owner");
         }
-        assertEquals(0L, state.observedRequestCount());
-        assertEquals(0L, other.observedRequestCount());
+        assertEquals(0L, state.outstandingRequestCount());
+        assertEquals(0L, other.outstandingRequestCount());
     }
 
     @Test
@@ -680,7 +680,7 @@ class PrefillStateSnapshotTest {
                     List.of(first), new long[]{999L}, permit));
         }
         assertEquals(List.of(replacement), waitingItems());
-        assertEquals(1L, state.observedRequestCount());
+        assertEquals(1L, state.outstandingRequestCount());
         assertFalse(EndpointTestSupport.releaseRequest(state, first));
     }
 
@@ -693,9 +693,9 @@ class PrefillStateSnapshotTest {
         finally { lock.unlock(); }
         assertSame(request, ledger.detachNextActiveForStop());
         assertTrue(waitingItems().isEmpty());
-        assertEquals(1L, ledger.observedRequestCount(), "stop callback retains a request seat until settlement");
+        assertEquals(1L, ledger.outstandingRequestCount(), "stop callback retains a request seat until settlement");
         assertEquals(PrefillState.RequestRelease.QUEUED, ledger.releaseRequest(request));
-        assertEquals(0L, ledger.observedRequestCount());
+        assertEquals(0L, ledger.outstandingRequestCount());
         assertEquals(PrefillState.RequestRelease.NONE, ledger.releaseRequest(request));
         lock.lock();
         try { assertTrue(ledger.acknowledgeStopTerminalLocked(request)); }
@@ -721,7 +721,7 @@ class PrefillStateSnapshotTest {
         try {
             assertTrue(ledger.removeQueuedLocked(request));
             assertTrue(waiting.isEmpty());
-            assertEquals(0L, ledger.observedRequestCount());
+            assertEquals(0L, ledger.outstandingRequestCount());
             assertEquals(1, ledger.captureQueueCounters().batchSlots());
             assertEquals(0, drained.get());
         } finally {
@@ -1054,7 +1054,7 @@ class PrefillStateSnapshotTest {
         assertEquals(100L, completion.actualWorkMs());
         assertTrue(completion.successfulCompletion());
         assertFalse(completion.learningEligible(), "local cleanup disqualifies the whole batch from learning");
-        assertEquals(0L, state.observedRequestCount());
+        assertEquals(0L, state.outstandingRequestCount());
     }
 
     @Test
@@ -1141,9 +1141,9 @@ class PrefillStateSnapshotTest {
             assertThrows(IllegalArgumentException.class, () -> EndpointTestSupport.commitRoutes(state,
                     List.of(request), List.of(lease, lease), permit));
             assertEquals(30L, remainingWork());
-            assertEquals(1L, state.observedRequestCount());
+            assertEquals(1L, state.outstandingRequestCount());
         }
-        assertEquals(0L, state.observedRequestCount());
+        assertEquals(0L, state.outstandingRequestCount());
     }
 
     @Test
@@ -1157,7 +1157,7 @@ class PrefillStateSnapshotTest {
             assertThrows(IllegalStateException.class, () -> EndpointTestSupport.commitRoutes(state,
                     List.of(first, second), List.of(firstLease, firstLease), permit));
             assertEquals(70L, remainingWork());
-            assertEquals(2L, state.observedRequestCount());
+            assertEquals(2L, state.outstandingRequestCount());
             try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(first, second),
                     List.of(firstLease, secondLease), permit)) {
                 assertEquals(0L, handoff.precedingWork().materialize().totalRemainingWorkMs().orElseThrow());
@@ -1165,7 +1165,7 @@ class PrefillStateSnapshotTest {
         }
         assertEquals(PrefillState.RequestRelease.COMMITTED, state.releaseRequest(first));
         assertEquals(PrefillState.RequestRelease.COMMITTED, state.releaseRequest(second));
-        assertEquals(0L, state.observedRequestCount());
+        assertEquals(0L, state.outstandingRequestCount());
     }
 
     @Test
@@ -1187,7 +1187,7 @@ class PrefillStateSnapshotTest {
         assertTrue(completion.successfulCompletion());
         assertFalse(completion.learningEligible());
         assertTrue(result.capacityReleased());
-        assertEquals(0L, state.observedRequestCount());
+        assertEquals(0L, state.outstandingRequestCount());
         var repeated = reconcile(finished, Map.of(), noRepacking);
         assertTrue(repeated.batchCompletions().isEmpty());
         assertTrue(repeated.requestStatuses().isEmpty());
@@ -1202,24 +1202,24 @@ class PrefillStateSnapshotTest {
         response.setRole(RoleType.PREFILL);
         response.setRunningQueryLen(4L);
         state.reconcileHeartbeat(worker.freezeStatusResponse(response));
-        assertEquals(4L, state.observedRequestCount());
+        assertEquals(4L, state.outstandingRequestCount());
         response.setRunningQueryLen(2L);
         var observation = worker.freezeStatusResponse(response);
         lock.lock();
         try {
             var reduction = state.prepareStatusLocked(observation);
-            assertEquals(4L, state.observedRequestCount(), "preparation must not release capacity");
+            assertEquals(4L, state.outstandingRequestCount(), "preparation must not release capacity");
             if (invalidate) {
                 response.setRunningQueryLen(1L);
                 state.reconcileHeartbeat(worker.freezeStatusResponse(response));
                 assertNull(state.commitStatusLocked(reduction, Map.of()));
-                assertEquals(1L, state.observedRequestCount());
+                assertEquals(1L, state.outstandingRequestCount());
                 reduction = state.prepareStatusLocked(observation);
             }
             var result = state.commitStatusLocked(reduction, Map.of());
             assertEquals(!invalidate, result.capacityReleased(),
                     "only a decrease from the current unknown ownership releases capacity");
-            assertEquals(2L, state.observedRequestCount());
+            assertEquals(2L, state.outstandingRequestCount());
         } finally {
             lock.unlock();
         }

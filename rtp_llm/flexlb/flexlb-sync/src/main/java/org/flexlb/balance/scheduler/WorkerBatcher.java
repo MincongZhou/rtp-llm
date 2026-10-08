@@ -81,7 +81,7 @@ public final class WorkerBatcher {
             details.put("queueDepth", depth);
             details.put("queueVersion", counters.version());
             details.put("priorityCounts", Collections.unmodifiableMap(priorityCounts));
-            details.put("prefillRequests", counters.observedRequests());
+            details.put("prefillRequests", counters.outstandingRequests());
             details.put("prefillBatchSlots", counters.batchSlots());
             if (decode != null) {
                 details.put("decode", Map.of("endpoint", decode.address(), "version", decode.admissionVersion(),

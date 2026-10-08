@@ -183,23 +183,23 @@ final class RequestProtocolTestSupport {
         return owner;
     }
 
-    static void observePrefill(AbstractRequestScheduler scheduler, PrefillEndpoint source,
+    static void applyPrefillStatus(AbstractRequestScheduler scheduler, PrefillEndpoint source,
             RoleType role, PrefillState.PrefillRequestStatus requestStatus) {
-        observePrefill(scheduler, scheduler.findRequestContext(requestStatus.route().requestId()), source, role, requestStatus);
+        applyPrefillStatus(scheduler, scheduler.findRequestContext(requestStatus.route().requestId()), source, role, requestStatus);
     }
 
-    static void observePrefill(AbstractRequestScheduler scheduler, BalanceContext context,
+    static void applyPrefillStatus(AbstractRequestScheduler scheduler, BalanceContext context,
             PrefillEndpoint source, RoleType role,
             PrefillState.PrefillRequestStatus requestStatus) {
         if (context != null) { run(context.scheduler().acceptPrefillStatus(context, source, role, requestStatus, System.currentTimeMillis())); }
     }
 
-    static void observeDecode(AbstractRequestScheduler scheduler, DecodeEndpoint source,
+    static void applyDecodeStatus(AbstractRequestScheduler scheduler, DecodeEndpoint source,
             DecodeResources.DecodeRequestStatus requestStatus) {
-        observeDecode(scheduler, scheduler.findRequestContext(requestStatus.reservation().requestId()), source, requestStatus);
+        applyDecodeStatus(scheduler, scheduler.findRequestContext(requestStatus.reservation().requestId()), source, requestStatus);
     }
 
-    static void observeDecode(AbstractRequestScheduler scheduler, BalanceContext context,
+    static void applyDecodeStatus(AbstractRequestScheduler scheduler, BalanceContext context,
             DecodeEndpoint source, DecodeResources.DecodeRequestStatus requestStatus) {
         if (context != null) { run(context.scheduler().acceptDecodeStatus(context, source, requestStatus, System.currentTimeMillis())); }
     }

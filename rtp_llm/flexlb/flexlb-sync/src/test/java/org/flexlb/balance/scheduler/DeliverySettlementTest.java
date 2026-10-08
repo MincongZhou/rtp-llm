@@ -359,7 +359,7 @@ class DeliverySettlementTest {
     }
 
     private void decodeFinished(Member member) {
-        RequestProtocolTestSupport.observeDecode(registry, member.requestContext(), member.item().decodeEp(), DecodeResources.DecodeRequestStatus.terminal(member.item().decodeReservation(), 601L));
+        RequestProtocolTestSupport.applyDecodeStatus(registry, member.requestContext(), member.item().decodeEp(), DecodeResources.DecodeRequestStatus.terminal(member.item().decodeReservation(), 601L));
     }
 
     private void assertOccupancy(int batches, int members) {

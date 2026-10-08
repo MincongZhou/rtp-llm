@@ -83,7 +83,7 @@ class DeliveryClaimTest {
             f.claim.complete(DeliveryResult.delivered());
             f.owner.runtime.continuations().awaitIdle();
             f.clearDecodeStateOwnership();
-            f.claim.observeDecodeSettlement(f.decode, DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L));
+            f.claim.recordDecodeTerminalStatus(f.decode, DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L));
             Runnable terminal = f.context.scheduler().acceptDecodeStatus(f.context, f.decode,
                     DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L), System.currentTimeMillis());
             assertNotNull(terminal);
@@ -198,9 +198,9 @@ class DeliveryClaimTest {
             f.owner.onResponseUndeliverable(f.context);
             f.cancel.complete(EngineCancelChannel.CancelAck.REQUEST_FENCED);
             assertFalse(f.settlement().isDone());
-            f.claim.observeDecodeSettlement(RequestProtocolTestSupport.decodeEndpoint(), DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L));
+            f.claim.recordDecodeTerminalStatus(RequestProtocolTestSupport.decodeEndpoint(), DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L));
             assertFalse(f.settlement().isDone(), "another endpoint is not proof");
-            f.claim.observeDecodeSettlement(f.decode, DecodeResources.DecodeRequestStatus.terminal(
+            f.claim.recordDecodeTerminalStatus(f.decode, DecodeResources.DecodeRequestStatus.terminal(
                     new DecodeResources.ReservationHandle(1L, 41L, 99L), 0L));
             assertFalse(f.settlement().isDone(), "another reservation is not proof");
             f.applyDecodeTerminal();
@@ -476,7 +476,7 @@ class DeliveryClaimTest {
             var requestStatus = mismatch.equals("notTerminal")
                     ? DecodeResources.DecodeRequestStatus.active(reservation)
                     : DecodeResources.DecodeRequestStatus.terminal(reservation, 0L);
-            f.claim.observeDecodeSettlement(source, requestStatus);
+            f.claim.recordDecodeTerminalStatus(source, requestStatus);
             f.owner.runtime.continuations().awaitIdle();
             assertFalse(f.settlement().isDone());
             assertNull(f.claim.provenReleaseReason());

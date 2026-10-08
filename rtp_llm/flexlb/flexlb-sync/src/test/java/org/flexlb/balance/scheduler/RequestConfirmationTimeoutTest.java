@@ -129,7 +129,7 @@ class RequestConfirmationTimeoutTest {
             }
             assertEquals(1, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).liveRequestCount());
             assertFalse(future.isDone());
-            assertEquals(1L, prefill.observedRequestCount());
+            assertEquals(1L, prefill.outstandingRequestCount());
             assertEquals(16L, decode.routingView().inflightHardKv());
             assertEquals(32L, decode.routingView().inflightExpectedKv());
             assertEquals(1, decode.routingView().engineCapacityUsed());
@@ -144,7 +144,7 @@ class RequestConfirmationTimeoutTest {
             assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).getRequestState(REQUEST_ID, 0L).state());
             SchedulerTestSupport.runtime(requests).continuations().awaitIdle();
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).liveRequestCount());
-            assertEquals(0L, prefill.observedRequestCount());
+            assertEquals(0L, prefill.outstandingRequestCount());
             assertEquals(0, prefill.ownershipStats().locallyOwnedRequests());
             assertEquals(0L, decode.routingView().inflightHardKv());
             assertEquals(0L, decode.routingView().inflightExpectedKv());
@@ -159,12 +159,12 @@ class RequestConfirmationTimeoutTest {
                 assertTrue(acquired.permit().release());
                 decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             }
-            RequestProtocolTestSupport.observePrefill(requests, prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item));
-            RequestProtocolTestSupport.observeDecode(requests, decode, DecodeResources.DecodeRequestStatus.active(reservation));
+            RequestProtocolTestSupport.applyPrefillStatus(requests, prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item));
+            RequestProtocolTestSupport.applyDecodeStatus(requests, decode, DecodeResources.DecodeRequestStatus.active(reservation));
             assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).getRequestState(REQUEST_ID, 0L).state());
             SchedulerTestSupport.runtime(requests).continuations().awaitIdle();
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).liveRequestCount());
-            assertEquals(0L, prefill.observedRequestCount());
+            assertEquals(0L, prefill.outstandingRequestCount());
             assertEquals(0, decode.routingView().engineCapacityUsed());
         } finally {
             try {

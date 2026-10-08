@@ -111,7 +111,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
         CompletableFuture<Response> future = registerRequest(context, expiredError);
         if (!(context.getFuture() instanceof BalanceContext.RequestFuture)) { context.setFuture(future); }
-        observeResponse(context, future);
+        attachResponseCompletionHandler(context, future);
         return future;
     }
 
@@ -271,7 +271,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             BalanceContext context = findRequestContext(exact.requestId());
             if (context != null) {
                 DeliveryClaim delivery = context.delivery();
-                if (delivery != null && delivery.item == exact) { delivery.observeRetirement(source); }
+                if (delivery != null && delivery.item == exact) { delivery.recordEndpointRetirement(source); }
                 submitContinuation(context, acceptPrefillRetirement(context, source, exact));
             }
         });
@@ -286,7 +286,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             BalanceContext context = findRequestContext(exact.requestId());
             if (context != null) {
                 DeliveryClaim delivery = context.delivery();
-                if (delivery != null && Objects.equals(delivery.item.decodeReservation(), exact)) { delivery.observeRetirement(source); }
+                if (delivery != null && Objects.equals(delivery.item.decodeReservation(), exact)) { delivery.recordEndpointRetirement(source); }
                 Runnable work;
                 synchronized (context) {
                     work = context.ownsDecodeReservationLocked(source, exact)
@@ -515,14 +515,15 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     ExpirationTimer expirationTimer() { return expirationTimer; }
 
-    void observeResponse(BalanceContext context, CompletableFuture<Response> future) {
+    /** Attach response recording and successful-route cache tracing to the response Future. */
+    void attachResponseCompletionHandler(BalanceContext context, CompletableFuture<Response> future) {
         future.whenComplete((response, failure) -> {
             if (failure != null) { return; }
             try {
                 context.setResponse(response);
                 if (response != null && response.isSuccess()) { recentCacheKeyTraceReporter.report(context); }
-            } catch (RuntimeException observationFailure) {
-                Logger.warn("Route completion side effect failed: request_id={}", context.getRequestId(), observationFailure);
+            } catch (RuntimeException completionHandlerFailure) {
+                Logger.warn("Route completion side effect failed: request_id={}", context.getRequestId(), completionHandlerFailure);
             }
         });
     }
@@ -670,7 +671,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         ctx.recordDeliveryPredictionLocked(work, predictedMs, nowMs);
         RequestRoute route = ctx.route();
         if (route.decodeEp() != null && route.decodeEp().isAcceptedByEngine(route.decodeReservation())) {
-            ctx.observeWorker(nowMs);
+            ctx.recordWorkerActivityLocked(nowMs);
             return ctx.markDecodeAcceptedLocked();
         }
         return null;
@@ -795,7 +796,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     private Runnable applyPrefillStatusLocked(BalanceContext ctx, RoleType role, PrefillState.PrefillRequestStatus requestStatus, long nowMs) {
         ctx.requireContextLock("Prefill request status reduction");
-        ctx.observeWorker(nowMs);
+        ctx.recordWorkerActivityLocked(nowMs);
         boolean cleaning = ctx.hasCleanup();
         if (cleaning && requestStatus.kind() != PrefillState.PrefillRequestStatus.Kind.ACTIVE) {
             ctx.recordCleanupSettlement(true, false, false);
@@ -851,7 +852,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (!ctx.ownsDecodeReservationLocked(source, requestStatus.reservation())) {
                 return null;
             }
-            obsolete = ctx.recordDecodeObservationLocked(requestStatus.kind(), nowMs);
+            obsolete = ctx.recordDecodeProgressLocked(requestStatus.kind(), nowMs);
             if (requestStatus.kind() == DecodeResources.DecodeRequestStatus.Kind.TERMINAL) {
                 work = advanceRequestEndLocked(ctx, ctx.route(), DeferredTerminal.worker(
                         WorkerTerminalSource.DECODE_ENDPOINT, requestStatus.errorCode() == 0L, requestStatus.errorCode()));
@@ -882,7 +883,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             Throwable notificationFailure = publishCapacity ? Failures.run(null, source::publishCapacityRelease) : null;
             try {
                 DeliveryClaim delivery = ctx.delivery();
-                if (delivery != null) { delivery.observeDecodeSettlement(source, requestStatus); }
+                if (delivery != null) { delivery.recordDecodeTerminalStatus(source, requestStatus); }
                 executeEngineEffects(ctx, effect, deadline);
             } catch (Throwable failure) {
                 throw Failures.propagate(Failures.append(failure, notificationFailure), "Decode request status continuation failed");
@@ -1323,7 +1324,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 && action.event().workerSuccessful();
         if (delivery != null) {
             if (successfulWorker && context.cancellationReason() == null && !delivery.cleanupRequired()) {
-                delivery.observeWorkerCompletion(action.item());
+                delivery.recordWorkerCompletion(action.item());
             } else {
                 delivery.abandon(context.cancellationReason() == null ? CancelReason.CLIENT_CANCELLED : context.cancellationReason());
             }

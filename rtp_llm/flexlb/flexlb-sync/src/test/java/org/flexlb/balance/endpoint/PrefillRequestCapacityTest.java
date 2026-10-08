@@ -36,18 +36,18 @@ class PrefillRequestCapacityTest {
         assertTrue(enqueue(queued, 2L));
         var registration = reserve(immediate, 2L).reservation();
         assertNotNull(registration);
-        assertEquals(2L, state.observedRequestCount());
+        assertEquals(2L, state.outstandingRequestCount());
         assertFalse(enqueue(item(3), 2L));
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 2L).status());
         try (var handoff = commit(immediate, registration)) {
-            assertEquals(2L, state.observedRequestCount());
+            assertEquals(2L, state.outstandingRequestCount());
         }
         EndpointTestSupport.rollback(registration);
-        assertEquals(2L, state.observedRequestCount(), "ACK and capability closure cannot release Engine ownership");
+        assertEquals(2L, state.outstandingRequestCount(), "ACK and capability closure cannot release Engine ownership");
         assertTrue(EndpointTestSupport.releaseRequest(state, immediate));
         assertFalse(EndpointTestSupport.releaseRequest(state, immediate));
         assertTrue(enqueue(item(3), 2L));
-        assertEquals(2L, state.observedRequestCount());
+        assertEquals(2L, state.outstandingRequestCount());
     }
 
     @Test
@@ -57,14 +57,14 @@ class PrefillRequestCapacityTest {
         var localObservation = observed(1);
         var foreign = observed(2);
         heartbeat(Map.of("local", localObservation, "foreign", foreign, "duplicate", foreign), 2L);
-        assertEquals(2L, state.observedRequestCount(), "early Engine observation and prepared local ownership are one request");
+        assertEquals(2L, state.outstandingRequestCount(), "early Engine observation and prepared local ownership are one request");
         try (var handoff = commit(local, registration)) { }
         EndpointTestSupport.rollback(registration);
         heartbeat(Map.of("local", localObservation, "foreign", foreign), 2L);
-        assertEquals(2L, state.observedRequestCount());
+        assertEquals(2L, state.outstandingRequestCount());
         assertFalse(state.canAcceptRequest(2L));
         heartbeat(Map.of("local", localObservation), 1L);
-        assertEquals(1L, state.observedRequestCount());
+        assertEquals(1L, state.outstandingRequestCount());
         assertTrue(state.canAcceptRequest(2L));
     }
 
@@ -72,10 +72,10 @@ class PrefillRequestCapacityTest {
     void scalarEngineWorkIsCountedWithoutInventingIdentity() {
         var registration = reserve(item(1), 4L).reservation();
         heartbeat(Map.of(), 2L);
-        assertEquals(3L, state.observedRequestCount(), "unseen local shadow cannot explain unidentified Engine work");
+        assertEquals(3L, state.outstandingRequestCount(), "unseen local shadow cannot explain unidentified Engine work");
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(2), 3L).status());
         EndpointTestSupport.rollback(registration);
-        assertEquals(2L, state.observedRequestCount());
+        assertEquals(2L, state.outstandingRequestCount());
     }
 
     @Test
@@ -83,7 +83,7 @@ class PrefillRequestCapacityTest {
         var first = reserve(item(1), 2L).reservation();
         var second = reserve(item(2), 2L).reservation();
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 1L).status());
-        assertEquals(2L, state.observedRequestCount());
+        assertEquals(2L, state.outstandingRequestCount());
         assertFalse(state.canAcceptRequest(1L));
         assertTrue(state.canAcceptRequest(5L));
         EndpointTestSupport.rollback(first);
@@ -104,10 +104,10 @@ class PrefillRequestCapacityTest {
         assertFalse(state.batchCapacityAvailable(1));
         assertTrue(enqueue(item(3), 0L));
         assertTrue(EndpointTestSupport.releaseRequest(state, first));
-        assertEquals(2L, state.observedRequestCount());
+        assertEquals(2L, state.outstandingRequestCount());
         assertFalse(state.batchCapacityAvailable(1));
         assertTrue(EndpointTestSupport.releaseRequest(state, second));
-        assertEquals(1L, state.observedRequestCount());
+        assertEquals(1L, state.outstandingRequestCount());
         assertTrue(state.batchCapacityAvailable(1));
     }
 
@@ -119,9 +119,9 @@ class PrefillRequestCapacityTest {
         var current = reserve(item(1), 1L).reservation();
         EndpointTestSupport.rollback(old);
         assertFalse(EndpointTestSupport.releaseRequest(state, previous));
-        assertEquals(1L, state.observedRequestCount());
+        assertEquals(1L, state.outstandingRequestCount());
         EndpointTestSupport.rollback(current);
-        assertEquals(0L, state.observedRequestCount());
+        assertEquals(0L, state.outstandingRequestCount());
     }
 
     @Test
@@ -212,7 +212,7 @@ class PrefillRequestCapacityTest {
         try {
             assertThrows(IllegalStateException.class, () -> direct.enqueueActiveLocked(item(1), 1L));
             assertTrue(direct.canAcceptRequest(1L));
-            assertEquals(0L, direct.observedRequestCount());
+            assertEquals(0L, direct.outstandingRequestCount());
         } finally {
             lock.unlock();
         }

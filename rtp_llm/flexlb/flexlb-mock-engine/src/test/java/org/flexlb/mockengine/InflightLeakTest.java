@@ -301,12 +301,12 @@ class InflightLeakTest {
             AutoTpmE2EHarness.await(() -> h.decodeEngines.getFirst().getCompletedCount() == 4L,
                     5_000L, "all four requests must finish before the first status pump");
             assertEquals(2, h.prefillEndpoint(0).ownershipStats().batchCount());
-            assertEquals(4, h.prefillEndpoint(0).observedRequestCount());
+            assertEquals(4, h.prefillEndpoint(0).outstandingRequestCount());
 
             h.pumpPrefillOnce(0);
             assertEquals(0, h.prefillEndpoint(0).ownershipStats().batchCount(),
                     "the first real status response must release both completed batches");
-            assertEquals(0, h.prefillEndpoint(0).observedRequestCount());
+            assertEquals(0, h.prefillEndpoint(0).outstandingRequestCount());
             h.pumpDecodeOnce(0);
             h.pumpPrefillOnce(0);
             assertEquals(0, h.prefillEndpoint(0).ownershipStats().batchCount(),
@@ -320,7 +320,7 @@ class InflightLeakTest {
                     5_000L, "returned batch slots must allow the next requests to dispatch");
             h.pumpOnce();
             assertEquals(0, h.prefillEndpoint(0).ownershipStats().batchCount());
-            assertEquals(0, h.prefillEndpoint(0).observedRequestCount());
+            assertEquals(0, h.prefillEndpoint(0).outstandingRequestCount());
             for (CompletableFuture<Response> future : firstWave) {
                 assertTrue(future.get(1, TimeUnit.SECONDS).isSuccess());
             }

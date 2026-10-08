@@ -146,7 +146,7 @@ class GrpcWorkerStatusRunnerTest {
         java.util.concurrent.atomic.AtomicBoolean projected =
                 new java.util.concurrent.atomic.AtomicBoolean();
         Runnable activity = () -> projected.set(true);
-        when(endpoint.observeStatusHeartbeat(any(), any()))
+        when(endpoint.applyStatusHeartbeat(any(), any()))
                 .thenReturn(activity);
 
         EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
@@ -175,7 +175,7 @@ class GrpcWorkerStatusRunnerTest {
 
         ArgumentCaptor<WorkerStatus.StatusObservation> observation =
                 ArgumentCaptor.forClass(WorkerStatus.StatusObservation.class);
-        verify(endpoint).observeStatusHeartbeat(
+        verify(endpoint).applyStatusHeartbeat(
                 org.mockito.Mockito.eq(status), observation.capture());
         assertTrue(observation.getValue().runningTasks().values().stream()
                 .anyMatch(active -> active.requestId() == 123L));

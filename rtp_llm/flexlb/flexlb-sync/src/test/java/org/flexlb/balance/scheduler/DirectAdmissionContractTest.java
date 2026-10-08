@@ -85,7 +85,7 @@ class DirectAdmissionContractTest {
             assertEquals(prefillCapacity, responses.stream().filter(Response::isSuccess).count());
             responses.stream().filter(response -> !response.isSuccess()).forEach(response ->
                     assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode()));
-            assertEquals(prefillCapacity, fixture.prefill.observedRequestCount());
+            assertEquals(prefillCapacity, fixture.prefill.outstandingRequestCount());
             assertEquals(prefillCapacity, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(48L * prefillCapacity, fixture.decode.routingView().inflightExpectedKv());
             fixture.assertNoWaitingQueue();
@@ -102,7 +102,7 @@ class DirectAdmissionContractTest {
             assertTrue(response.isSuccess());
             assertFalse(response.isEnqueuedByMaster());
             fixture.assertNoWaitingQueue();
-            assertEquals(1, fixture.prefill.observedRequestCount());
+            assertEquals(1, fixture.prefill.outstandingRequestCount());
             assertEquals(0, fixture.prefill.ownershipStats().batchCount());
             assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(48L, fixture.decode.routingView().inflightExpectedKv());
@@ -115,13 +115,13 @@ class DirectAdmissionContractTest {
                     reservation,
                     DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
 
-            fixture.observe(fixture.prefill, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
-            assertEquals(0L, fixture.prefill.observedRequestCount());
+            fixture.applyWorkerStatus(fixture.prefill, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
+            assertEquals(0L, fixture.prefill.outstandingRequestCount());
             assertEquals(48L, fixture.decode.routingView().inflightExpectedKv(),
                     "Prefill completion must retain Decode ownership until its own observation");
-            fixture.observe(fixture.decode, Map.of("101", task(101L, TaskPhase.RUNNING)), Map.of());
+            fixture.applyWorkerStatus(fixture.decode, Map.of("101", task(101L, TaskPhase.RUNNING)), Map.of());
             assertTrue(fixture.decode.isAcceptedByEngine(reservation));
-            fixture.observe(fixture.decode, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
+            fixture.applyWorkerStatus(fixture.decode, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
             assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(fixture.requests).liveRequestCount());
             fixture.assertNoWaitingQueue();
@@ -165,11 +165,11 @@ class DirectAdmissionContractTest {
                 DecodeResources.ReservationHandle reservation = call.getArgument(0);
                 assertEquals(103L, reservation.requestId());
                 fixture.assertItemNotBound(103L);
-                fixture.observe(fixture.decode, Map.of("103", task(103L, TaskPhase.KV_ALLOCATED)), Map.of());
+                fixture.applyWorkerStatus(fixture.decode, Map.of("103", task(103L, TaskPhase.KV_ALLOCATED)), Map.of());
                 var acquired = (DecodeEndpoint.EngineDispatchPermitAcquisition) call.callRealMethod();
                 assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED, acquired.status());
                 assertNotNull(acquired.permit(), "accepted preparation must retain an exact handoff capability");
-                fixture.observe(fixture.decode, Map.of(), Map.of("103", task(103L, TaskPhase.RUNNING)));
+                fixture.applyWorkerStatus(fixture.decode, Map.of(), Map.of("103", task(103L, TaskPhase.RUNNING)));
                 fixture.assertItemNotBound(103L);
                 raced.set(true);
                 return acquired;
@@ -202,7 +202,7 @@ class DirectAdmissionContractTest {
                         org.springframework.test.util.ReflectionTestUtils.getField(claim, "sendOutcome"));
                 assertFalse(claim.settlement().toCompletableFuture().isDone());
 
-                fixture.observe(fixture.decode, Map.of(), Map.of("105", task(105L, TaskPhase.RUNNING)));
+                fixture.applyWorkerStatus(fixture.decode, Map.of(), Map.of("105", task(105L, TaskPhase.RUNNING)));
 
                 Response terminal = context.getFuture().get(2L, TimeUnit.SECONDS);
                 assertTrue(terminal.isSuccess());
@@ -292,14 +292,14 @@ class DirectAdmissionContractTest {
                 request.getRequest().setSeqLen(32L);
                 request.getRequest().setMaxNewTokens(16);
                 assertTrue(queue.submit(request).get(3, TimeUnit.SECONDS).isSuccess());
-                assertEquals(2, fixture.prefill.observedRequestCount());
+                assertEquals(2, fixture.prefill.outstandingRequestCount());
                 assertEquals(2, fixture.decode.routingView().engineCapacityUsed());
                 verify(fixture.queuedDelivery).prepare(anyList(), any(), any());
 
-                fixture.observe(fixture.prefill, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
-                fixture.observe(fixture.decode, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
+                fixture.applyWorkerStatus(fixture.prefill, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
+                fixture.applyWorkerStatus(fixture.decode, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
                 RequestProtocolTestSupport.awaitCondition(() -> fixture.requests.requests.findActive(101L) == null);
-                assertEquals(1, fixture.prefill.observedRequestCount());
+                assertEquals(1, fixture.prefill.outstandingRequestCount());
                 assertNotNull(EndpointTestSupport.decodeReservation(fixture.decode, 102L));
 
             }
@@ -355,7 +355,7 @@ class DirectAdmissionContractTest {
                 worker.lock.unlock();
             }
             decode = spy(new DecodeEndpoint(worker(RoleType.DECODE, "127.0.0.2"), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(projector)));
-            observe(decode, Map.of(), Map.of());
+            applyWorkerStatus(decode, Map.of(), Map.of());
             prefillSelector = mock(CostBasedPrefillStrategy.class);
             var decodeSelector = mock(DecodeSelector.class);
             when(prefillSelector.select(any(), eq(RoleType.PREFILL), any())).thenAnswer(call -> {
@@ -395,7 +395,7 @@ class DirectAdmissionContractTest {
 
         private void assertNoPrefillOwnership() {
             assertNoWaitingQueue();
-            assertEquals(0L, prefill.observedRequestCount());
+            assertEquals(0L, prefill.outstandingRequestCount());
             assertEquals(0, prefill.ownershipStats().batchCount());
         }
 
@@ -407,7 +407,7 @@ class DirectAdmissionContractTest {
             }
         }
 
-        private void observe(WorkerEndpoint endpoint, Map<String, TaskInfo> running, Map<String, TaskInfo> finished) {
+        private void applyWorkerStatus(WorkerEndpoint endpoint, Map<String, TaskInfo> running, Map<String, TaskInfo> finished) {
             WorkerStatus worker = endpoint.getStatus();
             Runnable projection;
             worker.lock.lock();

@@ -245,7 +245,7 @@ public final class PrefillState {
             lastObservedAtMs = Math.max(lastObservedAtMs, nowMs);
         }
 
-        private void observePhase(Phase phase, long nowMs) {
+        private void updateExecutionProgress(Phase phase, long nowMs) {
             remainingWorkMs = remainingAt(nowMs);
             phaseBaseMs = Math.max(phaseBaseMs, nowMs);
             touch(nowMs);
@@ -299,7 +299,7 @@ public final class PrefillState {
             reservation = null;
         }
 
-        private void observeIndividualPhase(Phase next, long nowMs) {
+        private void updateExecutionProgress(Phase next, long nowMs) {
             checkArgument(next == Phase.ENGINE_QUEUED || next == Phase.ENGINE_RUNNING, "invalid Engine phase %s", next);
             if (!isCommitted() || batch != null) {
                 throw new IllegalStateException(
@@ -454,7 +454,7 @@ public final class PrefillState {
     }
 
     /** Diagnostic counters captured from one queue ownership revision. */
-    public record QueueCounters(long version, int[] byPriority, long observedRequests, int batchSlots) { }
+    public record QueueCounters(long version, int[] byPriority, long outstandingRequests, int batchSlots) { }
 
     public QueueCounters captureQueueCounters() {
         lock.lock();
@@ -1015,11 +1015,11 @@ public final class PrefillState {
         boolean changed = active.unknownRequests != unknownEngineRequestCount;
         for (var observed : active.individuals.entrySet()) {
             changed |= observed.getKey().individualPhase != observed.getValue();
-            observed.getKey().observeIndividualPhase(observed.getValue(), nowMs);
+            observed.getKey().updateExecutionProgress(observed.getValue(), nowMs);
         }
         for (var observed : active.batches.entrySet()) {
             changed |= observed.getKey().servicePhase != observed.getValue();
-            observed.getKey().observePhase(observed.getValue(), nowMs);
+            observed.getKey().updateExecutionProgress(observed.getValue(), nowMs);
         }
         unknownEngineRequestCount = active.unknownRequests;
         return changed;
@@ -1349,7 +1349,8 @@ public final class PrefillState {
                 && unknownEngineRequestCount < maxOutstandingRequests - requests.size();
     }
 
-    public long observedRequestCount() {
+    /** Count local ownership plus Engine requests absent from the local ledger. */
+    public long outstandingRequestCount() {
         lock.lock();
         try {
             return saturatedAdd(

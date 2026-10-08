@@ -52,21 +52,21 @@ class PrefillEndpointDirectSchedulerTest {
                 }
             }
             assertEquals(4, owned.size());
-            assertEquals(4, endpoint.observedRequestCount());
+            assertEquals(4, endpoint.outstandingRequestCount());
             try (var pin = endpoint.tryPinGeneration()) {
                 var full = endpoint.reserveUnqueuedRoute(pin, item(100L), 10L);
                 assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, full.status(),
                         "four exact owners already consume the four-request limit");
             }
             owned.forEach(endpoint::rollbackReservation);
-            assertEquals(0, endpoint.observedRequestCount());
+            assertEquals(0, endpoint.outstandingRequestCount());
             try (var pin = endpoint.tryPinGeneration()) {
                 var result = endpoint.reserveUnqueuedRoute(pin, item(65L), 10L);
                 assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
                 endpoint.rollbackReservation(result.reservation());
                 endpoint.rollbackReservation(result.reservation());
             }
-            assertEquals(0, endpoint.observedRequestCount());
+            assertEquals(0, endpoint.outstandingRequestCount());
         } finally {
             endpoint.close();
         }

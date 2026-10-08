@@ -1206,7 +1206,7 @@ public class BalanceContext {
             publishSettlement();
         }
 
-        void observeDecodeSettlement(DecodeEndpoint source, DecodeResources.DecodeRequestStatus requestStatus) {
+        void recordDecodeTerminalStatus(DecodeEndpoint source, DecodeResources.DecodeRequestStatus requestStatus) {
             synchronized (owner) {
                 if (source != item.decodeEp() || !Objects.equals(requestStatus.reservation(), item.decodeReservation())
                         || requestStatus.kind() != DecodeResources.DecodeRequestStatus.Kind.TERMINAL) { return; }
@@ -1216,7 +1216,7 @@ public class BalanceContext {
             publishSettlement();
         }
 
-        void observeWorkerCompletion(RequestRoute exact) {
+        void recordWorkerCompletion(RequestRoute exact) {
             synchronized (owner) {
                 if (exact != item) { return; }
                 executionFinished = true;
@@ -1226,7 +1226,7 @@ public class BalanceContext {
             publishSettlement();
         }
 
-        void observeRetirement(org.flexlb.balance.endpoint.WorkerEndpoint source) {
+        void recordEndpointRetirement(org.flexlb.balance.endpoint.WorkerEndpoint source) {
             synchronized (owner) {
                 if (source instanceof DecodeEndpoint decode && !decode.isRetired()) { return; }
                 if (source == item.prefillEp()) { prefillReleaseProven = true; }
@@ -1732,9 +1732,9 @@ public class BalanceContext {
         }
     }
 
-    DecisionDeadline recordDecodeObservationLocked(DecodeResources.DecodeRequestStatus.Kind kind, long nowMs) {
+    DecisionDeadline recordDecodeProgressLocked(DecodeResources.DecodeRequestStatus.Kind kind, long nowMs) {
         requireContextLock("Decode execution evidence");
-        observeWorker(nowMs);
+        recordWorkerActivityLocked(nowMs);
         if (cleanup != null) { return null; }
         if (kind == DecodeResources.DecodeRequestStatus.Kind.ACTIVE) { return markDecodeAcceptedLocked(); }
         setDecisionDeadlineLocked(OptionalLong.empty());
@@ -1742,7 +1742,7 @@ public class BalanceContext {
         return null;
     }
 
-    void observeWorker(long nowMs) {
+    void recordWorkerActivityLocked(long nowMs) {
         requireContextLock("worker observation");
         lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, nowMs);
     }
