@@ -1,13 +1,13 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.EndpointTestSupport;
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
@@ -29,9 +29,9 @@ import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Duration;
 import java.util.List;
@@ -286,7 +286,7 @@ class DirectAdmissionContractTest {
             config.getDispatcher().setMaxInflightPerPrefillWorker(4);
             config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
             try (var queue = (QueuedRequestScheduler) PlacementConfiguration.create(fixture.requests.runtime, config,
-                    fixture.router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class),
+                    fixture.router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class),
                     new PlacementAvailability())) {
                 var request = RequestProtocolTestSupport.context(config, 102L);
                 request.getRequest().setSeqLen(32L);
@@ -375,7 +375,7 @@ class DirectAdmissionContractTest {
             var model = mock(ModelMetaConfig.class);
             when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
             router = new DefaultRouter(prefillSelector, decodeSelector, mock(RandomStrategy.class), model);
-            scheduler = (DirectRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestSupport.configure(requests, service.loadBalanceConfig(), router, reporter, mock(EvictionManager.class), placement);
+            scheduler = (DirectRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestSupport.configure(requests, service.loadBalanceConfig(), router, reporter, mock(DecodeCapacityAcquirer.class), placement);
             runtime = requests.runtime;
             ReflectionTestUtils.setField(runtime, "endpoints", endpoints);
         }

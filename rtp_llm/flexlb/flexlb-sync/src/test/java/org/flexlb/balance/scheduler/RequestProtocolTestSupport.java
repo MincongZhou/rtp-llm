@@ -1,8 +1,8 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.WorkSnapshot;
@@ -104,12 +104,12 @@ final class RequestProtocolTestSupport {
 
     static QueuedRequestScheduler queue(org.flexlb.config.ConfigService config, DefaultRouter router,
             org.flexlb.service.monitor.BatchSchedulerReporter reporter,
-            org.flexlb.balance.eviction.EvictionManager eviction, AbstractRequestScheduler owner, PlacementAvailability availability) {
+            org.flexlb.balance.eviction.DecodeCapacityAcquirer eviction, AbstractRequestScheduler owner, PlacementAvailability availability) {
         return (QueuedRequestScheduler) SchedulerTestSupport.configure(owner, config.loadBalanceConfig(), router, reporter, eviction, availability);
     }
     static RequestScheduler configure(AbstractRequestScheduler owner, org.flexlb.config.ConfigService config,
             DefaultRouter router, org.flexlb.service.monitor.BatchSchedulerReporter reporter,
-            org.flexlb.balance.eviction.EvictionManager eviction, PlacementAvailability availability) {
+            org.flexlb.balance.eviction.DecodeCapacityAcquirer eviction, PlacementAvailability availability) {
         return SchedulerTestSupport.configure(owner, config.loadBalanceConfig(), router, reporter, eviction, availability);
     }
 
@@ -148,7 +148,7 @@ final class RequestProtocolTestSupport {
         var timer = org.mockito.Mockito.mock(ExpirationTimer.class);
         return org.mockito.Mockito.mock(QueuedRequestScheduler.class, org.mockito.Mockito.withSettings()
                 .useConstructor(config, org.mockito.Mockito.mock(DefaultRouter.class), runtime.batchReporter(),
-                        org.mockito.Mockito.mock(org.flexlb.balance.eviction.EvictionManager.class), runtime, new PlacementAvailability())
+                        org.mockito.Mockito.mock(org.flexlb.balance.eviction.DecodeCapacityAcquirer.class), runtime, new PlacementAvailability())
                 .defaultAnswer(invocation -> {
                     String name = invocation.getMethod().getName();
                     if (name.equals("expirationTimer")) { return timer; }

@@ -3,8 +3,8 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -18,19 +18,13 @@ import java.util.Map;
 /** Package-local fixtures for the frozen status/endpoint composition boundary. */
 public final class RunnerTestSupport {
 
-    private static final AbstractRequestScheduler NOOP_EVENT_SINK =
-            Mockito.mock(AbstractRequestScheduler.class);
-
     private RunnerTestSupport() {
-    }
-
-    public static AbstractRequestScheduler eventSink() {
-        return NOOP_EVENT_SINK;
     }
 
     public static EndpointRegistry endpointRegistry(ConfigService configService) {
         DeliveryStrategy delivery = Mockito.mock(DeliveryStrategy.class);
-        return new EndpointRegistry(configService, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(NOOP_EVENT_SINK), Mockito.mock(BatchSchedulerReporter.class), delivery, new PlacementAvailability());
+        return new EndpointRegistry(configService, new RequestRepository(),
+                Mockito.mock(BatchSchedulerReporter.class), delivery, new PlacementAvailability());
     }
 
     public static WorkerStatus discovered(

@@ -1,8 +1,8 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
@@ -750,7 +750,7 @@ class DefaultRouterTest {
     private RequestScheduler scheduler(DefaultRouter router, BalanceContext context) {
         SchedulingTestConfig.freezeInputs(context);
         when(configService.loadBalanceConfig()).thenReturn(context.getConfig());
-        return org.flexlb.balance.scheduler.SchedulerTestSupport.configure(requests, configService.loadBalanceConfig(), router, mock(org.flexlb.service.monitor.BatchSchedulerReporter.class), mock(org.flexlb.balance.eviction.EvictionManager.class), new PlacementAvailability());
+        return org.flexlb.balance.scheduler.SchedulerTestSupport.configure(requests, configService.loadBalanceConfig(), router, mock(org.flexlb.service.monitor.BatchSchedulerReporter.class), mock(org.flexlb.balance.eviction.DecodeCapacityAcquirer.class), new PlacementAvailability());
     }
 
     private DefaultRouter router() {

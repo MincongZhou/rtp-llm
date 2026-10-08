@@ -1254,13 +1254,9 @@ final class DecodeState {
         admissionLock.lock();
         try {
             Map<Long, DecodeRequestView> requests = new HashMap<>(reservedUsage.requests + Math.max(0, confirmedEngineOwnedCount));
-            decodeRequests.forEach((requestId, task) -> {
-                {
-                    requests.put(requestId, new DecodeRequestView(
-                            requestId, task.priority, task.kvTokens, task.expectedKvTokens,
-                            task.phase, task.priorityKnown(), task.reservationToken, victimClaims.containsKey(requestId)));
-                }
-            });
+            decodeRequests.forEach((requestId, task) -> requests.put(requestId, new DecodeRequestView(
+                    requestId, task.priority, task.kvTokens, task.expectedKvTokens,
+                    task.phase, task.priorityKnown(), task.reservationToken, victimClaims.containsKey(requestId))));
             return new ResourceSnapshot(routingViewLocked(), requests,
                     queuedUsage.requests, dispatchUsage.requests);
         } finally {
@@ -1441,7 +1437,7 @@ final class DecodeState {
         boolean queued() { return phase == DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED; }
         boolean confirmed() {
             DecodeTaskPhase observed = phase;
-            return observed != null && observed.isEngineConfirmed();
+            return observed.isEngineConfirmed();
         }
         boolean priorityKnown() { return reservationToken > 0L; }
 

@@ -1,13 +1,12 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.EndpointTestSupport;
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.eviction.EngineCancelChannel;
-import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -145,12 +144,12 @@ class QueuedDecodeWithdrawalTest {
             return true;
         }).when(queue).requeue(victim);
         when(prefill.offerPinned(eq(pin), any(), org.mockito.ArgumentMatchers.any())).thenReturn(accepted);
-        var manager = new EvictionManager(mock(RequestSchedulerReporter.class), mock(EngineCancelChannel.class), mock(DecodePreemptionCoordinator.class), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry));
+        var manager = new DecodeCapacityAcquirer(mock(EngineCancelChannel.class), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry), org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry), mock(RequestSchedulerReporter.class));
         try (var handle = registry.claimAdmissionHandle(100, future); var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(handle);
              var route = ProvisionalRoute.prepare(context,
                 List.of(selection, SelectedRole.decode(decode.tryPinGeneration(), decodeStatus, decode.placementVersion())), new Response())) {
             assertNotNull(handle);
-            var reservation = manager.tryReserve(context, context.getRequirements(), decode);
+            var reservation = manager.tryReclaim(context, context.getRequirements(), decode);
             assertNotNull(reservation);
             var result = reservation.join();
             assertEquals(replacement.get(), result.reservation());

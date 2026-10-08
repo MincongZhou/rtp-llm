@@ -1,8 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.eviction.EngineCancelChannel;
-import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -11,6 +11,7 @@ import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -61,7 +62,7 @@ class SchedulerRuntimeTest {
                     mock(RequestSchedulerReporter.class), mock(DefaultBatchDispatcher.class), service,
                     mock(RecentCacheKeyTraceReporter.class), mock(EngineCancelChannel.class));
             runtime.initializeScheduler(PlacementConfiguration.create(runtime, config,
-                    mock(DefaultRouter.class), reporter, mock(EvictionManager.class), new PlacementAvailability()));
+                    mock(DefaultRouter.class), reporter, mock(DecodeCapacityAcquirer.class), new PlacementAvailability()));
         }
         public void close() { runtime.shutdown(); }
     }

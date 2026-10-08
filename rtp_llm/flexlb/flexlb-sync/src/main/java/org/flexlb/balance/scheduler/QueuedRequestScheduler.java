@@ -1,10 +1,10 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.scheduler.BalanceContext.AdmissionHandle;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -57,7 +57,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
 
     private final DefaultRouter router;
     private final BatchSchedulerReporter reporter;
-    private final EvictionManager evictionManager;
+    private final DecodeCapacityAcquirer decodeCapacity;
     private final PlacementAvailability availability;
     private final QueueExecutionSettings queueSettings;
     private final boolean priorityOrdering;
@@ -89,14 +89,14 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             key -> postEvent(new QueueEvent(EventKind.CAPACITY, null, key));
 
     QueuedRequestScheduler(FlexlbConfig config, DefaultRouter router,
-            BatchSchedulerReporter reporter, EvictionManager evictionManager,
+            BatchSchedulerReporter reporter, DecodeCapacityAcquirer decodeCapacity,
             SchedulerRuntime runtime, PlacementAvailability availability) {
         super(runtime, config);
         this.queueSettings = QueueExecutionSettings.capture(config);
         this.router = Objects.requireNonNull(router, "router");
         this.reporter = Objects.requireNonNull(reporter, "reporter");
-        this.evictionManager = Objects.requireNonNull(
-                evictionManager, "evictionManager");
+        this.decodeCapacity = Objects.requireNonNull(
+                decodeCapacity, "decodeCapacity");
         this.availability = Objects.requireNonNull(availability, "availability");
         this.priorityOrdering = config.isPriorityOrdering();
         this.orderedQueue = new OrderedRequestQueue(priorityOrdering);
@@ -396,7 +396,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             Throwable commitFailure = null;
             try {
                 Failures.rethrow(plan.planningFailure, "placement planning failed");
-                outcome = completingPreemption ? finishPreemption(plan) : commit(plan);
+                outcome = commit(plan);
             } catch (Throwable failure) {
                 commitFailure = failure;
             } finally {
@@ -486,27 +486,49 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
 
     private Outcome commit(Plan plan) {
         GlobalQueueEntry entry = plan.entry;
-        if (isQueued(entry)) {
-            PlacementResult<ProvisionalRoute, PlacementKey> result = plan.result;
-            switch (result.status()) {
-                case REJECTED -> {
-                    plan.finishAdmission();
-                    completeDecisionResponse(entry, result.failure());
+        boolean reclaimed = plan.preemptionCompleted;
+        String rejection = null;
+        try {
+            if (reclaimed) {
+                if (plan.preemptionFailure != null || plan.preemptionResult == null) {
+                    rejection = "Decode eviction control failed before commit";
+                } else if (!plan.preemptionResult.committed()) {
+                    rejection = plan.preemptionResult.detail();
+                } else if (!settlePreemptionResult(plan, true)) {
+                    rejection = "Decode generation retired before canonical placement";
                 }
-                case CLOSED -> { }
-                case BLOCKED -> { return Outcome.BLOCKED; }
-                case SUCCESS -> {
-                    ProvisionalRoute admission = result.value();
-                    var publication = submitRoute(entry, admission);
-                    if (publication.status() == PlacementResult.Status.BLOCKED) {
-                        plan.waitKey = publication.blocker();
-                        WorkerEndpoint blocked = admission.blockedEndpointIfCurrent(plan.waitKey);
-                        if (blocked == null) { return Outcome.REPLAN; }
-                        if (!tryPriorityRescue(plan, blocked)) { return Outcome.BLOCKED; }
-                        return Outcome.PENDING;
+            }
+            if (rejection == null && (reclaimed || isQueued(entry))) {
+                PlacementResult<ProvisionalRoute, PlacementKey> result = plan.result;
+                switch (result.status()) {
+                    case REJECTED -> {
+                        plan.finishAdmission();
+                        completeDecisionResponse(entry, result.failure());
+                    }
+                    case CLOSED -> { }
+                    case BLOCKED -> { return Outcome.BLOCKED; }
+                    case SUCCESS -> {
+                        ProvisionalRoute admission = result.value();
+                        var publication = submitRoute(entry, admission);
+                        if (reclaimed && publication.status() != PlacementResult.Status.SUCCESS) {
+                            rejection = "selected Prefill capacity changed before canonical placement";
+                        } else if (publication.status() == PlacementResult.Status.BLOCKED) {
+                            plan.waitKey = publication.blocker();
+                            WorkerEndpoint blocked = admission.blockedEndpointIfCurrent(plan.waitKey);
+                            if (blocked == null) { return Outcome.REPLAN; }
+                            if (!tryPriorityRescue(plan, blocked)) { return Outcome.BLOCKED; }
+                            return Outcome.PENDING;
+                        }
                     }
                 }
             }
+        } catch (RuntimeException | Error failure) {
+            if (!reclaimed) { throw failure; }
+            rejection = "Decode eviction placement failed: " + failure.getMessage();
+        }
+        if (rejection != null) {
+            plan.handle.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
+                    AdmissionRejectReason.RESOURCE_EXHAUSTED, rejection));
         }
         removeRequest(entry);
         return Outcome.DONE;
@@ -519,7 +541,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             preemptionQuotaWaiters.add(entry);
             return false;
         }
-        var execution = evictionManager.tryReserve(entry.context, entry.context.getRequirements(), blockedEndpoint);
+        var execution = decodeCapacity.tryReclaim(entry.context, entry.context.getRequirements(), blockedEndpoint);
         if (execution == null) {
             return false;
         }
@@ -531,29 +553,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             publishPlan(plan);
         });
         return true;
-    }
-
-    private Outcome finishPreemption(Plan plan) {
-        String rejection = null;
-        try {
-            if (plan.preemptionFailure != null || plan.preemptionResult == null) {
-                rejection = "Decode eviction control failed before commit";
-            } else if (!plan.preemptionResult.committed()) {
-                rejection = plan.preemptionResult.detail();
-            } else if (!settlePreemptionResult(plan, true)) {
-                rejection = "Decode generation retired before canonical placement";
-            } else if (submitRoute(plan.entry, plan.result.value()).status() != PlacementResult.Status.SUCCESS) {
-                rejection = "selected Prefill capacity changed before canonical placement";
-            }
-        } catch (RuntimeException | Error failure) {
-            rejection = "Decode eviction placement failed: " + failure.getMessage();
-        }
-        if (rejection != null) {
-            plan.handle.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
-                    AdmissionRejectReason.RESOURCE_EXHAUSTED, rejection));
-        }
-        removeRequest(plan.entry);
-        return Outcome.DONE;
     }
 
     private boolean settlePreemptionResult(Plan plan, boolean adopt) {
@@ -778,7 +777,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         private AdmissionHandle handle;
         private Throwable planningFailure;
         private volatile boolean preemptionCompleted;
-        private org.flexlb.balance.eviction.DecodePreemptionCoordinator.PreemptionResult preemptionResult;
+        private org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult preemptionResult;
         private Throwable preemptionFailure;
         // A successful result owns its admission until transfer or close.
         private PlacementResult<ProvisionalRoute, PlacementKey> result;

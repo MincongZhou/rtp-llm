@@ -2,8 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.eviction.EngineCancelChannel;
-import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.SchedulerConfig;
@@ -18,8 +18,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -148,7 +148,7 @@ class SubmissionShutdownDeadlockTest {
                     mock(RequestSchedulerReporter.class), mock(DefaultBatchDispatcher.class), service,
                     mock(RecentCacheKeyTraceReporter.class), mock(EngineCancelChannel.class)));
             scheduler = (AbstractRequestScheduler) PlacementConfiguration.create(runtime, config, router,
-                    reporter, mock(EvictionManager.class), new PlacementAvailability());
+                    reporter, mock(DecodeCapacityAcquirer.class), new PlacementAvailability());
             runtime.initializeScheduler(scheduler);
         }
         BalanceContext context(long id) { return RequestProtocolTestSupport.context(config, id); }

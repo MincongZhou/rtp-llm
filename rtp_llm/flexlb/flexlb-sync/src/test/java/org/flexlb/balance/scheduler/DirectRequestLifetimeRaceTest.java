@@ -102,7 +102,7 @@ class DirectRequestLifetimeRaceTest {
                 return result;
             }).when(requests).publishRoute(any(), any(), org.mockito.ArgumentMatchers.anyLong());
 
-            var scheduler = org.flexlb.balance.scheduler.SchedulerTestSupport.configure(requests, service.loadBalanceConfig(), router, mock(BatchSchedulerReporter.class), mock(org.flexlb.balance.eviction.EvictionManager.class), new PlacementAvailability());
+            var scheduler = org.flexlb.balance.scheduler.SchedulerTestSupport.configure(requests, service.loadBalanceConfig(), router, mock(BatchSchedulerReporter.class), mock(org.flexlb.balance.eviction.DecodeCapacityAcquirer.class), new PlacementAvailability());
             var returned = scheduler.submit(context);
             assertSame(context.getFuture(), returned);
             var response = returned.get(2L, TimeUnit.SECONDS);

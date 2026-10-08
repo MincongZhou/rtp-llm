@@ -2,8 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.eviction.EngineCancelChannel;
-import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -119,7 +119,7 @@ class QueueRegistrationCancellationTest {
             runtime = new SchedulerRuntime(new RequestRepository(), mock(EndpointRegistry.class), batches,
                     mock(RequestSchedulerReporter.class), mock(DefaultBatchDispatcher.class), service,
                     mock(RecentCacheKeyTraceReporter.class), mock(EngineCancelChannel.class));
-            queue = new QueuedRequestScheduler(config, router, batches, mock(EvictionManager.class),
+            queue = new QueuedRequestScheduler(config, router, batches, mock(DecodeCapacityAcquirer.class),
                     runtime, new PlacementAvailability());
             runtime.initializeScheduler(queue);
             queue.start();

@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
-import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
@@ -84,7 +84,7 @@ class GenerateInputPreparationTest {
                 mock(RecentCacheKeyTraceReporter.class));
         var router = mock(DefaultRouter.class);
         var queue = org.flexlb.balance.scheduler.SchedulerTestSupport.configure(registry, config, router, reporter,
-                mock(EvictionManager.class), new PlacementAvailability());
+                mock(DecodeCapacityAcquirer.class), new PlacementAvailability());
         try {
             var future = queue.submit(context);
             assertTrue(entered.await(3, TimeUnit.SECONDS), "submit returns while planning is blocked");

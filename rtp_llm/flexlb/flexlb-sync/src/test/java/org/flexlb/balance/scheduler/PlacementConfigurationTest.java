@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -40,7 +40,7 @@ class PlacementConfigurationTest {
             spring.registerBean(ConfigService.class, () -> service);
             spring.registerBean(DefaultRouter.class, () -> router);
             spring.registerBean(EndpointRegistry.class, () -> mock(EndpointRegistry.class));
-            spring.registerBean(EvictionManager.class, () -> mock(EvictionManager.class));
+            spring.registerBean(DecodeCapacityAcquirer.class, () -> mock(DecodeCapacityAcquirer.class));
             spring.registerBean(BatchSchedulerReporter.class, () -> mock(BatchSchedulerReporter.class));
             spring.registerBean(RequestSchedulerReporter.class, () -> mock(RequestSchedulerReporter.class));
             spring.registerBean(RecentCacheKeyTraceReporter.class, () -> mock(RecentCacheKeyTraceReporter.class));

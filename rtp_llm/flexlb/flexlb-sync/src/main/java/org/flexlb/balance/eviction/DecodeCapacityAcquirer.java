@@ -1,19 +1,36 @@
 package org.flexlb.balance.eviction;
 
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimResolution;
+import org.flexlb.balance.scheduler.BalanceContext.AdmissionHandle;
+import org.flexlb.balance.scheduler.BalanceContext.PreemptionRegistration;
+import org.flexlb.balance.scheduler.BalanceContext;
 import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.balance.scheduler.PreemptionRegistration;
 import org.flexlb.balance.scheduler.RequestRepository;
+import org.flexlb.balance.scheduler.RequestRequirements.DecodeMode;
 import org.flexlb.balance.scheduler.RequestRequirements;
+import org.flexlb.balance.scheduler.SchedulerRuntime;
+import org.flexlb.config.PreemptionConfig;
+import org.flexlb.config.VictimStage;
+import org.flexlb.enums.DecodeTaskPhase;
+import org.flexlb.service.monitor.RequestSchedulerReporter.CancelEvent;
+import org.flexlb.service.monitor.RequestSchedulerReporter.EvictionEvent;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.util.Failures;
+import org.flexlb.util.Logger;
+import org.flexlb.util.PriorityNormalizer;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -21,20 +38,21 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import javax.annotation.PreDestroy;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
 /**
- * Executes one Engine-Cancel preemption transaction.
+ * Obtains capacity at one selected Decode generation through local withdrawal or Engine cancellation.
  *
- * <p>The scheduler supplies a pure plan and consumes one result.  This class
+ * <p>The scheduler supplies the blocked endpoint and consumes one result.  This class
  * owns the two-phase protocol, token fencing and exactly-once child settlement.
  * Engine acknowledgement is only control evidence; the canonical victim
  * resolution transaction may complete before or after that acknowledgement.</p>
  */
 @Component
-public final class DecodePreemptionCoordinator {
+public class DecodeCapacityAcquirer {
 
     public record PreemptionResult(
             DecodeResources.ReservationHandle reservation, boolean controlFailure, String detail) {
@@ -65,24 +83,24 @@ public final class DecodePreemptionCoordinator {
                 checkArgument(victim.requestId() > 0L && victim.reservationToken() > 0L,
                         "victim requestId and reservation token must be positive");
                 checkArgument(victim.phase() != null && victim.phase().requiresEngineCancel(),
-                        "coordinator accepts only Engine-Cancel victims");
-                if (!victimIds.add(victim.requestId())) {
-                    throw new IllegalArgumentException(
-                            "duplicate victim " + victim.requestId());
-                }
+                        "capacity acquisition accepts only Engine-Cancel victims");
+                checkArgument(victimIds.add(victim.requestId()), "duplicate victim %s", victim.requestId());
             }
             checkArgument(admissionOpen != null, "admission gate is required");
         }
     }
 
+    private final RequestSchedulerReporter reporter;
+    private volatile boolean shutdown;
     private final EngineCancelChannel cancelChannel;
     private final RequestRepository requests;
     private final java.util.concurrent.ScheduledExecutorService timer;
     private final AtomicLong tokenSequence = new AtomicLong(1);
 
-    @org.springframework.beans.factory.annotation.Autowired
-    public DecodePreemptionCoordinator(EngineCancelChannel cancelChannel, RequestRepository requests,
-                                       org.flexlb.balance.scheduler.SchedulerRuntime runtime) {
+    @Autowired
+    public DecodeCapacityAcquirer(EngineCancelChannel cancelChannel, RequestRepository requests,
+                                  SchedulerRuntime runtime, RequestSchedulerReporter reporter) {
+        this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.cancelChannel = Objects.requireNonNull(cancelChannel, "cancelChannel");
         this.requests = Objects.requireNonNull(requests, "requests");
         this.timer = Objects.requireNonNull(runtime, "runtime").cleanupExecutor();
@@ -367,7 +385,10 @@ public final class DecodePreemptionCoordinator {
             return true;
         }
 
-        /** Idempotent convergence for request resolution or downstream cleanup proof. */
+        /**
+         * Both REQUEST_END and DELIVERY_RESUMED end request-side participation.
+         * Neither is Decode release proof: commitPreemption still checks the ledger.
+         */
         private synchronized void recordResolution(ClaimedVictim owned) {
             owned.disposition = ClaimDisposition.RESOLVED;
         }
@@ -469,4 +490,247 @@ public final class DecodePreemptionCoordinator {
         checkState(token > 0, "preemption attempt token exhausted");
         return token;
     }
+
+    @PreDestroy
+    public void shutdown() {
+        shutdown = true;
+    }
+
+    /**
+     * The caller retains its admission handle throughout this operation and consumes
+     * any returned reservation. Null means no takeover occurred, including a local
+     * victim conflict; an Engine attempt always returns its eventual terminal result.
+     */
+    public CompletableFuture<PreemptionResult> tryReclaim(
+            BalanceContext ctx, RequestRequirements request, WorkerEndpoint blockedEndpoint) {
+        if (shutdown || ctx.getFuture().isDone()
+                || ctx.requestExpired(System.currentTimeMillis())
+                || !PriorityNormalizer.hasPriority(request.priority())
+                || request.mode() != DecodeMode.PREEMPT_AT_PLACEMENT) {
+            return null;
+        }
+        PreemptionConfig preemption = ctx.getConfig().isPriorityOrdering() ? ctx.getConfig().priorityOrdering().getPreemption() : null;
+        if (preemption == null
+                || !(blockedEndpoint instanceof DecodeEndpoint decodeEndpoint)
+                || (!preemption.allows(VictimStage.DECODE_RESERVED)
+                && !preemption.allows(VictimStage.DECODE_ENGINE_OWNED))) {
+            return null;
+        }
+        DecodeEvictionProposal proposal = planDecodeEviction(request, preemption, decodeEndpoint);
+        if (proposal == null || !ctx.scheduler().isAdmissionOpen(request.requestId(), ctx.getFuture())) {
+            return null;
+        }
+        if (proposal.requiresEngineCancel()) {
+            return startEngineCancelPreemption(ctx, preemption, proposal, decodeEndpoint, request);
+        }
+        List<DecodeResources.ReservationHandle> victims = new ArrayList<>(proposal.victims().size());
+        for (DecodeRequestView victim : proposal.victims()) {
+            victims.add(new DecodeResources.ReservationHandle(
+                    decodeEndpoint.getStatus().getGenerationId(), victim.requestId(), victim.reservationToken()));
+        }
+        DecodeResources.ReservationHandle incoming = replaceQueuedDecodeReservations(
+                decodeEndpoint, victims, request.requestId(), request.hardKvTokens(),
+                request.expectedKvTokens(), request.priority(), request.capacity());
+        if (incoming == null) {
+            reportEviction(EvictionEvent.COMMIT, ctx.getPriority(), ctx.getRequestId(), proposal.evictionCase(), "conflict");
+            return null;
+        }
+        report(ctx.getRequestId(), "local preemption", () -> {
+            for (DecodeRequestView victim : proposal.victims()) {
+                reportRequeuedVictim(ctx, victim, proposal);
+            }
+            reportEviction(EvictionEvent.COMMIT, ctx.getPriority(), ctx.getRequestId(), proposal.evictionCase(), "success");
+            recordDecodePlanObservability(ctx, proposal);
+        });
+        return CompletableFuture.completedFuture(new PreemptionResult(incoming, false, "committed"));
+    }
+
+    /** Metrics observe plans and commits without owning the reservation transaction. */
+    private void reportEviction(EvictionEvent event, int priority, long requestId,
+                                String evictionCase, String outcome) {
+        report(requestId, event == EvictionEvent.PLAN ? "eviction plan" : "eviction commit",
+                () -> reporter.reportEviction(event, priority, evictionCase, outcome));
+    }
+
+    // ==================== Decode eviction ====================
+    /**
+     * Build one side-effect-free plan from one exact cluster snapshot.
+     */
+    private DecodeEvictionProposal planDecodeEviction(
+            RequestRequirements request,
+            PreemptionConfig preemption,
+            DecodeEndpoint selectedEndpoint) {
+        DecodeResources.ResourceSnapshot selected = selectedEndpoint.resourceSnapshot();
+        if (selectedEndpoint.isRetired()) {
+            return null;
+        }
+        String evictionCase = EvictionPlanner.decodeEvictionCase(
+                request, selected);
+        if (evictionCase == null) {
+            return null;
+        }
+
+        Map<String, String> failures = new HashMap<>();
+        DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
+                request, selected, preemption, preemption.allows(VictimStage.DECODE_ENGINE_OWNED)
+                        && cancelChannel.isSupported(selectedEndpoint), failures);
+        if (proposal == null) {
+            reportEviction(EvictionEvent.PLAN, request.priority(), request.requestId(),
+                    evictionCase, "infeasible");
+            Logger.debug(
+                    "[decode-capacity] Decode eviction infeasible:"
+                            + " request_id={} priority={} worker={} reasons={}",
+                    request.requestId(), request.priority(), selected.routing().address(), failures);
+            return null;
+        }
+        reportEviction(EvictionEvent.PLAN, request.priority(), request.requestId(),
+                proposal.evictionCase(), "feasible");
+        return proposal;
+    }
+
+    /**
+     * Observability only: the request's scheduler completes withdrawal and requeue.
+     */
+    private void reportRequeuedVictim(BalanceContext ctx, DecodeRequestView victim,
+                                     DecodeEvictionProposal proposal) {
+        String stage = "decode_reserved";
+        report(ctx.getRequestId(), "requeued victim", () -> {
+            reporter.reportVictim(victim.priority(), ctx.getPriority(),
+                    stage, proposal.evictionCase());
+            reporter.reportVictimKvTokens(
+                    victim.priority(), stage, victim.kvTokens());
+        });
+        Logger.debug(
+                "[decode-capacity] decode victim preempted: victim_id={} victim_priority={}"
+                    + " stage={} outcome={} kv_tokens={} incoming_id={} incoming_priority={}"
+                    + " worker={}",
+                victim.requestId(),
+                victim.priority(),
+                stage,
+                "requeued",
+                victim.kvTokens(),
+                ctx.getRequestId(),
+                ctx.getPriority(),
+                proposal.endpointId());
+    }
+
+    /**
+     * Record the single committed Decode-eviction plan.
+     */
+    private static void recordDecodePlanObservability(BalanceContext ctx,
+                                                      DecodeEvictionProposal proposal) {
+        long totalCost = proposal.priorityHarmProfile().totalCost();
+        ctx.setPlanType("decode_evict");
+        ctx.setPlanCost(totalCost);
+        ctx.setVictimCount(proposal.victims().size());
+        Logger.debug(
+                "[decode-capacity] decode eviction committed: request_id={} priority={} case={} "
+                        + "victims={} total_cost={} freed_kv={} worker={}",
+                ctx.getRequestId(),
+                ctx.getPriority(),
+                proposal.evictionCase(),
+                proposal.victims().size(),
+                totalCost,
+                proposal.freedKvTokens(),
+                proposal.endpointId());
+    }
+
+    private CompletableFuture<PreemptionResult> startEngineCancelPreemption(
+            BalanceContext ctx, PreemptionConfig preemption, DecodeEvictionProposal proposal,
+            DecodeEndpoint endpoint, RequestRequirements request) {
+        var command = new PreemptionCommand(
+                endpoint, request, proposal.victims(), 50L,
+                preemption.getTimeoutMs(),
+                () -> ctx.scheduler().isAdmissionOpen(request.requestId(), ctx.getFuture()),
+                "preempted by higher-priority request " + ctx.getRequestId());
+        reportCancelRequests(ctx, proposal);
+        return preempt(command).whenComplete((result, error) ->
+                report(ctx.getRequestId(), "engine preemption", () -> {
+                    if (error != null || result == null || result.controlFailure()) {
+                        reportCancelTimeout(ctx, proposal.endpointId());
+                    } else if (result.committed()) {
+                        reportCommittedEnginePreemption(ctx, proposal);
+                        recordDecodePlanObservability(ctx, proposal);
+                    }
+                }));
+    }
+
+    /**
+     * Metrics never participate in the committed reservation handoff.
+     */
+    private void reportCommittedEnginePreemption(
+            BalanceContext ctx, DecodeEvictionProposal proposal) {
+        report(ctx.getRequestId(), "committed preemption", () -> {
+            for (DecodeRequestView victim : proposal.victims()) {
+                String stage = victim.phase() == DecodeTaskPhase.RUNNING
+                        ? "decode_running" : "decode_cancel";
+                reporter.reportVictim(victim.priority(), ctx.getPriority(),
+                        stage, proposal.evictionCase());
+                reporter.reportVictimKvTokens(
+                        victim.priority(), stage, victim.kvTokens());
+                reporter.reportEngineCancel(CancelEvent.CONFIRM,
+                        proposal.endpointId(), victim.priority());
+            }
+            reporter.reportEviction(EvictionEvent.COMMIT, ctx.getPriority(),
+                    proposal.evictionCase(), "success");
+        });
+    }
+
+    private void reportCancelRequests(BalanceContext ctx,
+                                      DecodeEvictionProposal proposal) {
+        report(ctx.getRequestId(), "cancel requests", () -> {
+            for (DecodeRequestView victim : proposal.victims()) {
+                reporter.reportEngineCancel(CancelEvent.REQUEST,
+                        proposal.endpointId(), victim.priority());
+                reporter.reportCancel(
+                        victim.priority(), "PRIORITY_PREEMPTED");
+            }
+        });
+    }
+
+    private void reportCancelTimeout(BalanceContext ctx, String endpointId) {
+        report(ctx.getRequestId(), "cancel timeout", () -> {
+            reporter.reportEngineCancel(CancelEvent.TIMEOUT, endpointId, ctx.getPriority());
+        });
+    }
+
+    private static void report(long requestId, String operation, Runnable metrics) {
+        try {
+            metrics.run();
+        } catch (Throwable failure) {
+            Logger.warn("[decode-capacity] failed to report {}: request_id={}",
+                    operation, requestId, failure);
+        }
+    }
+
+    public DecodeResources.ReservationHandle replaceQueuedDecodeReservations(DecodeEndpoint endpoint, List<DecodeResources.ReservationHandle> victims, long incomingRequestId, long hardKv, long expectedKv, int priority, DecodeResources.AdmissionCapacity capacity) {
+        List<AdmissionHandle> claimed = new ArrayList<>(victims.size());
+        DecodeResources.ReservationHandle incoming = null;
+        try {
+            for (DecodeResources.ReservationHandle victim : victims) {
+                var owner = requests.ownerOf(victim.requestId());
+                AdmissionHandle withdrawal = owner == null ? null : owner.claimQueuedRoute(endpoint, victim, priority);
+                if (withdrawal == null) {
+                    return null;
+                }
+                claimed.add(withdrawal);
+            }
+            incoming = endpoint.replaceQueuedRequests(victims, incomingRequestId, hardKv, expectedKv, priority, capacity);
+            return incoming;
+        } finally {
+            Throwable failure = null;
+            for (AdmissionHandle withdrawal : claimed) {
+                boolean committed = incoming != null;
+                failure = Failures.run(failure, () -> withdrawal.owner().scheduler().completeWithdrawal(withdrawal, committed));
+            }
+            if (failure != null) {
+                if (incoming != null) {
+                    endpoint.release(incoming, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+                }
+                Failures.rethrow(failure, "request cleanup failed");
+            }
+        }
+    }
+
+
 }

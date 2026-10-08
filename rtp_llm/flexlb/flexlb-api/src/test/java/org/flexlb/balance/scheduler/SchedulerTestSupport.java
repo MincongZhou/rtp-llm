@@ -3,16 +3,18 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.eviction.EngineCancelChannel;
-import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.springframework.test.util.ReflectionTestUtils;
+
 import java.util.Map;
 import java.util.WeakHashMap;
+
 import static org.mockito.Mockito.*;
 
 /** Builds real request owners and shared facilities; contains no request state machine. */
@@ -71,9 +73,8 @@ public final class SchedulerTestSupport {
     }
     public static SchedulerRuntime runtime(RequestScheduler owner) { return ((AbstractRequestScheduler) owner).runtime; }
     public static FlexlbConfig config(AbstractRequestScheduler owner) { return owner.config; }
-    public static EvictionManager eviction(AbstractRequestScheduler owner) {
-        return new EvictionManager(mock(RequestSchedulerReporter.class), mock(EngineCancelChannel.class),
-                mock(org.flexlb.balance.eviction.DecodePreemptionCoordinator.class), repository(owner));
+    public static DecodeCapacityAcquirer eviction(AbstractRequestScheduler owner) {
+        return new DecodeCapacityAcquirer(mock(EngineCancelChannel.class), repository(owner), runtime(owner), mock(RequestSchedulerReporter.class));
     }
     static RequestRepository.TerminalRecord terminalRecord(AbstractRequestScheduler owner, RequestState state) {
         var record = repository(owner).findTerminal(state.requestId());
@@ -86,7 +87,7 @@ public final class SchedulerTestSupport {
         var snapshot = config.loadBalanceConfig();
         var settings = snapshot;
         AbstractRequestScheduler owner = snapshot.isQueue()
-                ? mock(QueuedRequestScheduler.class, withSettings().useConstructor(settings, mock(DefaultRouter.class), batches, mock(EvictionManager.class), runtime, new PlacementAvailability()).defaultAnswer(CALLS_REAL_METHODS))
+                ? mock(QueuedRequestScheduler.class, withSettings().useConstructor(settings, mock(DefaultRouter.class), batches, mock(DecodeCapacityAcquirer.class), runtime, new PlacementAvailability()).defaultAnswer(CALLS_REAL_METHODS))
                 : mock(DirectRequestScheduler.class, withSettings().useConstructor(mock(DefaultRouter.class), runtime, settings).defaultAnswer(CALLS_REAL_METHODS));
         if (owner instanceof QueuedRequestScheduler queue) {
             doAnswer(call -> { for (BalanceContext context : owner.requests.snapshotActive()) {
@@ -98,10 +99,10 @@ public final class SchedulerTestSupport {
         return owner;
     }
     public static RequestScheduler configure(AbstractRequestScheduler owner, FlexlbConfig config,
-            DefaultRouter router, BatchSchedulerReporter reporter, EvictionManager eviction, PlacementAvailability availability) {
+            DefaultRouter router, BatchSchedulerReporter reporter, DecodeCapacityAcquirer eviction, PlacementAvailability availability) {
         ReflectionTestUtils.setField(owner, "router", router);
         if (owner instanceof QueuedRequestScheduler queue) {
-            ReflectionTestUtils.setField(queue, "evictionManager", eviction);
+            ReflectionTestUtils.setField(queue, "decodeCapacity", eviction);
             ReflectionTestUtils.setField(queue, "reporter", reporter);
             ReflectionTestUtils.setField(queue, "plannerCount", Math.max(2, config.getInternalRuntime().getQueuePlannerThreads()));
             ReflectionTestUtils.setField(queue, "priorityOrdering", config.isPriorityOrdering());

@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import io.opentelemetry.api.trace.Span;
-import io.opentelemetry.context.Context;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -16,10 +14,15 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
+
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Context;
 
 class RequestSchedulerEntryTest {
     @BeforeEach void configureTrace() { FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), ""); }
@@ -38,7 +41,7 @@ class RequestSchedulerEntryTest {
         var router = mock(DefaultRouter.class);
         when(router.select(context, null)).thenReturn(PlacementResult.rejected(Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
         SchedulerTestSupport.configure(owner, config, router, mock(BatchSchedulerReporter.class),
-                mock(org.flexlb.balance.eviction.EvictionManager.class), new PlacementAvailability());
+                mock(org.flexlb.balance.eviction.DecodeCapacityAcquirer.class), new PlacementAvailability());
         try {
             var result = owner.submit(context);
             assertSame(context.getFuture(), result);

@@ -3,13 +3,12 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.eviction.EngineCancelChannel;
-import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
@@ -39,7 +38,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             new PlacementAvailability();
     private final BindingRouter router;
     private final EndpointRegistry registry;
-    private final EvictionManager evictionManager;
+    private final DecodeCapacityAcquirer decodeCapacity;
     private final RequestScheduler scheduler;
     private final SchedulerRuntime runtime;
 
@@ -62,10 +61,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         this.runtime = new SchedulerRuntime(requests, registry, batchReporter, requestReporter,
                 org.mockito.Mockito.mock(DefaultBatchDispatcher.class), configService,
                 new org.flexlb.service.RecentCacheKeyTraceReporter(), cancelChannel);
-        this.evictionManager = new EvictionManager(requestReporter, cancelChannel,
-                new DecodePreemptionCoordinator(cancelChannel, requests, runtime), requests);
+        this.decodeCapacity = new DecodeCapacityAcquirer(cancelChannel, requests, runtime, requestReporter);
         runtime.initializeScheduler(PlacementConfiguration.create(runtime, configService.loadBalanceConfig(),
-                router, batchReporter, evictionManager, placementAvailability));
+                router, batchReporter, decodeCapacity, placementAvailability));
         this.scheduler = runtime.scheduler();
     }
 
@@ -191,7 +189,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     @Override
     public void close() {
-        evictionManager.shutdown();
+        decodeCapacity.shutdown();
         runtime.shutdown();
     }
 

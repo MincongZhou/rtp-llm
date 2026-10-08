@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.SchedulerConfig;
@@ -235,7 +235,7 @@ class RequestSchedulerContractTest {
                     service, mock(org.flexlb.service.RecentCacheKeyTraceReporter.class),
                     mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
             runtime.initializeScheduler(PlacementConfiguration.create(runtime, f.config,
-                    f.router, reporter, mock(EvictionManager.class), new PlacementAvailability()));
+                    f.router, reporter, mock(DecodeCapacityAcquirer.class), new PlacementAvailability()));
             try {
                 var owner = (AbstractRequestScheduler) runtime.scheduler();
                 var request = f.context(100);
@@ -491,7 +491,7 @@ class RequestSchedulerContractTest {
             var reporter = mock(BatchSchedulerReporter.class);
             requests = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, reporter, mock(RequestSchedulerReporter.class),
                     mock(RecentCacheKeyTraceReporter.class));
-            scheduler = org.flexlb.balance.scheduler.SchedulerTestSupport.configure(requests, service.loadBalanceConfig(), router, reporter, mock(EvictionManager.class), new PlacementAvailability());
+            scheduler = org.flexlb.balance.scheduler.SchedulerTestSupport.configure(requests, service.loadBalanceConfig(), router, reporter, mock(DecodeCapacityAcquirer.class), new PlacementAvailability());
         }
 
         BalanceContext context(long id) { return RequestProtocolTestSupport.context(config, id); }

@@ -1,12 +1,13 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.scheduler.BalanceContext.AdmissionHandle;
+import org.flexlb.balance.scheduler.BalanceContext.PreemptionRegistration;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
@@ -164,7 +165,8 @@ class RequestTerminalSettlementTest {
             assertTrue(f.scheduler().updatePreemption(preemption, PreemptionCancelPhase.NOT_FOUND_STALE));
         }
         assertTrue(f.requestContext().future().join().isSuccess());
-        assertTrue(preemption.requestResolution().toCompletableFuture().isDone());
+        assertEquals(org.flexlb.balance.preemption.VictimResolution.Outcome.DELIVERY_RESUMED,
+                preemption.requestResolution().toCompletableFuture().join().outcome());
         assertEquals(RequestState.Phase.ACKNOWLEDGED,
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.scheduler()).getRequestState(RESERVATION.requestId(), 7L).state());
         assertNull(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.scheduler()).getRequestState(RESERVATION.requestId(), 8L));
@@ -200,7 +202,8 @@ class RequestTerminalSettlementTest {
         assertEquals(RequestState.Phase.FAILED, f.requestContext().snapshot().state());
         f.scheduler().runtime.continuations().awaitIdle();
         assertTrue((f.requestContext().stage() == BalanceContext.RequestStage.FINISHED));
-        assertTrue(claim.requestResolution().toCompletableFuture().isDone());
+        assertEquals(org.flexlb.balance.preemption.VictimResolution.Outcome.REQUEST_END,
+                claim.requestResolution().toCompletableFuture().join().outcome());
         verify(f.item().decodeEp()).publishCapacityRelease();
         verify(f.item().decodeEp(), never()).release(any(), any());
     }

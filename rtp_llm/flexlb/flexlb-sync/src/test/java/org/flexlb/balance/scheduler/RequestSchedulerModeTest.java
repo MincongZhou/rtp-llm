@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.SchedulerConfig;
@@ -181,7 +181,7 @@ class RequestSchedulerModeTest {
             requests = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, reporter, mock(RequestSchedulerReporter.class),
                     mock(RecentCacheKeyTraceReporter.class));
             scheduler = org.flexlb.balance.scheduler.SchedulerTestSupport.configure(requests, config, router, reporter,
-                    mock(EvictionManager.class), new PlacementAvailability());
+                    mock(DecodeCapacityAcquirer.class), new PlacementAvailability());
             queue = scheduler instanceof QueuedRequestScheduler queuedScheduler ? queuedScheduler : null;
             context = RequestProtocolTestSupport.context(config, 8761L);
         }

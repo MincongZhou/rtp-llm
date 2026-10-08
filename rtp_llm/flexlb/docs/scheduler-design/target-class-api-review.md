@@ -1,6 +1,6 @@
 # FlexLB 请求调度与交付责任：落地类图、成员、API 和实现约束
 
-更新：2026-10-03。状态：本文方案的代码迁移已落地；实际验证范围及未通过项见第 11 节。
+更新：2026-10-08。状态：本文方案的代码迁移已落地；历史验证范围见第 11 节，抢占与 State 收敛见第 12 节。
 
 本文替代此前请求职责方案中 RequestLifecycle / RequestCoordinator、PlacementStrategy / DirectPlacementCoordinator / GlobalQueueCoordinator 的目标关系。保留已有 DirectRequestScheduler、QueuedRequestScheduler 和四方法 RequestScheduler 接口。其他专题中的资源算法、预测与成组规则，除本文明确修改的边界外，不因本轮重构改变。
 
@@ -56,7 +56,7 @@ classDiagram
     }
     class QueuedRequestScheduler {
         -DefaultRouter router
-        -EvictionManager eviction
+        -DecodeCapacityAcquirer decodeCapacity
         -OrderedRequestQueue queue
         -Map registered
         -PlacementAvailability availability
@@ -96,7 +96,7 @@ classDiagram
     SchedulerRuntime --> RequestScheduler : 管理唯一调度实例
     SchedulerRuntime *-- RequestRepository : 请求索引
     AbstractRequestScheduler --> RequestRepository
-    QueuedRequestScheduler --> EvictionManager
+    QueuedRequestScheduler --> DecodeCapacityAcquirer
     DirectRequestScheduler --> DefaultRouter
     QueuedRequestScheduler --> DefaultRouter
 ```
@@ -127,7 +127,7 @@ classDiagram
 
 Runtime 启动时创建一个 DIRECT 或 QUEUE 调度器，运行中不切换调度实例。请求注册时冻结所需配置，调度和资源结算继续使用该请求的快照。
 
-Runtime 统一负责停机；BalanceContext 负责单个请求结束与资源结算。submit 不持有覆盖整个方法的提交锁，也不增加通用 retain/release 计数。注册入口使用原有互斥机制与 shutdown 关闭注册入口协调；已经登记的准入操作仍由原有 admission gate 保证资源操作结束后才能关闭共享设施。
+Runtime 统一负责停机；BalanceContext 原子记录单请求事实、选择响应和终态，Scheduler 执行结束与资源结算。submit 不持有覆盖整个方法的提交锁，也不增加通用 retain/release 计数。注册入口使用原有互斥机制与 shutdown 关闭注册入口协调；已经登记的准入操作仍由原有 admission gate 保证资源操作结束后才能关闭共享设施。
 
 QUEUE 启动时配置共享 Endpoint 的 QueueExecutionSettings。排序、组批和 dispatcher 类型的运行中切换不在当前范围内。
 
@@ -254,8 +254,7 @@ NON_BATCH 路由交付不伪造 Enqueue 发送责任。RouteDeliveryStrategy 未
 | PrefillEndpoint | offerPinned 显式接收已验证队列执行配置；精确事实直接回到 route.ctx.owner | 从首个请求读取完整 config 来决定共享队列规则 |
 | DecodeEndpoint | 保留原子账本；仅为只有预留身份的事实查询 Repository，再把精确事实送回 owner 复核 | 查到同 ID 就假设属于当前请求 |
 | WorkerBatcher | 保留队列、组批、容量等待和交付；控制事件指向精确 route / 原 owner | 注册新请求，决定最终响应或复制全局调度流程 |
-| EvictionManager | 接管 replaceQueuedDecodeReservations 批量事务；通过 victim 原 owner 的 tryWithdrawQueuedRoute / completeWithdrawal 操作单请求 | 让一个全局请求服务代为组织多个 victim 的事务 |
-| DecodePreemptionCoordinator | 保留多 victim Engine 抢占事务和终态等待；普通无 fetch 取消不经过它 | 把 ACCEPTED 当作空闲资源；让普通取消依赖抢占开关 |
+| DecodeCapacityAcquirer | 统一组织选定 Decode generation 的本地替换和多 victim Engine 抢占；通过 victim 原 owner 操作单请求，最终预留交回原路由提交 | 自行改变请求状态；把 ACK 当作释放证明；让普通取消依赖抢占开关 |
 | ExpirationTimer | 保留精确 deadline 注册；回调精确 Context 的原 owner；共享关闭由 Runtime 管理 | 自行裁决超时结果、按当前配置找新调度器 |
 | RequestContinuationExecutor | 维持单请求串行与跨请求并行，责任关联原 owner | 改变请求状态规则；通过迟到回调重开已结束实例 |
 | RequestCompletionPublisher | 仅发布 Context 已选定的结果，负责发布任务排空 | 自行选择响应、判断取消是否获胜、隐式负责请求归档 |
@@ -328,7 +327,7 @@ Prefill 事实携带 RequestRoute 时直接路由回原 owner；Decode 等只有
 | Cancel 超时→ACK/清理事实迟到 | 幂等合并、受控重试，迟到 ACK 不恢复消费 | 放弃不可逆；只认当前精确尝试 |
 | 成功响应已发送→暂未观察 fetch | 不误判已永久放弃 | API 写成功不等于 fetch 已发生，缺失观测不等于终止事实 |
 | batch 内部分请求放弃 | 仅取消对应成员，其他成员正常 | 请求取消不等于取消整批 RPC |
-| 多 victim 撤回→后一个冲突 | 释放前面许可，未提交的原资源继续可用 | EvictionManager 统一提交 |
+| 多 victim 撤回→后一个冲突 | 释放前面许可，未提交的原资源继续可用 | DecodeCapacityAcquirer 统一提交 |
 | 资源转移已提交→victim 取消 | 不重新入队，不恢复旧预留 | 提交前回滚与提交后补偿分开 |
 | QUEUE 停收→DIRECT 接管新请求→旧 victim 重入队 | 回原 QUEUE，原身份/顺序/截止时间不变 | 新接管与内部推进分开 |
 | 同一 Worker 地址重启→旧回调 | 不影响新 Worker 资源 | 识别 Worker 实例，不能只按地址 |
@@ -343,7 +342,7 @@ Prefill 事实携带 RequestRoute 时直接路由回原 owner；Decode 等只有
 | Lifecycle 的 activeRequests / terminalRecords / registrationLock、查找和归档 | RequestRepository |
 | settleAdmissionLocked、decideInactivityLocked、processRequestEndLocked 中的单请求规则 | BalanceContext 的领域入口；执行动作仍锁外 |
 | register / cancel / claimAdmission / claimDelivery 的公共流程及最终结算 | AbstractRequestScheduler；模式队列动作落子类 |
-| replaceQueuedDecodeReservations 的多 victim 事务 | EvictionManager；单 victim 的完成操作通过其原 Scheduler |
+| replaceQueuedDecodeReservations 的多 victim 事务 | DecodeCapacityAcquirer；单 victim 的完成操作通过其原 Scheduler |
 | createRequestRoute 工厂 | RequestRoute |
 | DeliveryClaim 的一次回调协议 | 扩展为本次交付责任；发送状态和取消尝试集中于此 |
 | Lifecycle 里的 Timer、续接、发布设施装配和最终关闭 | SchedulerRuntime/现有配置装配；各 Scheduler 借用，不能关闭共享实例 |
@@ -378,3 +377,22 @@ Prefill 事实携带 RequestRoute 时直接路由回原 owner；Decode 等只有
 - C++ 协议、Prefill 无 fetch 清理、Decode 未入队资源释放及对应 UT 已修改，但当前 macOS 环境没有 Bazel/CUDA 构建环境，未执行 C++ UT 或真实 Java↔C++ 跨进程验收。Java Mock Engine 结果不代替这部分验证。
 
 复现 Java 全量回归：`./rtp_llm/flexlb/mvnw -q -f rtp_llm/flexlb/pom.xml test`。
+
+## 12. 抢占与 State 的职责收敛（2026-10-08）
+
+| 对象 | 持有的事实 / 执行职责 | 边界 |
+| --- | --- | --- |
+| BalanceContext.PreemptionRegistration | 精确 attempt、Cancel 阶段、暂存终态、暂存投递确认 | 嵌套于 Context；业务字段的写方法私有，且要求持有原 Context 锁 |
+| BalanceContext | 原子推进上述请求事实、响应选择和终态选择 | 不调用 Endpoint，不构造 Scheduler 执行任务；返回既有 TerminalAction |
+| AbstractRequestScheduler | 接收精确事件、操作资源账本、使用现有结束/清理/发布流程 | Endpoint 结算后由 Context 一次应用请求侧变更；容量通知、清理和 resolution 回调保持锁外 |
+| DecodeCapacityAcquirer | 选定 generation 的本地替换或 Engine Cancel 多 victim 事务 | 原 Manager 与 Coordinator 已删除；保留独立 ACK/完成窗口和迟到事实观察器 |
+| QueuedRequestScheduler | 普通预留、本地替换和远端结果共用 commit / submitRoute | 删除 finishPreemption 独立提交入口；迟到预留仍按精确能力回滚 |
+| EvictionPlanner | Prefill 候选优先级过滤与排序、Decode 受害者选择 | 纯计算；不决定请求响应、不改账本、不增加锁 |
+| PrefillState | 队列身份、席位和资源事实，锁内复验及原子替换 | 向 Planner 提供未提交候选；保留无分配的 advisory 判断和等待协议 |
+| DecodeState | 实际预留、历史结算、抢占资源 claim、发送额度及增量视图 | 各事实生命周期不同，不能因请求侧 resolution 已完成而一并释放 |
+
+`VictimResolution.Outcome.REQUEST_END` 表示请求已选定结束；`DELIVERY_RESUMED` 表示投递已恢复。两者都结束请求侧抢占参与，但都不证明 Decode 已释放。资源是否足够仍由 Decode 的精确账本事务判断。原通知时点保留；前端响应选择、Cancel ACK、资源终态和请求归档继续分别表达。
+
+此次调整保持既有锁顺序。预留、释放、回队列、响应竞争、终态先于 ACK、NOT_FOUND、清理期间新事实和迟到回调沿原事件序列验证。没有新增事件总线、动作解释器、流程转发服务或通用 Coordinator。验证数字与远端性能见 `evidence/capacity-convergence-2026-10-08.json`。
+
+远端 Java 回归执行 2158 项，0 失败、0 错误、1 项原有跳过。750P/750D、64g 堆、BATCH/NON_BATCH、3000/10000 QPS 的倒序对照复测均通过，最新客户端 P99 最大 41.078ms。首轮最新版本的吞吐及选路停顿超限仍保留在证据中；后续 JFR 与相同源码复测未复现该选路停顿，其根因尚未确认。

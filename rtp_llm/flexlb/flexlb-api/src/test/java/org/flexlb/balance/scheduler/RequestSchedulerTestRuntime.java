@@ -3,11 +3,11 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
@@ -90,8 +90,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         this.runtime = new SchedulerRuntime(requests, registry, batchReporter, requestReporter,
                 org.mockito.Mockito.mock(DefaultBatchDispatcher.class), configService,
                 new org.flexlb.service.RecentCacheKeyTraceReporter(), cancelChannel);
-        var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, requests, runtime);
-        var eviction = new EvictionManager(requestReporter, cancelChannel, preemption, requests);
+        var eviction = new DecodeCapacityAcquirer(cancelChannel, requests, runtime, requestReporter);
         runtime.initializeScheduler(PlacementConfiguration.create(runtime, configService.loadBalanceConfig(),
                 router, batchReporter, eviction, placementAvailability));
         this.scheduler = runtime.scheduler();

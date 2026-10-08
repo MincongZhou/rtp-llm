@@ -1,8 +1,9 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.eviction.EvictionPlanner;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -694,7 +695,8 @@ public final class PrefillState {
                 return false;
             }
             for (RequestRoute item : activeIndex) {
-                if (isQueuedPreemptionCandidate(item, priority) && --required == 0L) { return true; }
+                if (EvictionPlanner.isLowerPriority(priority, item.priority())
+                        && isUncommittedQueuedRequest(item) && --required == 0L) { return true; }
             }
             return false;
         } finally {
@@ -711,19 +713,15 @@ public final class PrefillState {
         }
         List<RequestRoute> candidates = new ArrayList<>();
         for (RequestRoute item : activeIndex) {
-            if (isQueuedPreemptionCandidate(item, priority)) { candidates.add(item); }
+            if (isUncommittedQueuedRequest(item)) { candidates.add(item); }
         }
-        if (candidates.size() < required) { return List.of(); }
-        candidates.sort(Comparator.comparingInt(RequestRoute::priority)
-                .thenComparing(Comparator.comparingLong(RequestRoute::enqueueSeq).reversed()));
-        return candidates.subList(0, (int) required);
+        return EvictionPlanner.selectPrefillVictims(candidates, priority, required);
     }
 
-    private boolean isQueuedPreemptionCandidate(RequestRoute item, int priority) {
+    private boolean isUncommittedQueuedRequest(RequestRoute item) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
-        return PriorityNormalizer.hasPriority(item.priority()) && item.priority() < priority
-                && entry != null && entry.activeIdentity(item)
+        return entry != null && entry.activeIdentity(item)
                 && entry.queueMembership == QueueMembership.WAITING && entry.reservation == null;
     }
 

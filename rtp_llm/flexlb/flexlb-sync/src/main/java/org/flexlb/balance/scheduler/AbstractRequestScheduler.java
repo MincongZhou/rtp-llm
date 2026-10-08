@@ -1,10 +1,10 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
@@ -17,6 +17,7 @@ import org.flexlb.balance.scheduler.BalanceContext.CleanupPass;
 import org.flexlb.balance.scheduler.BalanceContext.DeliveryClaim;
 import org.flexlb.balance.scheduler.BalanceContext.DeliveryPublication;
 import org.flexlb.balance.scheduler.BalanceContext.PendingPrefillRetirement;
+import org.flexlb.balance.scheduler.BalanceContext.PreemptionRegistration;
 import org.flexlb.balance.scheduler.BalanceContext.PublicationKind;
 import org.flexlb.balance.scheduler.BalanceContext.PublicationPermit;
 import org.flexlb.balance.scheduler.BalanceContext.RequestFuture;
@@ -834,7 +835,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     yield null;
                 }
                 capacityRelease = decode;
-                claim.tryFinish();
                 yield finalizePreemptedRequestLocked(ctx, claim, "priority victim canceled by worker", true);
             }
         };
@@ -981,10 +981,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             return finalizationEffects(ctx.decideRequestEndLocked(event, () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), null);
         }
         if (event.endpointAlreadyRetired()) {
-            ctx.retainPreemptionTerminalLocked(exact, event);
-            exact.tryFinish();
-            ctx.detachPreemptionOwnerLocked(exact);
-            return finalizationEffects(ctx.decideRequestEndLocked(event, () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), exact);
+            return finalizationEffects(ctx.applyPreemptionReconciliationLocked(exact, event, false,
+                    () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL)), exact);
         }
         if (exact.isFinished()) {
             return null;
@@ -1028,39 +1026,22 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     private Runnable advanceAfterDecodeReconciliationLocked(BalanceContext ctx, PreemptionRegistration claim,
             DeferredTerminal terminal, PreemptionRegistration signal, boolean decodeSettled) {
-        if (terminal != null) { claim.tryFinish(); }
-        if (ctx.hasCleanup()) {
-            if (terminal != null) {
-                // Retain the finished claim until finalization publishes its request resolution.
-                ctx.recordCleanupSettlement(false, true, false);
-            } else {
-                ctx.detachPreemptionOwnerLocked(claim);
-            }
-            return () -> resumeCleanup(ctx);
-        }
-        ctx.detachPreemptionOwnerLocked(claim);
+        boolean cleaning = ctx.hasCleanup();
+        TerminalAction action = ctx.applyPreemptionReconciliationLocked(claim, terminal, decodeSettled,
+                () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
+        if (cleaning) { return () -> resumeCleanup(ctx); }
         if (terminal == null) {
             return claim.hasPendingDeliveryConfirmation() ? acknowledgeDeliveryLocked(ctx, signal) : null;
         }
-        TerminalAction action = ctx.decideRequestEndLocked(terminal,
-                () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
-        if (action != null && decodeSettled) { ctx.recordCleanupSettlement(false, true, false); }
         return finalizationEffects(action, signal);
     }
 
     Runnable finalizePreemptedRequestLocked(BalanceContext ctx, PreemptionRegistration exact,
-                                                  String detail, boolean prefillSettled) {
-        if (ctx.hasCleanup()) {
-            ctx.recordCleanupSettlement(prefillSettled, true, false);
-            return () -> resumeCleanup(ctx);
-        }
-        DeferredTerminal terminal = DeferredTerminal.priority(detail);
-        ctx.retainPreemptionTerminalLocked(exact, terminal);
-        ctx.detachPreemptionOwnerLocked(exact);
-        TerminalAction action = ctx.decideRequestEndLocked(terminal,
+                                            String detail, boolean prefillSettled) {
+        boolean cleaning = ctx.hasCleanup();
+        TerminalAction action = ctx.claimPreemptedRequestEndLocked(exact, detail, prefillSettled,
                 () -> requirePublicationPermitLocked(ctx, PublicationKind.TERMINAL));
-        if (action != null) { ctx.recordCleanupSettlement(prefillSettled, true, false); }
-        return finalizationEffects(action, exact);
+        return cleaning ? () -> resumeCleanup(ctx) : finalizationEffects(action, exact);
     }
 
     Runnable acknowledgeDeliveryLocked(BalanceContext ctx, PreemptionRegistration signal) {
@@ -1077,7 +1058,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (blocked.isFinished()) {
                 return null;
             }
-            blocked.recordDeliveryConfirmation();
             return reconcilePreemptionLocked(ctx, blocked, false, null);
         }
         if (ctx.deliveryAcknowledged()) {
@@ -1297,7 +1277,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         Runnable work;
         synchronized (ctx) {
             if (!isCurrentContext(ctx) || !ctx.ownsResourceTrackingLocked() || ctx.preemption() != claim
-                    || !claim.canCompletePreemption() || !claim.tryFinish()) { return false; }
+                    || !claim.canCompletePreemption()) { return false; }
             work = finalizePreemptedRequestLocked(ctx, claim, detail, false);
         }
         execute(ctx, work);
@@ -1336,7 +1316,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         context.requireCleanupOwner(action);
         Throwable cleanupFailure = null;
         cleanupFailure = Failures.run(cleanupFailure, () -> action.terminalResources().release());
-        cleanupFailure = Failures.run(cleanupFailure, action.preemption() == null ? null : () -> action.preemption().signalResolution(new VictimResolution(context.getRequestId())));
+        cleanupFailure = Failures.run(cleanupFailure, action.preemption() == null ? null : () -> action.preemption().signalResolution(new VictimResolution(context.getRequestId(), VictimResolution.Outcome.REQUEST_END)));
         if (cleanupFailure != null) { recordFailure(cleanupFailure); }
         DeliveryClaim delivery = context.delivery();
         boolean successfulWorker = action.event() != null && action.event().kind() == DeferredTerminal.Kind.WORKER
@@ -1375,7 +1355,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return () -> {
             Throwable failure = Failures.run(null, () -> executeFinalization(action));
             failure = Failures.run(failure, signal == null ? null
-                    : () -> signal.signalResolution(new VictimResolution(action.requestContext().getRequestId())));
+                    : () -> signal.signalResolution(new VictimResolution(action.requestContext().getRequestId(), VictimResolution.Outcome.REQUEST_END)));
             Failures.rethrow(failure, "request cleanup failed");
         };
     }
@@ -1384,7 +1364,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return () -> {
             Throwable failure = Failures.run(null, () -> submitDeliveryResponse(delivery));
             failure = Failures.run(failure, signal == null ? null
-                    : () -> signal.signalResolution(new VictimResolution(ctx.getRequestId())));
+                    : () -> signal.signalResolution(new VictimResolution(ctx.getRequestId(), VictimResolution.Outcome.DELIVERY_RESUMED)));
             Failures.rethrow(failure, "request cleanup failed");
         };
     }

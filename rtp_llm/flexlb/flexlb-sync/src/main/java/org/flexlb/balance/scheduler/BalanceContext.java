@@ -2,10 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
-import io.opentelemetry.context.Context;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.ToString;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
@@ -13,6 +9,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
+import org.flexlb.balance.preemption.VictimResolution;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ExpirationTimer.DecisionDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
@@ -31,6 +28,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -43,6 +41,11 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 import static org.flexlb.dao.loadbalance.Response.buildSuccessResponse;
+
+import io.opentelemetry.context.Context;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
 
 /**
  * 单个请求的运行状态：输入快照、路由与投递所有权、前端结果、取消及资源清理进度。
@@ -398,6 +401,121 @@ public class BalanceContext {
     /** 当前抢占操作的身份及待处理证据；不能与 admission 同时持有。 */
     private PreemptionRegistration preemption;
     private static final long DECODE_HANDOFF_GRACE_MS = 10_000L;
+
+    /**
+     * Exact ownership token for one priority-preemption attempt.
+     *
+     * <p>This class records the attempt-local cancel protocol. BalanceContext decides
+     * which request transitions are legal; its scheduler executes the resulting effects.
+     * Cancel acknowledgement, request resolution and Decode release proof remain separate facts.</p>
+     */
+    public static final class PreemptionRegistration {
+        final BalanceContext owner;
+        private final long attemptToken;
+        private final String detail;
+        private final CancelTarget cancelTarget;
+        private final CompletableFuture<VictimResolution> resolution =
+                new CompletableFuture<>();
+
+        private PreemptionCancelPhase phase = PreemptionCancelPhase.CLAIMED;
+        private boolean finished;
+        private boolean cancelAcknowledged;
+        private DeferredTerminal pendingTerminal;
+        private boolean pendingDeliveryConfirmation;
+
+        PreemptionRegistration(
+                BalanceContext owner,
+                long attemptToken,
+                String detail,
+                CancelTarget cancelTarget) {
+            this.owner = Objects.requireNonNull(owner, "owner");
+            this.attemptToken = attemptToken;
+            this.detail = detail == null ? "priority preemption" : detail;
+            this.cancelTarget = Objects.requireNonNull(cancelTarget, "cancelTarget");
+        }
+
+        public AbstractRequestScheduler scheduler() { return owner.scheduler(); }
+
+        public CancelTarget cancelTarget() { return cancelTarget; }
+
+        public long requestId() {
+            return owner.getRequestId();
+        }
+
+        public long attemptToken() {
+            return attemptToken;
+        }
+
+        public CompletionStage<VictimResolution> requestResolution() {
+            return resolution;
+        }
+
+        boolean signalResolution(VictimResolution exactResolution) {
+            return resolution.complete(exactResolution);
+        }
+
+        String detail() {
+            return detail;
+        }
+
+        DeferredTerminal pendingTerminal() {
+            return pendingTerminal;
+        }
+
+        boolean hasPendingDeliveryConfirmation() {
+            return pendingDeliveryConfirmation;
+        }
+
+        private boolean advanceTo(PreemptionCancelPhase next) {
+            owner.requireContextLock("preemption phase change");
+            if (finished || !phase.canTransitionTo(next)) {
+                return false;
+            }
+            phase = next;
+            cancelAcknowledged |= next == PreemptionCancelPhase.CANCEL_REQUESTED;
+            return true;
+        }
+
+        /** Record protocol completion once; its scheduler still owns resource cleanup and resolution notification. */
+        private boolean tryFinish() {
+            owner.requireContextLock("preemption completion");
+            if (finished) {
+                return false;
+            }
+            finished = true;
+            return true;
+        }
+
+        boolean isReleasable() {
+            return !finished && phase.isLocallyReleasable();
+        }
+
+        boolean isCancelRequested() { return cancelAcknowledged; }
+
+        boolean isNotFound() {
+            return !finished && phase == PreemptionCancelPhase.NOT_FOUND_STALE;
+        }
+
+        boolean isUnknown() {
+            return !finished && phase == PreemptionCancelPhase.CANCEL_UNKNOWN;
+        }
+
+        boolean isFinished() {
+            return finished;
+        }
+
+        boolean canAcceptPriorityTerminal() { return !finished && phase.acceptsPriorityTerminal(); }
+
+        boolean canCompletePreemption() {
+            return !finished && phase.acceptsRequestFenced();
+        }
+
+        private void storeTerminal(DeferredTerminal selected) {
+            owner.requireContextLock("preemption terminal retention");
+            pendingTerminal = selected;
+        }
+
+    }
 
     RequestFuture future() {
         return (RequestFuture) this.future;
@@ -802,6 +920,46 @@ public class BalanceContext {
             this.preemption = null;
             this.assertInvariantLocked();
         }
+    }
+
+    /** Apply an exact Decode reconciliation to request participation and its selected end atomically. */
+    TerminalAction applyPreemptionReconciliationLocked(PreemptionRegistration exact, DeferredTerminal terminal,
+            boolean decodeSettled, Supplier<PublicationPermit> publication) {
+        requireContextLock("preemption resource reconciliation");
+        checkArgument(exact.owner == this, "preemption belongs to another request");
+        if (terminal != null) {
+            retainPreemptionTerminalLocked(exact, terminal);
+            exact.tryFinish();
+        }
+        if (cleanup != null) {
+            if (terminal != null) { recordCleanupSettlement(false, true, false); }
+            else { detachPreemptionOwnerLocked(exact); }
+            return null;
+        }
+        detachPreemptionOwnerLocked(exact);
+        if (terminal == null) { return null; }
+        TerminalAction action = decideRequestEndLocked(terminal, publication);
+        if (action != null && decodeSettled) { recordCleanupSettlement(false, true, false); }
+        return action;
+    }
+
+    /** Record proved priority cancellation and claim the existing request-finalization protocol. */
+    TerminalAction claimPreemptedRequestEndLocked(PreemptionRegistration exact, String detail,
+            boolean prefillSettled, Supplier<PublicationPermit> publication) {
+        requireContextLock("priority cancellation settlement");
+        checkState(preemption == exact && ownsResourceTrackingLocked() && !exact.isFinished(),
+                "priority cancellation must own the current unfinished claim");
+        exact.tryFinish();
+        if (cleanup != null) {
+            recordCleanupSettlement(prefillSettled, true, false);
+            return null;
+        }
+        DeferredTerminal terminal = DeferredTerminal.priority(detail);
+        retainPreemptionTerminalLocked(exact, terminal);
+        detachPreemptionOwnerLocked(exact);
+        TerminalAction action = decideRequestEndLocked(terminal, publication);
+        if (action != null) { recordCleanupSettlement(prefillSettled, true, false); }
+        return action;
     }
 
     void requireCleanupOwner(TerminalAction action) {
@@ -1539,6 +1697,9 @@ public class BalanceContext {
     void confirmDelivery() {
         requireContextLock("delivery confirmation");
         if (stage == RequestStage.DELIVERING) { advanceStageLocked(RequestStage.RESULT_PENDING); }
+        if (cancellationReason == null && preemption != null && !preemption.isFinished()) {
+            preemption.pendingDeliveryConfirmation = true;
+        }
     }
 
     /** 锁内记录 ACK 并移交调度定时器；返回的发布任务和定时器取消由调用方执行。 */
@@ -1939,6 +2100,6 @@ record DeferredTerminal(Kind kind, StrategyErrorType errorType, String detail, W
  * 一次终态执行任务：领取时存入 context.terminalAction 防止重复领取，随后交给 Scheduler。
  * 包含精确路由、定时器和可选发布许可；不是可重新计算或任意重试的普通结果对象。
  */
-record TerminalAction(BalanceContext requestContext, RequestRoute item, PreemptionRegistration preemption, ExpirationTimer.DetachedDeadlines terminalResources, DeferredTerminal event, Response response, BalanceContext.PublicationPermit publication) {
+record TerminalAction(BalanceContext requestContext, RequestRoute item, BalanceContext.PreemptionRegistration preemption, ExpirationTimer.DetachedDeadlines terminalResources, DeferredTerminal event, Response response, BalanceContext.PublicationPermit publication) {
 
 }

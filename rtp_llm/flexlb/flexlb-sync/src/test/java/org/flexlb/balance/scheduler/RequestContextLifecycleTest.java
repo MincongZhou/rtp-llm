@@ -1,11 +1,12 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BalanceContext.AdmissionHandle;
 import org.flexlb.balance.scheduler.BalanceContext.DeliveryClaim;
+import org.flexlb.balance.scheduler.BalanceContext.PreemptionRegistration;
 import org.flexlb.balance.scheduler.BalanceContext.RequestStage;
 import org.flexlb.balance.scheduler.RequestProtocolTestSupport.Registered;
 import org.flexlb.config.ConfigService;

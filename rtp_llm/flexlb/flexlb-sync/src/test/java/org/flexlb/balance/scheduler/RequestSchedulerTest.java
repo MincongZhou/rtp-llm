@@ -1,12 +1,12 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodePreemptionCoordinator.PreemptionResult;
-import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.scheduler.BalanceContext.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -75,7 +75,7 @@ class RequestSchedulerTest {
             assertTrue(context.getFuture().cancel(false));
             throw new IllegalStateException("policy group unavailable");
         });
-        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, service, router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), new PlacementAvailability());
+        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, service, router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), new PlacementAvailability());
         try {
             CompletableFuture<Response> future = scheduler.submit(context);
             assertTrue(future.isCancelled());
@@ -106,7 +106,7 @@ class RequestSchedulerTest {
             assertTrue(future.cancel(false));
             return future;
         }).when(lifecycle).register(org.mockito.ArgumentMatchers.eq(context), any());
-        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, service, router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), new PlacementAvailability());
+        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, service, router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), new PlacementAvailability());
         try {
             CompletableFuture<Response> future = scheduler.submit(context);
             assertTrue(future.isCancelled());
@@ -144,7 +144,7 @@ class RequestSchedulerTest {
             }
             return invocation.callRealMethod();
         }).when(lifecycle).onGlobalControl(anyLong(), any());
-        QueuedRequestScheduler coordinator = RequestProtocolTestSupport.queue(service, mockRouter(), mock(BatchSchedulerReporter.class), mock(EvictionManager.class), lifecycle, new PlacementAvailability());
+        QueuedRequestScheduler coordinator = RequestProtocolTestSupport.queue(service, mockRouter(), mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), lifecycle, new PlacementAvailability());
         try {
             BalanceContext gate = context(config, 990006L);
             CompletableFuture<Response> gateFuture = RequestProtocolTestSupport.register(lifecycle, gate);
@@ -203,7 +203,7 @@ class RequestSchedulerTest {
             closeSettled.countDown();
             return result;
         }).when(lifecycle).settleGlobalQueueClose(org.mockito.ArgumentMatchers.eq(990005L), any());
-        QueuedRequestScheduler coordinator = RequestProtocolTestSupport.queue(service, router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), lifecycle, new PlacementAvailability());
+        QueuedRequestScheduler coordinator = RequestProtocolTestSupport.queue(service, router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), lifecycle, new PlacementAvailability());
         Thread closer = null;
         Thread secondCloser = null;
         try {
@@ -278,7 +278,7 @@ class RequestSchedulerTest {
             }
             return invocation.callRealMethod();
         }).when(lifecycle).settleGlobalQueueClose(anyLong(), any());
-        QueuedRequestScheduler coordinator = RequestProtocolTestSupport.queue(service, mockRouter(), mock(BatchSchedulerReporter.class), mock(EvictionManager.class), lifecycle, new PlacementAvailability());
+        QueuedRequestScheduler coordinator = RequestProtocolTestSupport.queue(service, mockRouter(), mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), lifecycle, new PlacementAvailability());
         Thread closer = null;
         try {
             BalanceContext gate = context(config, 990003L);
@@ -328,7 +328,7 @@ class RequestSchedulerTest {
         DefaultRouter router = mockRouter();
         AbstractRequestScheduler lifecycle = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, mock(BatchSchedulerReporter.class), mock(RequestSchedulerReporter.class),
                 mock(RecentCacheKeyTraceReporter.class));
-        QueuedRequestScheduler coordinator = RequestProtocolTestSupport.queue(service, router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), lifecycle, new PlacementAvailability());
+        QueuedRequestScheduler coordinator = RequestProtocolTestSupport.queue(service, router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), lifecycle, new PlacementAvailability());
         BalanceContext context = context(config, 990002L);
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context);
         try {
@@ -381,7 +381,7 @@ class RequestSchedulerTest {
             planClosed.countDown();
             return null;
         }).when(route).close();
-        QueuedRequestScheduler coordinator = RequestProtocolTestSupport.queue(service, router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), lifecycle, new PlacementAvailability());
+        QueuedRequestScheduler coordinator = RequestProtocolTestSupport.queue(service, router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), lifecycle, new PlacementAvailability());
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context);
         try {
             assertTrue(coordinator.trySubmitRegistered(context));
@@ -452,7 +452,7 @@ class RequestSchedulerTest {
         ProvisionalRoute healthyRoute = mock(ProvisionalRoute.class);
         when(router.select(healthy, healthyGroup)).thenReturn(PlacementResult.success(healthyRoute));
         org.mockito.Mockito.doReturn(PlacementResult.success(mock(RequestRoute.class))).when(RequestProtocolTestSupport.publication(lifecycle)).enqueueRoute(healthy, healthyRoute);
-        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, service, router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), new PlacementAvailability());
+        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, service, router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), new PlacementAvailability());
         try {
             scheduler.submit(unavailable);
             verify(router, timeout(500)).select(unavailable, "unavailable-group");
@@ -477,7 +477,7 @@ class RequestSchedulerTest {
         DefaultRouter router = mockRouter();
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        EvictionManager eviction = mock(EvictionManager.class);
+        DecodeCapacityAcquirer eviction = mock(DecodeCapacityAcquirer.class);
         PlacementAvailability availability = new PlacementAvailability();
         BalanceContext context = context(config, 897L, 90);
         CompletableFuture<Response> future = new CompletableFuture<>();
@@ -511,12 +511,12 @@ class RequestSchedulerTest {
         var result = new PreemptionResult(outcome.equals("rejected") ? null : reservation, false, "result");
         var execution = new CompletableFuture<PreemptionResult>();
         if (synchronous) { execution.complete(result); }
-        when(eviction.tryReserve(context, binding, selectedEndpoint)).thenReturn(execution);
+        when(eviction.tryReclaim(context, binding, selectedEndpoint)).thenReturn(execution);
         RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), eviction, availability);
         CompletableFuture<Void> closing = null;
         try {
             scheduler.submit(context);
-            verify(eviction, timeout(1_000)).tryReserve(context, binding, selectedEndpoint);
+            verify(eviction, timeout(1_000)).tryReclaim(context, binding, selectedEndpoint);
             if (outcome.equals("cancelled")) { assertTrue(future.cancel(false)); }
             if (outcome.startsWith("closed")) {
                 closing = CompletableFuture.runAsync(() -> RequestProtocolTestSupport.close(scheduler));
@@ -587,7 +587,7 @@ class RequestSchedulerTest {
         org.mockito.Mockito.doReturn(PlacementResult.blocked(PlacementKey.exact(RoleType.PREFILL, "g1", "127.0.0.1:8000"))).when(RequestProtocolTestSupport.publication(lifecycle)).enqueueRoute(context, route);
         when(router.select(context, null)).thenReturn(PlacementResult.success(route), PlacementResult.rejected(Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
         PlacementAvailability availability = new PlacementAvailability();
-        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), availability);
+        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), availability);
         try {
             scheduler.submit(context);
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000)).enqueueRoute(context, route);
@@ -617,7 +617,7 @@ class RequestSchedulerTest {
         when(lifecycle.register(org.mockito.ArgumentMatchers.eq(context), org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> { BalanceContext registered = invocation.getArgument(0); registered.setFuture(future); return future; });
         when(lifecycle.claimAdmissionHandle(900L, future)).thenReturn(mock(AdmissionHandle.class));
         when(router.select(context, null)).thenReturn(PlacementResult.rejected(Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
-        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), new PlacementAvailability());
+        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), new PlacementAvailability());
         scheduler.submit(context);
         verify(router, timeout(1_000)).select(context, null);
         RequestProtocolTestSupport.close(scheduler);
@@ -663,7 +663,7 @@ class RequestSchedulerTest {
             org.mockito.Mockito.doReturn(PlacementResult.success(published)).when(RequestProtocolTestSupport.publication(lifecycle)).enqueueRoute(context, route);
             contexts.add(context);
         }
-        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, reporter, mock(EvictionManager.class), availability);
+        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, reporter, mock(DecodeCapacityAcquirer.class), availability);
         try {
             scheduler.submit(gate);
             assertTrue(gatePlanningStarted.await(5, TimeUnit.SECONDS));
@@ -687,7 +687,7 @@ class RequestSchedulerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         DefaultRouter router = mockRouter();
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        EvictionManager evictionManager = mock(EvictionManager.class);
+        DecodeCapacityAcquirer decodeCapacity = mock(DecodeCapacityAcquirer.class);
         BalanceContext lowPriority = context(config, 910L, 10);
         BalanceContext highPriority = context(config, 911L, 90);
         CompletableFuture<Response> lowFuture = new CompletableFuture<>();
@@ -698,7 +698,7 @@ class RequestSchedulerTest {
         when(lifecycle.claimAdmissionHandle(911L, highFuture)).thenReturn(mock(AdmissionHandle.class));
         when(router.select(lowPriority, null)).thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.PREFILL)));
         when(router.select(highPriority, null)).thenReturn(PlacementResult.rejected(Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
-        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), evictionManager, new PlacementAvailability());
+        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), decodeCapacity, new PlacementAvailability());
         try {
             scheduler.submit(lowPriority);
             verify(router, timeout(1_000)).select(lowPriority, null);
@@ -734,7 +734,7 @@ class RequestSchedulerTest {
         when(lifecycle.claimAdmissionHandle(801L, expiredFuture)).thenReturn(mock(AdmissionHandle.class));
         when(lifecycle.claimAdmissionHandle(802L, followerFuture)).thenReturn(mock(AdmissionHandle.class));
         when(router.select(any(), any())).thenReturn(PlacementResult.blocked(blocker));
-        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), availability);
+        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), availability);
         scheduler.submit(expired);
         scheduler.submit(follower);
         // Both independent requests may plan before the capacity event. Wait for
@@ -783,7 +783,7 @@ class RequestSchedulerTest {
         when(blockedRoute.blockedEndpointIfCurrent(any(PlacementKey.class))).thenReturn(fullEndpoint);
         when(independentRoute.prefillEndpoint()).thenReturn(availableEndpoint);
         org.mockito.Mockito.doReturn(PlacementResult.success(independentItem)).when(RequestProtocolTestSupport.publication(lifecycle)).enqueueRoute(independent, independentRoute);
-        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), availability);
+        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), availability);
         try {
             scheduler.submit(blocked);
             scheduler.submit(independent);
@@ -995,7 +995,7 @@ class RequestSchedulerTest {
         org.mockito.Mockito.doReturn(PlacementResult.blocked(exactBlocker)).when(RequestProtocolTestSupport.publication(lifecycle)).enqueueRoute(context, staleRoute);
         when(staleRoute.blockedEndpointIfCurrent(exactBlocker)).thenReturn(null);
         org.mockito.Mockito.doReturn(PlacementResult.success(committed)).when(RequestProtocolTestSupport.publication(lifecycle)).enqueueRoute(context, freshRoute);
-        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), availability);
+        RequestScheduler scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), mock(DecodeCapacityAcquirer.class), availability);
         try {
             scheduler.submit(context);
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000)).enqueueRoute(context, freshRoute);
@@ -1050,8 +1050,8 @@ class RequestSchedulerTest {
 
         verify(fixture.router, timeout(1_000))
                 .select(fixture.context, null);
-        verify(fixture.evictionManager, never())
-                .tryReserve(any(), any(), any());
+        verify(fixture.decodeCapacity, never())
+                .tryReclaim(any(), any(), any());
         assertFalse(waiting.isDone());
         verify(fixture.lifecycle, never())
                 .commitRoute(
@@ -1071,8 +1071,8 @@ class RequestSchedulerTest {
         verify(fixture.router, timeout(1_000))
                 .select(fixture.context, null);
         assertFalse(waiting.isDone());
-        verify(fixture.evictionManager, never())
-                .tryReserve(any(), any(), any());
+        verify(fixture.decodeCapacity, never())
+                .tryReclaim(any(), any(), any());
         verify(fixture.lifecycle, never())
                 .commitRoute(
                         any(), any());
@@ -1252,7 +1252,7 @@ class RequestSchedulerTest {
             for (long requestId = 820L; requestId < 823L; requestId++) {
                 requests.add(createRequest(requestId, endpoint));
             }
-            scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, reporter, mock(EvictionManager.class), availability);
+            scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, reporter, mock(DecodeCapacityAcquirer.class), availability);
         }
 
         private CapacityRequest createRequest(long requestId, PrefillEndpoint target) {
@@ -1346,7 +1346,7 @@ class RequestSchedulerTest {
 
         private final DefaultRouter router = mockRouter();
 
-        private final EvictionManager evictionManager = mock(EvictionManager.class);
+        private final DecodeCapacityAcquirer decodeCapacity = mock(DecodeCapacityAcquirer.class);
 
         private final AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
 
@@ -1381,7 +1381,7 @@ class RequestSchedulerTest {
                 return true;
             });
             when(router.select(context, null)).thenReturn(PlacementResult.rejected(Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
-            scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), evictionManager, availability);
+            scheduler = RequestProtocolTestSupport.configure(lifecycle, configService, router, mock(BatchSchedulerReporter.class), decodeCapacity, availability);
         }
     }
 }

@@ -5,7 +5,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
@@ -102,7 +102,7 @@ class PdfusionSchedulingTest {
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         DefaultRouter router = new DefaultRouter(new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class), org.mockito.Mockito.mock(CacheMetricsReporter.class)), new DecodeSelector(directory), new RandomStrategy(directory), model);
-        RequestScheduler scheduler = org.flexlb.balance.scheduler.SchedulerTestSupport.configure(lifecycle, service.loadBalanceConfig(), router, reporter, mock(EvictionManager.class), availability);
+        RequestScheduler scheduler = org.flexlb.balance.scheduler.SchedulerTestSupport.configure(lifecycle, service.loadBalanceConfig(), router, reporter, mock(DecodeCapacityAcquirer.class), availability);
         SchedulerRuntime runtime = new SchedulerRuntime(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle), endpoints, reporter, requestReporter, org.mockito.Mockito.mock(DefaultBatchDispatcher.class), service, org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
         try {
             long requestId = 920001L;
